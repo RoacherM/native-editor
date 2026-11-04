@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Native Editor — Cursor Minimalist UI</title>
+  <style>
+    :root {
+      /* Cursor IDE Signature Matte Carbon Palette */
+      --bg-shell: #141414;        /* Titlebar, Sidebar, Inactive Tabs, Statusbar */
+      --bg-canvas: #191919;       /* Editor & Preview Surface, Active Tab */
+      --bg-elevated: #202020;     /* Command Center, Floating HUD, Popovers */
+      --bg-hover: rgba(255, 255, 255, 0.045);
+      --bg-selected: rgba(255, 255, 255, 0.075);
+      --bg-pill-active: #2a2a2a;
+
+      --border: #232323;
+      --border-subtle: #1e1e1e;
+      --border-popover: #2e2e2e;
+
+      --fg-primary: #e4e4e4;
+      --fg-secondary: #8b8b8e;
+      --fg-muted: #555558;
+
+      --git-m: #d1aa52;
+      --git-a: #6ebf8b;
+      --git-d: #d97373;
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+      --font-mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", "SF Mono", Menlo, monospace;
+    }
+
+    html.light {
+      --bg-shell: #f3f3f3;
+      --bg-canvas: #ffffff;
+      --bg-elevated: #ffffff;
+      --bg-hover: rgba(0, 0, 0, 0.04);
+      --bg-selected: rgba(0, 0, 0, 0.065);
+      --bg-pill-active: #e4e4e4;
+
+      --border: #e5e5e5;
+      --border-subtle: #ececec;
+      --border-popover: #d8d8d8;
+
+      --fg-primary: #1c1c1e;
+      --fg-secondary: #68686d;
+      --fg-muted: #9e9ea4;
+
+      --git-m: #a67c1e;
+      --git-a: #28804a;
+      --git-d: #c23b3b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      background: var(--bg-shell);
+      color: var(--fg-primary);
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+      height: 100vh;
+      width: 100vw;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ─── 1. Cursor-style Slim TitleBar (34px) ─── */
+    .titlebar {
+      height: 34px;
+      background: var(--bg-shell);
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 0 10px 0 14px;
+      flex-shrink: 0;
+    }
+
+    .titlebar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .traffic-lights {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-right: 6px;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .dot-r { background: #ff5f57; }
+    .dot-y { background: #febc2e; }
+    .dot-g { background: #28c840; }
+
+    /* Center Command Center Pill */
+    .command-center {
+      width: 360px;
+      max-width: 42vw;
+      height: 23px;
+      border-radius: 5px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      color: var(--fg-secondary);
+      font-size: 11.5px;
+      cursor: pointer;
+      transition: border-color 0.1s ease, color 0.1s ease;
+      position: relative;
+    }
+    .command-center:hover {
+      border-color: var(--border-popover);
+      color: var(--fg-primary);
+    }
+    .command-center .kbd-hint {
+      position: absolute;
+      right: 7px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--fg-muted);
+    }
+
+    .titlebar-right {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 2px;
+    }
+
+    .icon-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: var(--fg-secondary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.1s ease, color 0.1s ease;
+    }
+    .icon-btn:hover {
+      background: var(--bg-hover);
+      color: var(--fg-primary);
+    }
+    .icon-btn.on {
+      color: var(--fg-primary);
+    }
+
+    /* ─── 2. Main Workspace Area ─── */
+    .workspace {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* Left Explorer Sidebar (220px, Matte Shell) */
+    .sidebar {
+      width: 224px;
+      background: var(--bg-shell);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar.hidden {
+      display: none;
+    }
+
+    .sidebar-top {
+      height: 35px;
+      padding: 0 10px 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .folder-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--fg-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    .folder-trigger:hover {
+      color: var(--fg-primary);
+    }
+
+    .sidebar-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .mini-filter-pill {
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: var(--fg-muted);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .mini-filter-pill:hover {
+      color: var(--fg-secondary);
+    }
+    .mini-filter-pill.active {
+      background: var(--bg-selected);
+      color: var(--fg-primary);
+    }
+
+    .tree-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 2px 6px 10px;
+    }
+
+    .tree-row {
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--fg-secondary);
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .tree-row:hover {
+      background: var(--bg-hover);
+      color: var(--fg-primary);
+    }
+    .tree-row.selected {
+      background: var(--bg-selected);
+      color: var(--fg-primary);
+    }
+    .tree-row .name {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tree-row .git {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+    }
+    .git-M { color: var(--git-m); }
+    .git-A { color: var(--git-a); }
+    .git-D { color: var(--git-d); }
+
+    /* ─── 3. Editor / Preview Center Area ─── */
+    .editor-group {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-canvas);
+    }
+
+    /* Cursor-style Seamless Tab Bar (35px) */
+    .tabbar {
+      height: 35px;
+      background: var(--bg-shell);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      padding-right: 8px;
+      flex-shrink: 0;
+    }
+
+    .tabs {
+      display: flex;
+      align-items: stretch;
+      overflow-x: auto;
+      flex: 1;
+      min-width: 0;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+
+    .tab {
+      height: 35px;
+      padding: 0 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      color: var(--fg-secondary);
+      background: var(--bg-shell);
+      border-right: 1px solid var(--border);
+      cursor: pointer;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .tab:hover {
+      color: var(--fg-primary);
+    }
+    /* Active tab merges seamlessly into the canvas below it */
+    .tab.active {
+      background: var(--bg-canvas);
+      color: var(--fg-primary);
+      margin-bottom: -1px;
+      border-bottom: 1px solid var(--bg-canvas);
+    }
+    .tab .close {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      color: var(--fg-secondary);
+      font-size: 12px;
+    }
+    .tab:hover .close,
+    .tab.active .close {
+      opacity: 0.7;
+    }
+    .tab .close:hover {
+      opacity: 1;
+      background: var(--bg-hover);
+    }
+    .tab .dirty {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--fg-secondary);
+    }
+
+    /* Right side of TabBar: Quiet mode switcher + actions */
+    .tabbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding-left: 8px;
+    }
+
+    .mode-pills {
+      display: inline-flex;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 1px;
+    }
+    .mode-pill {
+      height: 20px;
+      padding: 0 8px;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--fg-secondary);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .mode-pill:hover {
+      color: var(--fg-primary);
+    }
+    .mode-pill.active {
+      background: var(--bg-pill-active);
+      color: var(--fg-primary);
+    }
+
+    /* Subtle Cursor Breadcrumb Row (22px, blends with canvas) */
+    .breadcrumbs {
+      height: 22px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--fg-muted);
+      background: var(--bg-canvas);
+      flex-shrink: 0;
+    }
+    .crumb-path {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    /* ─── 4. Content Canvas ─── */
+    .canvas {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* PDF Minimalist Stage */
+    .pdf-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 18px 24px 40px;
+      gap: 16px;
+      overflow-y: auto;
+    }
+    .pdf-sheet {
+      width: 660px;
+      max-width: 94%;
+      background: #fcfcfc;
+      color: #161618;
+      border-radius: 3px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.38);
+      padding: 46px 54px;
+      font-family: "Georgia", serif;
+      line-height: 1.62;
+      transition: transform 0.12s ease;
+    }
+    .pdf-sheet h1 {
+      font-family: var(--font-sans);
+      font-size: 19px;
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 8px;
+      color: #111;
+    }
+    .pdf-sheet .meta {
+      font-family: var(--font-sans);
+      font-size: 12px;
+      color: #555;
+      text-align: center;
+      margin-bottom: 22px;
+    }
+    .pdf-sheet .abstract {
+      font-size: 11.8px;
+      color: #2c2c30;
+      padding: 12px 16px;
+      background: #f4f4f6;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .pdf-sheet .cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+      font-size: 11.8px;
+      color: #222;
+      text-align: justify;
+    }
+    .pdf-sheet h3 {
+      font-family: var(--font-sans);
+      font-size: 12px;
+      margin: 10px 0 4px;
+    }
+
+    .pdf-hud {
+      position: sticky;
+      bottom: 16px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-popover);
+      color: var(--fg-secondary);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+    }
+    .pdf-hud button {
+      background: transparent;
+      border: none;
+      color: var(--fg-primary);
+      cursor: pointer;
+      padding: 0 4px;
+      font-size: 13px;
+    }
+
+    /* Markdown View */
+    .md-view {
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 24px 36px 48px;
+      line-height: 1.65;
+    }
+    .md-view h1 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .md-view h2 {
+      font-size: 15px;
+      font-weight: 600;
+      margin: 22px 0 8px;
+    }
+    .md-view p {
+      color: var(--fg-secondary);
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    .md-view pre {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: var(--bg-shell);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin: 10px 0;
+      color: var(--fg-primary);
+    }
+
+    /* Code View */
+    .code-view {
+      flex: 1;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 20px;
+      padding: 8px 0;
+    }
+    .cline {
+      display: flex;
+      padding-right: 16px;
+    }
+    .cline.active {
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .lnum {
+      width: 48px;
+      text-align: right;
+      padding-right: 16px;
+      color: var(--fg-muted);
+      flex-shrink: 0;
+    }
+    .kw { color: #c586c0; }
+    .fn { color: #dcdcaa; }
+    .str { color: #ce9178; }
+    .ty { color: #4ec9b0; }
+    .cm { color: #6a9955; }
+
+    /* Table View */
+    .clean-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .clean-table th {
+      text-align: left;
+      height: 29px;
+      padding: 0 14px;
+      background: var(--bg-shell);
+      border-bottom: 1px solid var(--border);
+      border-right: 1px solid var(--border-subtle);
+      color: var(--fg-secondary);
+      font-weight: 500;
+    }
+    .clean-table td {
+      height: 28px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--border-subtle);
+      border-right: 1px solid var(--border-subtle);
+      font-family: var(--font-mono);
+      color: var(--fg-primary);
+    }
+    .clean-table tr:hover td {
+      background: var(--bg-hover);
+    }
+
+    /* ─── 5. Bottom Terminal Panel (Cursor style) ─── */
+    .term-panel {
+      height: 195px;
+      background: var(--bg-shell);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .term-panel.hidden {
+      display: none;
+    }
+    .term-bar {
+      height: 30px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .term-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .term-bar-tab {
+      color: var(--fg-primary);
+      font-weight: 500;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--fg-primary);
+    }
+    .term-session-tag {
+      font-family: var(--font-mono);
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--fg-secondary);
+      font-size: 11px;
+    }
+    .term-output {
+      flex: 1;
+      padding: 8px 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--fg-secondary);
+      overflow-y: auto;
+    }
+    .term-input-row {
+      height: 28px;
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .term-input-row input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--fg-primary);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    /* ─── 6. Ultra-Slim StatusBar (22px) ─── */
+    .statusbar {
+      height: 22px;
+      background: var(--bg-shell);
+      border-top: 1px solid var(--border);
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--fg-secondary);
+      flex-shrink: 0;
+    }
+    .sb-side {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    /* ─── 7. Quick Open Palette (⌘P) ─── */
+    .backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: none;
+      justify-content: center;
+      padding-top: 44px;
+      z-index: 100;
+    }
+    .backdrop.open { display: flex; }
+    .palette {
+      width: 500px;
+      max-height: 320px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-popover);
+      border-radius: 8px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .palette-top {
+      height: 38px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .palette-top input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--fg-primary);
+      font-size: 12.5px;
+    }
+    .palette-items {
+      padding: 4px;
+      overflow-y: auto;
+    }
+    .p-row {
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--fg-secondary);
+      cursor: pointer;
+    }
+    .p-row:hover, .p-row.first {
+      background: var(--bg-selected);
+      color: var(--fg-primary);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 1. Slim 34px TitleBar -->
+  <header class="titlebar">
+    <div class="titlebar-left">
+      <div class="traffic-lights">
+        <span class="dot dot-r"></span>
+        <span class="dot dot-y"></span>
+        <span class="dot dot-g"></span>
+      </div>
+    </div>
+
+    <!-- Cursor Command Center -->
+    <div class="command-center" onclick="openPalette()">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:0.6">
+        <circle cx="7" cy="7" r="4.5"/><line x1="10.5" y1="10.5" x2="14" y2="14"/>
+      </svg>
+      <span id="cmd-center-title">Papers</span>
+      <span class="kbd-hint">⌘P</span>
+    </div>
+
+    <!-- Minimal Right Layout Icons -->
+    <div class="titlebar-right">
+      <button class="icon-btn on" id="btn-sb" onclick="toggleSidebar()" title="Toggle Primary Side Bar (⌘B)">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+          <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+          <line x1="6" y1="2.5" x2="6" y2="13.5"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="btn-tm" onclick="toggleTerminal()" title="Toggle Panel (⌘J)">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+          <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+          <line x1="2" y1="9.5" x2="14" y2="9.5"/>
+        </svg>
+      </button>
+      <button class="icon-btn" onclick="toggleTheme()" title="Toggle Color Theme">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+          <circle cx="8" cy="8" r="4"/>
+          <path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- 2. Workspace -->
+  <div class="workspace">
+
+    <!-- Left Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <button class="folder-trigger" onclick="switchFolder()" title="Click to Open Folder (⌘O)">
+          <span id="folder-label">PAPERS</span>
+          <span style="opacity:0.5">▾</span>
+        </button>
+        <div class="sidebar-actions">
+          <button class="mini-filter-pill active" id="f-all" onclick="setFilter('all')">All</button>
+          <button class="mini-filter-pill" id="f-chg" onclick="setFilter('changed')">Changed</button>
+        </div>
+      </div>
+      <div class="tree-list" id="tree"></div>
+    </aside>
+
+    <!-- Center Editor / Preview Area -->
+    <main class="editor-group">
+
+      <!-- Tab Bar -->
+      <div class="tabbar">
+        <div class="tabs" id="tabs"></div>
+
+        <div class="tabbar-actions">
+          <div class="mode-pills" id="mode-pills">
+            <button class="mode-pill active" id="mp-preview" onclick="setMode('preview')">Preview</button>
+            <button class="mode-pill" id="mp-source" onclick="setMode('source')">Code</button>
+            <button class="mode-pill" id="mp-diff" onclick="setMode('diff')">Diff</button>
+          </div>
+          <button class="icon-btn" title="Reveal in Finder">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+              <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5v-7z"/>
+            </svg>
+          </button>
+          <button class="icon-btn" title="Open in Default Application">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+              <path d="M6 3.5H3.5v9h9V10M9.5 2.5h4v4M13.5 2.5L7.5 8.5"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Quiet Breadcrumb Line -->
+      <div class="breadcrumbs">
+        <div class="crumb-path" id="crumb-path"></div>
+        <span id="crumb-meta"></span>
+      </div>
+
+      <!-- Main Preview / Code Canvas -->
+      <div class="canvas" id="canvas"></div>
+
+      <!-- Bottom Terminal Panel -->
+      <section class="term-panel hidden" id="term-panel">
+        <div class="term-bar">
+          <div class="term-bar-left">
+            <span class="term-bar-tab">Terminal</span>
+            <span class="term-session-tag">1: zsh</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:4px;">
+            <button class="icon-btn" title="New Terminal">+</button>
+            <button class="icon-btn" onclick="document.getElementById('term-out').innerHTML=''" title="Clear">⌫</button>
+            <button class="icon-btn" onclick="toggleTerminal()" title="Close">✕</button>
+          </div>
+        </div>
+        <div class="term-output" id="term-out">
+          <div><span style="color:var(--fg-primary)">~/Desktop/Papers</span> <span style="color:var(--fg-muted)">main*</span> ❯ ls -lh</div>
+          <div>2607.22083v2.pdf   README.md   metrics.csv   main.ts   changes.diff</div>
+        </div>
+        <div class="term-input-row">
+          <span style="color:var(--fg-muted); font-family:var(--font-mono)">❯</span>
+          <input id="term-in" placeholder="Type command and press Enter…" onkeydown="runTerm(event)" />
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- 3. Slim 22px StatusBar -->
+  <footer class="statusbar">
+    <div class="sb-side">
+      <span>⎇ main*</span>
+      <span>2 changed</span>
+    </div>
+    <div class="sb-side">
+      <span id="sb-context">PDF · Page 1 of 14</span>
+      <span>UTF-8</span>
+    </div>
+  </footer>
+
+  <!-- Quick Open (⌘P) -->
+  <div class="backdrop" id="backdrop" onclick="if(event.target===this)closePalette()">
+    <div class="palette">
+      <div class="palette-top">
+        <input id="p-input" placeholder="Search files by name (⌘P)…" oninput="renderPalette()" />
+      </div>
+      <div class="palette-items" id="p-items"></div>
+    </div>
+  </div>
+
+  <script>
+    const FILES = [
+      { id: "2607.22083v2.pdf", name: "2607.22083v2.pdf", dir: "Papers", kind: "pdf", size: "572 KB", git: "", modes: ["preview"], info: "PDF · 14 pages" },
+      { id: "README.md", name: "README.md", dir: "Papers", kind: "markdown", size: "4.2 KB", git: "M", modes: ["preview", "source", "diff"], info: "Markdown" },
+      { id: "metrics.csv", name: "metrics.csv", dir: "Papers/data", kind: "table", size: "1.8 KB", git: "A", modes: ["preview", "source"], info: "CSV · 5 rows" },
+      { id: "main.ts", name: "main.ts", dir: "Papers/src", kind: "code", size: "3.1 KB", git: "M", dirty: true, modes: ["source", "diff"], info: "Ln 5, Col 18 · TypeScript" },
+      { id: "changes.diff", name: "changes.diff", dir: "Papers", kind: "diff", size: "940 B", git: "", modes: ["preview", "source"], info: "Diff (+4 −2)" },
+      { id: "icon.svg", name: "icon.svg", dir: "Papers/assets", kind: "image", size: "620 B", git: "", modes: ["preview", "source"], info: "SVG · 512×512" }
+    ];
+
+    let state = {
+      active: "2607.22083v2.pdf",
+      tabs: ["2607.22083v2.pdf", "README.md", "metrics.csv", "main.ts"],
+      mode: { "2607.22083v2.pdf": "preview", "README.md": "preview", "metrics.csv": "preview", "main.ts": "source", "changes.diff": "preview", "icon.svg": "preview" },
+      filter: "all",
+      zoom: 100
+    };
+
+    const fileSvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" style="opacity:0.65; flex-shrink:0"><path d="M3.5 2h6l3 3v8.5a.5.5 0 0 1-.5.5h-8.5a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5z"/><polyline points="9 2 9 5.5 12.5 5.5"/></svg>`;
+
+    function render() {
+      const f = FILES.find(x => x.id === state.active) || FILES[0];
+      const m = state.mode[f.id] || f.modes[0];
+
+      // Tree
+      const visible = state.filter === "changed" ? FILES.filter(x => x.git) : FILES;
+      document.getElementById("tree").innerHTML = visible.map(x => `
+        <div class="tree-row ${x.id === state.active ? 'selected' : ''}" onclick="openFile('${x.id}')">
+          ${fileSvg}
+          <span class="name">${x.name}</span>
+          ${x.git ? `<span class="git git-${x.git}">${x.git}</span>` : ''}
+        </div>
+      `).join("");
+
+      // Tabs
+      document.getElementById("tabs").innerHTML = state.tabs.map(id => {
+        const item = FILES.find(x => x.id === id);
+        if (!item) return "";
+        return `
+          <div class="tab ${id === state.active ? 'active' : ''}" onclick="openFile('${id}')">
+            ${fileSvg}
+            <span>${item.name}</span>
+            ${item.dirty ? '<span class="dirty"></span>' : ''}
+            <span class="close" onclick="closeTab(event, '${id}')">×</span>
+          </div>
+        `;
+      }).join("");
+
+      // Mode pills (hidden for single-mode files like PDF)
+      const pills = document.getElementById("mode-pills");
+      if (f.modes.length <= 1) {
+        pills.style.display = "none";
+      } else {
+        pills.style.display = "inline-flex";
+        ["preview", "source", "diff"].forEach(k => {
+          const b = document.getElementById("mp-" + k);
+          b.style.display = f.modes.includes(k) ? "inline-block" : "none";
+          b.className = "mode-pill" + (m === k ? " active" : "");
+        });
+      }
+
+      // Breadcrumbs & Status
+      document.getElementById("crumb-path").innerHTML = `${f.dir.replace("/", "  ›  ")}  ›  <span style="color:var(--fg-secondary)">${f.name}</span>`;
+      document.getElementById("crumb-meta").textContent = f.size;
+      document.getElementById("sb-context").textContent = f.info;
+
+      // Canvas
+      const c = document.getElementById("canvas");
+      if (f.kind === "pdf") {
+        c.innerHTML = `
+          <div class="pdf-container">
+            <div class="pdf-sheet" style="transform:scale(${state.zoom/100}); transform-origin:top center;">
+              <h1>Native Shell (NSH): Minimalist Native Workspace</h1>
+              <div class="meta">Byron Wayne · arXiv:2607.22083v2</div>
+              <div class="abstract">
+                <strong>Abstract.</strong> A calm, minimalist desktop editor modeled after Cursor IDE's matte carbon aesthetic. All redundant headers and noisy borders are stripped away so documents, tables, and code take center stage.
+              </div>
+              <div class="cols">
+                <div>
+                  <h3>1. Architecture</h3>
+                  <p>By matching the active tab surface (#191919) directly with the document canvas and keeping chrome on a quiet #141414 layer, visual fatigue drops significantly.</p>
+                </div>
+                <div>
+                  <h3>2. Native PDF &amp; QuickLook</h3>
+                  <p>PDF files render with explicit page dimensions and native zooming, never collapsing into an empty black box.</p>
+                </div>
+              </div>
+            </div>
+            <div class="pdf-hud">
+              <button onclick="zoom(-10)">−</button>
+              <span>${state.zoom}%</span>
+              <button onclick="zoom(10)">+</button>
+              <span style="opacity:0.3">|</span>
+              <span>Page 1 / 14</span>
+            </div>
+          </div>
+        `;
+      } else if (m === "diff" || f.kind === "diff") {
+        c.innerHTML = `
+          <div class="code-view">
+            <div class="cline" style="color:var(--fg-muted)"><span class="lnum">@@</span><span>@@ -1,4 +1,5 @@ ${f.name}</span></div>
+            <div class="cline"><span class="lnum">1</span><span>import { mount, View } from "nsh";</span></div>
+            <div class="cline" style="background:rgba(217,115,115,0.12); color:#e89b9b"><span class="lnum">2</span><span>- const theme = "noisy-triple-header";</span></div>
+            <div class="cline" style="background:rgba(110,191,139,0.12); color:#9cd9b1"><span class="lnum">2</span><span>+ const theme = "cursor-matte-minimal";</span></div>
+            <div class="cline"><span class="lnum">3</span><span>export default App;</span></div>
+          </div>
+        `;
+      } else if (f.kind === "markdown" && m === "preview") {
+        c.innerHTML = `
+          <div class="md-view">
+            <h1>Native Editor</h1>
+            <p>Minimalist multi-format file previewer with Cursor IDE's calm carbon palette.</p>
+            <h2>Key Principles</h2>
+            <p>1. Matte neutral surfaces (<code>#141414</code> shell + <code>#191919</code> canvas) with monochrome icons.</p>
+            <p>2. Active tabs merge seamlessly into the document surface with a subtle breadcrumb trail.</p>
+            <pre>nsh run --target macos</pre>
+          </div>
+        `;
+      } else if (f.kind === "table" && m === "preview") {
+        c.innerHTML = `
+          <table class="clean-table">
+            <thead><tr><th style="width:44px">#</th><th>service</th><th>region</th><th>latency_ms</th><th>status</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>api-gateway</td><td>us-west</td><td>8.4</td><td style="color:var(--git-a)">healthy</td></tr>
+              <tr><td>2</td><td>auth-worker</td><td>us-west</td><td>11.2</td><td style="color:var(--git-a)">healthy</td></tr>
+              <tr><td>3</td><td>pdf-engine</td><td>eu-central</td><td>19.7</td><td style="color:var(--git-a)">healthy</td></tr>
+              <tr><td>4</td><td>search-index</td><td>ap-east</td><td>42.5</td><td style="color:var(--git-m)">degraded</td></tr>
+            </tbody>
+          </table>
+        `;
+      } else if (f.kind === "image" && m === "preview") {
+        c.innerHTML = `
+          <div style="flex:1; display:flex; align-items:center; justify-content:center;">
+            <svg width="120" height="120" viewBox="0 0 120 120">
+              <rect x="12" y="12" width="96" height="96" rx="22" fill="#242424" stroke="#383838" stroke-width="1.5"/>
+              <path d="M40 62 L54 76 L82 44" fill="none" stroke="#e4e4e4" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+        `;
+      } else {
+        c.innerHTML = `
+          <div class="code-view">
+            <div class="cline"><span class="lnum">1</span><span><span class="cm">// ${f.name}</span></span></div>
+            <div class="cline"><span class="lnum">2</span><span><span class="kw">import</span> { <span class="fn">mount</span>, <span class="fn">signal</span>, <span class="ty">View</span> } <span class="kw">from</span> <span class="str">"nsh"</span>;</span></div>
+            <div class="cline"><span class="lnum">3</span><span></span></div>
+            <div class="cline active"><span class="lnum">4</span><span><span class="kw">export function</span> <span class="fn">App</span>() {</span></div>
+            <div class="cline"><span class="lnum">5</span><span>  <span class="kw">return</span> &lt;<span class="ty">View</span> class=<span class="str">"flex-1 bg-[#191919]"</span> /&gt;;</span></div>
+            <div class="cline"><span class="lnum">6</span><span>}</span></div>
+          </div>
+        `;
+      }
+    }
+
+    function openFile(id) {
+      state.active = id;
+      if (!state.tabs.includes(id)) state.tabs.push(id);
+      render();
+    }
+    function closeTab(e, id) {
+      e.stopPropagation();
+      state.tabs = state.tabs.filter(x => x !== id);
+      if (state.active === id) state.active = state.tabs[state.tabs.length - 1] || FILES[0].id;
+      render();
+    }
+    function setMode(m) { state.mode[state.active] = m; render(); }
+    function setFilter(f) {
+      state.filter = f;
+      document.getElementById("f-all").className = "mini-filter-pill" + (f === "all" ? " active" : "");
+      document.getElementById("f-chg").className = "mini-filter-pill" + (f === "changed" ? " active" : "");
+      render();
+    }
+    function zoom(d) { state.zoom = Math.min(150, Math.max(70, state.zoom + d)); render(); }
+    function toggleSidebar() {
+      document.getElementById("sidebar").classList.toggle("hidden");
+      document.getElementById("btn-sb").classList.toggle("on");
+    }
+    function toggleTerminal() {
+      const p = document.getElementById("term-panel");
+      p.classList.toggle("hidden");
+      document.getElementById("btn-tm").classList.toggle("on");
+      if (!p.classList.contains("hidden")) document.getElementById("term-in").focus();
+    }
+    function toggleTheme() { document.documentElement.classList.toggle("light"); }
+    function switchFolder() {
+      const l = document.getElementById("folder-label");
+      const next = l.textContent === "PAPERS" ? "NATIVE-EDITOR" : "PAPERS";
+      l.textContent = next;
+      document.getElementById("cmd-center-title").textContent = next === "PAPERS" ? "Papers" : "native-editor";
+    }
+    function openPalette() {
+      document.getElementById("backdrop").classList.add("open");
+      const i = document.getElementById("p-input");
+      i.value = "";
+      renderPalette();
+      i.focus();
+    }
+    function closePalette() { document.getElementById("backdrop").classList.remove("open"); }
+    function renderPalette() {
+      const q = document.getElementById("p-input").value.toLowerCase();
+      const list = FILES.filter(x => x.name.toLowerCase().includes(q));
+      document.getElementById("p-items").innerHTML = list.map((x, idx) => `
+        <div class="p-row ${idx === 0 ? 'first' : ''}" onclick="openFile('${x.id}'); closePalette()">
+          <span style="display:flex; align-items:center; gap:7px">${fileSvg} ${x.name}</span>
+          <span style="font-size:11px; color:var(--fg-muted)">${x.dir}</span>
+        </div>
+      `).join("");
+    }
+    function runTerm(e) {
+      if (e.key === "Enter" && e.target.value.trim()) {
+        const out = document.getElementById("term-out");
+        out.innerHTML += `<div><span style="color:var(--fg-primary)">~/Desktop/Papers</span> ❯ ${e.target.value}</div>`;
+        out.scrollTop = out.scrollHeight;
+        e.target.value = "";
+      }
+    }
+    window.addEventListener("keydown", e => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") { e.preventDefault(); openPalette(); }
+      else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") { e.preventDefault(); toggleSidebar(); }
+      else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") { e.preventDefault(); toggleTerminal(); }
+      else if (e.key === "Escape") closePalette();
+    });
+
+    render();
+  </script>
+</body>
+</html>

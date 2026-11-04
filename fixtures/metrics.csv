@@ -1,0 +1,4 @@
+service,latency_ms,status
+api-gateway,12,healthy
+search-index,45,degraded
+auth-worker,8,healthy

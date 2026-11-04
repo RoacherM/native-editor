@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#20232E" />
+      <stop offset="50%" stop-color="#12141B" />
+      <stop offset="100%" stop-color="#0A0B0F" />
+    </linearGradient>
+    <radialGradient id="ambientGlow" cx="50%" cy="22%" r="60%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.16" />
+      <stop offset="50%" stop-color="#6366F1" stop-opacity="0.06" />
+      <stop offset="100%" stop-color="#0A0B0F" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="rimGrad" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.28" />
+      <stop offset="40%" stop-color="#FFFFFF" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.03" />
+    </linearGradient>
+    <linearGradient id="leftChevron" x1="256" y1="376" x2="392" y2="648" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#CBD5E1" />
+    </linearGradient>
+    <linearGradient id="rightChevron" x1="632" y1="376" x2="768" y2="648" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE" />
+      <stop offset="100%" stop-color="#7DD3FC" />
+    </linearGradient>
+    <linearGradient id="centerBeam" x1="556" y1="316" x2="468" y2="708" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="52%" stop-color="#60A5FA" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+    <filter id="dropShadow" x="50" y="60" width="924" height="924" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="20" stdDeviation="21" flood-color="#000000" flood-opacity="0.52" />
+    </filter>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bgGrad)" filter="url(#dropShadow)" />
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#ambientGlow)" />
+  <rect x="184" y="188" width="656" height="648" rx="118" fill="#FFFFFF" fill-opacity="0.03" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3" />
+  <line x1="512" y1="190" x2="512" y2="834" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="2" />
+  <rect x="102" y="102" width="820" height="820" rx="183" stroke="url(#rimGrad)" stroke-width="4" />
+
+  <path d="M 392 376 L 256 512 L 392 648" stroke="url(#leftChevron)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M 632 376 L 768 512 L 632 648" stroke="url(#rightChevron)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round" />
+  <line x1="556" y1="316" x2="468" y2="708" stroke="url(#centerBeam)" stroke-width="52" stroke-linecap="round" />
+</svg>

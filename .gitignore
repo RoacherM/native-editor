@@ -1,0 +1,5 @@
+.nsh/
+target/
+.metrics/
+node_modules/
+.DS_Store

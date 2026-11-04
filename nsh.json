@@ -1,0 +1,107 @@
+{
+  "name": "Native Editor",
+  "id": "dev.byronwayne.nativeeditor",
+  "version": "0.0.1",
+  "build": 1,
+  "icon": "assets/icon.png",
+  "theme": {
+    "cssVars": {
+      "dark": {
+        "background": "#191919",
+        "foreground": "#e4e4e4",
+        "card": "#202020",
+        "card-foreground": "#e4e4e4",
+        "popover": "#202020",
+        "popover-foreground": "#e4e4e4",
+        "primary": "#e4e4e4",
+        "primary-foreground": "#141414",
+        "secondary": "#222222",
+        "secondary-foreground": "#e4e4e4",
+        "muted": "#141414",
+        "muted-foreground": "#8b8b8e",
+        "accent": "#2a2a2a",
+        "accent-foreground": "#e4e4e4",
+        "border": "#232323",
+        "input": "#232323",
+        "ring": "#3a3a3d",
+        "sidebar": "#141414",
+        "sidebar-foreground": "#8b8b8e",
+        "sidebar-primary": "#e4e4e4",
+        "sidebar-primary-foreground": "#141414",
+        "sidebar-accent": "#222222",
+        "sidebar-accent-foreground": "#e4e4e4",
+        "sidebar-border": "#232323"
+      },
+      "light": {
+        "background": "#ffffff",
+        "foreground": "#1c1c1e",
+        "card": "#ffffff",
+        "card-foreground": "#1c1c1e",
+        "popover": "#ffffff",
+        "popover-foreground": "#1c1c1e",
+        "primary": "#1c1c1e",
+        "primary-foreground": "#ffffff",
+        "secondary": "#eaeaea",
+        "secondary-foreground": "#1c1c1e",
+        "muted": "#f3f3f3",
+        "muted-foreground": "#68686d",
+        "accent": "#e4e4e4",
+        "accent-foreground": "#1c1c1e",
+        "border": "#e5e5e5",
+        "input": "#e5e5e5",
+        "ring": "#c8c8cd",
+        "sidebar": "#f3f3f3",
+        "sidebar-foreground": "#68686d",
+        "sidebar-primary": "#1c1c1e",
+        "sidebar-primary-foreground": "#ffffff",
+        "sidebar-accent": "#e8e8e8",
+        "sidebar-accent-foreground": "#1c1c1e",
+        "sidebar-border": "#e5e5e5"
+      }
+    }
+  },
+  "capabilities": {
+    "fs": {
+      "read": ["${homeDir}", "/tmp", "/"],
+      "write": ["${homeDir}", "/tmp"]
+    },
+    "process": {
+      "execute": [
+        "sh",
+        "zsh",
+        "bash",
+        "git",
+        "python3",
+        "qlmanage",
+        "sips",
+        "open",
+        "osascript",
+        "mmd2txt",
+        "rg"
+      ],
+      "exit": true,
+      "env": [
+        "SHELL",
+        "USER",
+        "PATH",
+        "HOME",
+        "TERM",
+        "TERM_PROGRAM",
+        "GHOSTTY_RESOURCES_DIR",
+        "LANG",
+        "PWD",
+        "NATIVE_EDITOR_ROOT"
+      ]
+    },
+    "clipboard": true,
+    "picker": true,
+    "openUrl": true,
+    "host": true,
+    "webview": {
+      "hosts": ["*"]
+    },
+    "network": {
+      "hosts": ["*"]
+    }
+  }
+}
