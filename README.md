@@ -20,6 +20,22 @@
   - Smoothly draggable sidebar and bottom terminal panels (`ResizablePanelGroup` + `ResizablePanel`).
   - Quick Open (`Cmd+P` / `Cmd+K`) and Command Palette (`Cmd+Shift+P`).
 
+## Installation (macOS Apple Silicon)
+
+### Option 1: One-Line Install (Recommended, bypasses Gatekeeper quarantine)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RoacherM/native-editor/master/install.sh | sh
+```
+
+### Option 2: Download DMG / ZIP from Releases
+
+Download [`Native-Editor-0.0.1-macos-arm64.dmg`](https://github.com/RoacherM/native-editor/releases/latest) from Releases, drag **Native Editor.app** to `/Applications`, and clear macOS quarantine on first launch:
+
+```sh
+xattr -cr "/Applications/Native Editor.app"
+```
+
 ## Development & Packaging
 
 ```sh
