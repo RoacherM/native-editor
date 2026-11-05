@@ -35,11 +35,7 @@ import {
   EDITOR_THEMES,
   type EditorTheme,
 } from "./themes";
-import {
-  openInDefaultApp,
-  openQuickLookModal,
-  type LoadedFile,
-} from "./workspace";
+import { type LoadedFile } from "./workspace";
 
 const MARKDOWN_MERMAID_EXTENSIONS = [
   { name: "mermaid", language: "mermaid" },
@@ -293,7 +289,6 @@ function TableBody(props: {
 
 function QuickLookBody(props: {
   file: Accessor<LoadedFile>;
-  root: Accessor<string>;
 }): JSX.Element {
   const f = props.file;
   return (
@@ -311,41 +306,12 @@ function QuickLookBody(props: {
         )}
       </If>
       <If when={!f().quickLookUrl}>
-        <View class="flex-1 items-center justify-center p-6 gap-4">
+        <View class="flex-1 items-center justify-center p-6 gap-2">
           <Text class="text-sm text-muted-foreground">
-            Quick Look preview not available for this file.
+            Document preview not available for this file.
           </Text>
-          <Button
-            testID="open-external-fallback-btn"
-            onPress={() => openInDefaultApp(f().path, props.root())}
-            class="px-4 py-2 rounded bg-primary hover:bg-primary/90"
-          >
-            <Text class="text-xs text-primary-foreground font-medium">
-              Open in System Viewer
-            </Text>
-          </Button>
         </View>
       </If>
-      <View class="absolute bottom-4 self-center flex-row items-center gap-2 px-3 py-1.5 rounded-md bg-card border border-border shadow-md select-none">
-        <Button
-          testID="quicklook-modal-btn"
-          onPress={() => openQuickLookModal(f().path, props.root())}
-          class="px-2 py-0.5 rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
-        >
-          <Text class="text-[11px] text-secondary-foreground font-medium">
-            Quick Look
-          </Text>
-        </Button>
-        <Button
-          testID="quicklook-open-btn"
-          onPress={() => openInDefaultApp(f().path, props.root())}
-          class="px-2 py-0.5 rounded bg-primary hover:bg-primary/90 border-none shadow-none"
-        >
-          <Text class="text-[11px] text-primary-foreground font-medium">
-            Open in System Viewer
-          </Text>
-        </Button>
-      </View>
     </View>
   );
 }
@@ -356,38 +322,6 @@ function getActiveView(file: LoadedFile): string {
   return file.classification.kind;
 }
 
-function MediaActionBar(props: {
-  metaText: Accessor<string>;
-  filePath: Accessor<string>;
-  root: Accessor<string>;
-}): JSX.Element {
-  return (
-    <View class="absolute bottom-4 self-center flex-row items-center gap-2 px-3 py-1.5 rounded-md bg-card/95 border border-border shadow-md select-none">
-      <Text class="text-[11px] font-mono text-muted-foreground pr-1">
-        {props.metaText()}
-      </Text>
-      <Button
-        testID="media-quicklook-btn"
-        onPress={() => openQuickLookModal(props.filePath(), props.root())}
-        class="px-2 py-0.5 rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
-      >
-        <Text class="text-[11px] text-secondary-foreground font-medium">
-          Quick Look
-        </Text>
-      </Button>
-      <Button
-        testID="media-open-btn"
-        onPress={() => openInDefaultApp(props.filePath(), props.root())}
-        class="px-2 py-0.5 rounded bg-primary hover:bg-primary/90 border-none shadow-none"
-      >
-        <Text class="text-[11px] text-primary-foreground font-medium">
-          Open Externally
-        </Text>
-      </Button>
-    </View>
-  );
-}
-
 export function formatMediaMeta(file: LoadedFile): string {
   const dim = file.dimensions;
   const dimText = dim ? `${dim.width} × ${dim.height} · ` : "";
@@ -396,7 +330,6 @@ export function formatMediaMeta(file: LoadedFile): string {
 
 function ImageBody(props: {
   file: Accessor<LoadedFile>;
-  root: Accessor<string>;
 }): JSX.Element {
   const zoom = signal(100);
   const lightBg = signal(false);
@@ -464,13 +397,6 @@ function ImageBody(props: {
             {lightBg() ? "Dark BG" : "Light BG"}
           </Text>
         </Button>
-        <Button
-          testID="image-quicklook-btn"
-          onPress={() => openQuickLookModal(props.file().path, props.root())}
-          class="h-5 px-2 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
-        >
-          <Text class="text-[10.5px] text-secondary-foreground">Quick Look</Text>
-        </Button>
       </View>
     </View>
   );
@@ -478,13 +404,11 @@ function ImageBody(props: {
 
 function VideoBody(props: {
   file: Accessor<LoadedFile>;
-  root: Accessor<string>;
 }): JSX.Element {
-  const metaText = computed(() => props.file().classification.mimeType);
   return (
     <View
       testID="preview-video-container"
-      class="flex-1 relative items-center justify-center p-6 pb-14 bg-black/90"
+      class="flex-1 relative items-center justify-center p-4 bg-black/90"
     >
       <Video
         testID="preview-video"
@@ -492,18 +416,12 @@ function VideoBody(props: {
         controls
         class="w-full h-full flex-1"
       />
-      <MediaActionBar
-        metaText={metaText}
-        filePath={() => props.file().path}
-        root={props.root}
-      />
     </View>
   );
 }
 
 function AudioBody(props: {
   file: Accessor<LoadedFile>;
-  root: Accessor<string>;
 }): JSX.Element {
   const metaText = computed(() => props.file().classification.mimeType);
   return (
@@ -532,11 +450,6 @@ function AudioBody(props: {
           />
         </View>
       </View>
-      <MediaActionBar
-        metaText={metaText}
-        filePath={() => props.file().path}
-        root={props.root}
-      />
     </View>
   );
 }
@@ -570,7 +483,7 @@ function PreviewBody(props: {
         />
       </If>
       <If when={activeView() === "quicklook"}>
-        <QuickLookBody file={props.file} root={props.root} />
+        <QuickLookBody file={props.file} />
       </If>
       <If when={activeView() === "table"}>
         <TableBody file={props.file} sort={props.tableSort} />
@@ -628,13 +541,13 @@ function PreviewBody(props: {
         <WebView testID="preview-webview" html={props.file().text} class="flex-1" />
       </If>
       <If when={activeView() === "image"}>
-        <ImageBody file={props.file} root={props.root} />
+        <ImageBody file={props.file} />
       </If>
       <If when={activeView() === "video"}>
-        <VideoBody file={props.file} root={props.root} />
+        <VideoBody file={props.file} />
       </If>
       <If when={activeView() === "audio"}>
-        <AudioBody file={props.file} root={props.root} />
+        <AudioBody file={props.file} />
       </If>
       <If when={activeView() === "editor"}>
         <EditorBody

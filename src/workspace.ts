@@ -425,22 +425,3 @@ export async function pickWorkspaceFolder(cwd: string): Promise<string | null> {
     return null;
   }
 }
-
-/** Open file in macOS default application (`open <path>`). */
-export async function openInDefaultApp(filePath: string, cwd: string): Promise<void> {
-  await process.run("open", [filePath], { cwd: execCwd(cwd) });
-}
-
-/** Reveal file in macOS Finder (`open -R <path>`). */
-export async function revealInFinder(filePath: string, cwd: string): Promise<void> {
-  await process.run("open", ["-R", filePath], { cwd: execCwd(cwd) });
-}
-
-/** Open macOS Quick Look modal preview (`qlmanage -p <path>`). */
-export function openQuickLookModal(filePath: string, cwd: string): void {
-  try {
-    process.spawn("qlmanage", ["-p", filePath], { cwd: execCwd(cwd) });
-  } catch {
-    // Ignore if qlmanage is unavailable
-  }
-}

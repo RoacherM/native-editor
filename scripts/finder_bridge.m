@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
+#include <stdlib.h>
 
 static void recordOpenedFilePath(NSString *path) {
   if (!path || [path length] == 0) return;
@@ -59,6 +60,7 @@ static void swizzled_setDelegate(id self, SEL _cmd, id delegate) {
 
 __attribute__((constructor))
 static void initFinderBridge(void) {
+  unsetenv("DYLD_INSERT_LIBRARIES");
   Method m = class_getInstanceMethod([NSApplication class], @selector(setDelegate:));
   if (m) {
     orig_setDelegate = (void (*)(id, SEL, id))method_getImplementation(m);
