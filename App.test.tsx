@@ -7,6 +7,11 @@ import {
 } from "./src/classify";
 import { detectMermaidKind, preprocessMermaidCode } from "./src/mermaid";
 import { parseGhosttyConfig } from "./src/TerminalPane";
+import {
+  computeSyntaxDecorations,
+  EDITOR_THEMES,
+  getThemeById,
+} from "./src/themes";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -78,15 +83,49 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
     ]);
   });
 
-  test("formats binary bytes as hex + ASCII dump", () => {
+  test("formats binary bytes as hex + ASCII dump and computes syntax decorations across themes", () => {
     const dump = formatHexDump(new Uint8Array([0x48, 0x69, 0x00, 0x21]));
     expect(dump).toContain("00000000");
     expect(dump).toContain("48 69 00 21");
     expect(dump).toContain("|Hi.!|");
+
+    expect(EDITOR_THEMES.length).toBeGreaterThanOrEqual(6);
+    const tokyo = getThemeById("tokyo-night");
+    expect(tokyo.name).toBe("Tokyo Night");
+    expect(classifyFile("subtitles.srt").language).toBe("srt");
+    expect(classifyFile(".prettierrc").language).toBe("json");
+
+    const jsonDecos = computeSyntaxDecorations(
+      '{\n  "schema_version": "v1",\n  "duration": 50.27,\n  "active": true\n}',
+      "json",
+      tokyo.syntax
+    );
+    expect(jsonDecos.length).toBeGreaterThanOrEqual(4);
+
+    const tsDecos = computeSyntaxDecorations(
+      'export function greet(name: string): string {\n  // hello\n  return "hi";\n}',
+      "typescript",
+      tokyo.syntax
+    );
+    expect(tsDecos.length).toBeGreaterThanOrEqual(5);
   });
 });
 
 describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", () => {
+  test("clean launch without workspace hides file tree and shows themed welcome panel", async () => {
+    const cleanApp = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+    });
+    await cleanApp.waitFor("id:welcome-panel");
+    expect(cleanApp.shows("id:welcome-panel")).toBe(true);
+    expect(cleanApp.shows("id:workspace-tree")).toBe(false);
+    expect(cleanApp.shows("id:theme-preset-tokyo-night")).toBe(true);
+    await cleanApp.press("id:theme-preset-tokyo-night");
+    expect(cleanApp.shows("text:Tokyo Night")).toBe(true);
+  });
+
   test("renders multi-format & multimedia previews, switches modes, searches files, and runs PTY commands", async () => {
     const app = await open("./App.tsx", {
       platform: "macos",

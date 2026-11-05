@@ -35,7 +35,7 @@ with open(plist_path, "rb") as f:
     plist = plistlib.load(f)
 
 extensions = [
-    "md", "markdown", "mdx", "txt", "text", "log", "rst", "adoc",
+    "md", "markdown", "mdx", "txt", "text", "log", "rst", "adoc", "srt", "vtt", "ass",
     "mmd", "mermaid",
     "json", "jsonl", "ndjson", "csv", "tsv",
     "yaml", "yml", "toml", "ini", "conf", "cfg", "env", "xml", "plist",

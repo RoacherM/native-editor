@@ -115,7 +115,7 @@ export async function consumeFinderOpenQueue(): Promise<string[]> {
   }
 }
 
-/** Resolve initial workspace root from host.params.workspaceRoot, process.env.NATIVE_EDITOR_ROOT, process.env.PWD, or os.homedir(). */
+/** Resolve initial workspace root from host.params.workspaceRoot, process.env.NATIVE_EDITOR_ROOT, or initial openFile; returns "" on clean launch so $HOME or / is never auto-scanned. */
 export function getInitialWorkspaceRoot(): string {
   const fromHost = host?.params?.workspaceRoot;
   if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
@@ -123,13 +123,16 @@ export function getInitialWorkspaceRoot(): string {
   if (fromEnv && fromEnv.length > 0) return fromEnv;
   const initialFile = getInitialOpenFile();
   if (initialFile) return path.dirname(initialFile);
-  const pwd = process.env.PWD;
-  if (pwd && pwd.length > 1 && pwd !== "/") return pwd;
-  return os.homedir();
+  return "";
+}
+
+function execCwd(cwd?: string): string {
+  return cwd && cwd.length > 0 ? cwd : os.homedir();
 }
 
 /** The path of `full` relative to `root` (both absolute). */
 export function relativePath(root: string, full: string): string {
+  if (!root) return path.basename(full) || full;
   const cleanRoot = root.replace(/\/+$/, "");
   const prefix = `${cleanRoot}/`;
   return full.startsWith(prefix) ? full.slice(prefix.length) : full;
@@ -145,9 +148,11 @@ export function lookupGitStatus(
   return statusMap[rel] ?? statusMap[filePath];
 }
 
-/** Whether a directory entry is one of the ignored names. */
-function isIgnored(name: string): boolean {
-  return IGNORED_NAMES.has(name);
+/** Whether a directory entry is one of the ignored names or a hidden dot-folder. */
+function isIgnored(name: string, isDirectory: boolean): boolean {
+  if (IGNORED_NAMES.has(name)) return true;
+  if (isDirectory && name.startsWith(".") && name !== ".github") return true;
+  return false;
 }
 
 /** Folders first, then files, each alphabetically. */
@@ -174,10 +179,10 @@ async function scanDirectory(
   }
   const entries: WorkspaceEntry[] = [];
   for (const dirent of dirents.slice(0, MAX_DIR_ENTRIES)) {
-    if (isIgnored(dirent.name)) continue;
+    const isDirectory = dirent.isDirectory();
+    if (isIgnored(dirent.name, isDirectory)) continue;
     const full = path.join(dir, dirent.name);
     const relPath = relativePath(root, full);
-    const isDirectory = dirent.isDirectory();
     const entry: WorkspaceEntry = {
       path: full,
       relPath,
@@ -271,6 +276,18 @@ async function readGitBranch(root: string): Promise<string> {
 
 /** Scan workspace directory, git branch, and git status (-z). */
 export async function scanWorkspace(root: string): Promise<WorkspaceSnapshot> {
+  if (!root || root.trim().length === 0) {
+    return {
+      root: "",
+      branch: "",
+      entries: [],
+      flatFiles: [],
+      gitStatusMap: {},
+      treeItemsAll: [],
+      treeItemsChanged: [],
+      commandItems: [],
+    };
+  }
   const gitStatusMap = await readGitStatus(root);
   const branch = await readGitBranch(root);
   const entries = await scanDirectory(root, root, gitStatusMap);
@@ -289,14 +306,15 @@ export async function scanWorkspace(root: string): Promise<WorkspaceSnapshot> {
 
 /** Fetch git diff patch for a specific file (staged + unstaged vs HEAD, or unstaged). */
 export async function getFileDiffPatch(filePath: string, root: string): Promise<string> {
+  const cwd = execCwd(root || path.dirname(filePath));
   try {
-    const headDiff = await process.run("git", ["diff", "HEAD", "--", filePath], { cwd: root });
+    const headDiff = await process.run("git", ["diff", "HEAD", "--", filePath], { cwd });
     if (headDiff.stdout.trim().length > 0) return headDiff.stdout;
   } catch {
     // HEAD may not exist yet; fall through to unstaged diff
   }
   try {
-    const unstaged = await process.run("git", ["diff", "--", filePath], { cwd: root });
+    const unstaged = await process.run("git", ["diff", "--", filePath], { cwd });
     return unstaged.stdout;
   } catch {
     return "";
@@ -355,7 +373,9 @@ export async function loadFile(
   const dimensions =
     classification.kind === "image" ? probeImageDimensions(bytes, text) : null;
   const quickLookUrl =
-    classification.kind === "quicklook" ? await generateQuickLookUrl(filePath, root) : null;
+    classification.kind === "quicklook"
+      ? await generateQuickLookUrl(filePath, execCwd(root || path.dirname(filePath)))
+      : null;
   const diffPatch =
     classification.kind === "diff"
       ? text
@@ -398,7 +418,7 @@ export async function saveFileText(
 export async function pickWorkspaceFolder(cwd: string): Promise<string | null> {
   const script = 'POSIX path of (choose folder with prompt "Choose a workspace folder")';
   try {
-    const result = await process.run("osascript", ["-e", script], { cwd });
+    const result = await process.run("osascript", ["-e", script], { cwd: execCwd(cwd) });
     const picked = result.stdout.trim().replace(/\/+$/, "");
     return picked.length > 0 ? picked : null;
   } catch {
@@ -408,18 +428,18 @@ export async function pickWorkspaceFolder(cwd: string): Promise<string | null> {
 
 /** Open file in macOS default application (`open <path>`). */
 export async function openInDefaultApp(filePath: string, cwd: string): Promise<void> {
-  await process.run("open", [filePath], { cwd });
+  await process.run("open", [filePath], { cwd: execCwd(cwd) });
 }
 
 /** Reveal file in macOS Finder (`open -R <path>`). */
 export async function revealInFinder(filePath: string, cwd: string): Promise<void> {
-  await process.run("open", ["-R", filePath], { cwd });
+  await process.run("open", ["-R", filePath], { cwd: execCwd(cwd) });
 }
 
 /** Open macOS Quick Look modal preview (`qlmanage -p <path>`). */
 export function openQuickLookModal(filePath: string, cwd: string): void {
   try {
-    process.spawn("qlmanage", ["-p", filePath], { cwd });
+    process.spawn("qlmanage", ["-p", filePath], { cwd: execCwd(cwd) });
   } catch {
     // Ignore if qlmanage is unavailable
   }

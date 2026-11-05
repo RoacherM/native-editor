@@ -1,7 +1,6 @@
 import path from "path";
 import {
   cleanup,
-  colorScheme,
   computed,
   effect,
   keymap,
@@ -22,6 +21,7 @@ import {
   Input,
   ResizablePanel,
   ResizablePanelGroup,
+  Select,
   type CommandItem,
 } from "nsh/base";
 import {
@@ -31,7 +31,7 @@ import {
   Window,
 } from "nsh/desktop";
 import type { PreviewMode } from "./src/classify";
-import { FileBadge, Icon } from "./src/icons";
+import { AppLogo, FileBadge, Icon } from "./src/icons";
 import { formatMediaMeta, PreviewPane } from "./src/PreviewPane";
 import { CommandPalette, Sidebar } from "./src/Sidebar";
 import {
@@ -39,6 +39,12 @@ import {
   TerminalPane,
   type ShellProfile,
 } from "./src/TerminalPane";
+import {
+  DEFAULT_THEME_ID,
+  EDITOR_THEMES,
+  getThemeById,
+  type EditorTheme,
+} from "./src/themes";
 import {
   consumeFinderOpenQueue,
   getFileDiffPatch,
@@ -68,7 +74,7 @@ const FONT_FAMILY_PRESETS = [
 ];
 
 const builtInCommands: CommandItem[] = [
-  { id: "configure-font", label: "Preferences: Configure Font Family & Size...", keywords: ["font", "size", "family", "typography"] },
+  { id: "configure-font", label: "Preferences: Theme, Font & Terminal...", keywords: ["font", "size", "family", "theme", "color", "shell"] },
   { id: "font-size-inc", label: "View: Increase Font Size", shortcut: "mod+=", keywords: ["font", "zoom", "larger"] },
   { id: "font-size-dec", label: "View: Decrease Font Size", shortcut: "mod+-", keywords: ["font", "zoom", "smaller"] },
   { id: "toggle-sidebar", label: "View: Toggle Sidebar", shortcut: "mod+b", keywords: ["sidebar", "explorer"] },
@@ -76,7 +82,7 @@ const builtInCommands: CommandItem[] = [
   { id: "open-folder", label: "File: Open Folder...", shortcut: "mod+o", keywords: ["open", "folder", "workspace"] },
   { id: "save-file", label: "File: Save Current File", shortcut: "mod+s", keywords: ["save", "write"] },
   { id: "close-tab", label: "View: Close Current Tab", shortcut: "mod+w", keywords: ["close", "tab"] },
-  { id: "toggle-theme", label: "Preferences: Toggle Light/Dark Theme", keywords: ["theme", "light", "dark"] },
+  { id: "toggle-theme", label: "Preferences: Cycle Color Theme", keywords: ["theme", "light", "dark", "color"] },
   { id: "refresh-workspace", label: "Explorer: Refresh Workspace", keywords: ["refresh", "reload"] },
   { id: "mode-preview", label: "View: Switch to Preview Mode", keywords: ["preview"] },
   { id: "mode-source", label: "View: Switch to Source Mode", keywords: ["source", "code"] },
@@ -188,14 +194,17 @@ function ModePillBtn(props: {
 function WindowTitleBar(props: {
   leftPad: Accessor<number>;
   root: Accessor<string>;
+  theme: Accessor<EditorTheme>;
   sidebarOpen: Accessor<boolean>;
   terminalOpen: Accessor<boolean>;
   onQuickOpen: () => void;
+  onOpenFolder: () => void;
   onToggleSidebar: () => void;
   onToggleTerminal: () => void;
 }): JSX.Element {
   const folderName = computed(() => {
     const raw = props.root();
+    if (!raw) return "Open Folder or Search (⌘P)";
     const parts = raw.split("/").filter(Boolean);
     return parts[parts.length - 1] || "workspace";
   });
@@ -203,18 +212,29 @@ function WindowTitleBar(props: {
   return (
     <View
       desktop={{ windowDrag: true }}
-      class="h-[30px] bg-sidebar border-b border-border flex-row items-center justify-between pr-2.5 shrink-0 select-none"
-      style={{ paddingLeft: props.leftPad() }}
+      class="h-[30px] border-b border-border flex-row items-center justify-between pr-2.5 shrink-0 select-none"
+      style={{
+        paddingLeft: props.leftPad(),
+        backgroundColor: props.theme().ui.sidebar,
+        borderColor: props.theme().ui.border,
+      }}
     >
       <View class="w-12 shrink-0" />
       <View class="flex-1 items-center justify-center min-w-0 px-4">
         <Button
           testID="titlebar-quick-open"
-          onPress={props.onQuickOpen}
-          class="w-[320px] max-w-full h-[22px] px-3 rounded-md bg-card/90 hover:bg-muted/70 border border-border flex-row items-center justify-center gap-1.5 shadow-none"
+          onPress={() => (props.root() ? props.onQuickOpen() : props.onOpenFolder())}
+          style={{
+            backgroundColor: props.theme().ui.card,
+            borderColor: props.theme().ui.border,
+          }}
+          class="w-[320px] max-w-full h-[22px] px-3 rounded-md hover:opacity-90 border flex-row items-center justify-center gap-1.5 shadow-none"
         >
-          <Icon name="search" size={11.5} tint="#888888" />
-          <Text class="text-[11.5px] text-muted-foreground truncate">
+          <Icon name="search" size={11.5} tint={props.theme().ui.mutedForeground} />
+          <Text
+            style={{ color: props.theme().ui.mutedForeground }}
+            class="text-[11.5px] truncate"
+          >
             {folderName()}
           </Text>
         </Button>
@@ -228,7 +248,7 @@ function WindowTitleBar(props: {
           <Icon
             name="sidebar"
             size={14}
-            tint={props.sidebarOpen() ? "#cccccc" : "#7a7a7a"}
+            tint={props.sidebarOpen() && !!props.root() ? "#cccccc" : "#7a7a7a"}
           />
         </Button>
         <Button
@@ -252,6 +272,7 @@ function EditorHeader(props: {
   activePath: Accessor<string | null>;
   loadedFiles: Accessor<Record<string, LoadedFile>>;
   activeFile: Accessor<LoadedFile | undefined>;
+  theme: Accessor<EditorTheme>;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
   onModeChange: (mode: PreviewMode) => void;
@@ -273,9 +294,18 @@ function EditorHeader(props: {
   });
 
   return (
-    <View class="flex-col shrink-0 select-none bg-background">
+    <View
+      class="flex-col shrink-0 select-none"
+      style={{ backgroundColor: props.theme().ui.background }}
+    >
       <If when={props.tabs().length > 0}>
-        <View class="h-[34px] bg-sidebar border-b border-border flex-row items-center">
+        <View
+          class="h-[34px] border-b flex-row items-center"
+          style={{
+            backgroundColor: props.theme().ui.sidebar,
+            borderColor: props.theme().ui.border,
+          }}
+        >
           <Scroll horizontal class="flex-1 shrink min-w-0">
             <View class="flex-row items-stretch h-[34px]">
               <Each of={props.tabs()} key={(path) => path}>
@@ -295,7 +325,10 @@ function EditorHeader(props: {
       </If>
 
       <If when={props.activeFile() !== undefined}>
-        <View class="h-[26px] px-3 bg-background flex-row items-center justify-between">
+        <View
+          class="h-[26px] px-3 flex-row items-center justify-between"
+          style={{ backgroundColor: props.theme().ui.background }}
+        >
           <View class="flex-row items-center gap-1 flex-1 min-w-0">
             <Each of={dirParts()} key={(seg, idx) => `${idx}-${seg}`}>
               {(seg) => (
@@ -399,6 +432,8 @@ function StatusBar(props: {
   col: Accessor<number>;
   fontFamily: Accessor<string>;
   fontSize: Accessor<number>;
+  theme: Accessor<EditorTheme>;
+  onSelectTheme: (themeId: string) => void;
   onOpenFontSettings: () => void;
   onRefresh: () => void;
   onToggleTheme: () => void;
@@ -409,9 +444,19 @@ function StatusBar(props: {
   const fontBadge = computed(() =>
     shortFontLabel(props.fontFamily(), props.fontSize())
   );
+  const themeOptions = EDITOR_THEMES.map((t) => ({
+    value: t.id,
+    title: t.name,
+  }));
 
   return (
-    <View class="h-[22px] px-3 bg-sidebar border-t border-border select-none flex-row items-center justify-between shrink-0">
+    <View
+      class="h-[22px] px-3 border-t select-none flex-row items-center justify-between shrink-0"
+      style={{
+        backgroundColor: props.theme().ui.sidebar,
+        borderColor: props.theme().ui.border,
+      }}
+    >
       <View class="flex-row items-center gap-2">
         <View class="flex-row items-center gap-1">
           <Icon name="branch" size={11} tint="#888888" />
@@ -429,12 +474,32 @@ function StatusBar(props: {
         </Button>
       </View>
 
-      <View class="flex-row items-center gap-2.5">
+      <View class="flex-row items-center gap-2">
         <If when={!!contextInfo()}>
           <Text class="text-[11px] text-muted-foreground font-mono">
             {contextInfo()}
           </Text>
         </If>
+        <Select
+          testID="statusbar-theme-select"
+          value={props.theme().id}
+          items={themeOptions}
+          onChange={({ value }) => {
+            if (value) props.onSelectTheme(value);
+          }}
+          trigger={
+            <View class="h-4 px-1.5 rounded flex-row items-center gap-1 hover:bg-muted/60">
+              <View
+                class="w-2 h-2 rounded-full"
+                style={{ backgroundColor: props.theme().ui.accent }}
+              />
+              <Text class="text-[10.5px] font-mono text-muted-foreground">
+                {props.theme().name}
+              </Text>
+            </View>
+          }
+          class="h-4"
+        />
         <Button
           testID="statusbar-font-btn"
           onPress={props.onOpenFontSettings}
@@ -456,12 +521,61 @@ function StatusBar(props: {
   );
 }
 
+function ThemeSwatchRow(props: {
+  activeThemeId: Accessor<string>;
+  onSelectTheme: (id: string) => void;
+}): JSX.Element {
+  return (
+    <View class="flex-row flex-wrap gap-1.5">
+      <Each of={EDITOR_THEMES} key={(t) => t.id}>
+        {(t) => (
+          <Button
+            testID={`theme-preset-${t().id}`}
+            onPress={() => props.onSelectTheme(t().id)}
+            style={{
+              backgroundColor: t().ui.background,
+              borderColor:
+                props.activeThemeId() === t().id ? t().ui.accent : t().ui.border,
+            }}
+            class="h-7 px-2.5 rounded-md border flex-row items-center gap-1.5 shadow-none"
+          >
+            <View class="flex-row items-center gap-0.5">
+              <View
+                class="w-2 h-2 rounded-full"
+                style={{ backgroundColor: t().syntax.keyword }}
+              />
+              <View
+                class="w-2 h-2 rounded-full"
+                style={{ backgroundColor: t().syntax.string }}
+              />
+              <View
+                class="w-2 h-2 rounded-full"
+                style={{ backgroundColor: t().syntax.function }}
+              />
+            </View>
+            <Text
+              style={{ color: t().ui.foreground }}
+              class={`text-[10.5px] ${
+                props.activeThemeId() === t().id ? "font-semibold" : "font-normal"
+              }`}
+            >
+              {t().name}
+            </Text>
+          </Button>
+        )}
+      </Each>
+    </View>
+  );
+}
+
 function FontSettingsDialog(props: {
   open: Signal<boolean>;
   fontFamily: Signal<string>;
   fontSize: Signal<number>;
+  themeId: Accessor<string>;
   defaultShell: Signal<string>;
   shells: Accessor<ShellProfile[]>;
+  onSetTheme: (id: string) => void;
   onSetFamily: (family: string) => void;
   onAdjustSize: (delta: number) => void;
   onSetShell: (shellPath: string) => void;
@@ -475,15 +589,15 @@ function FontSettingsDialog(props: {
         closeOnEscape
         closeOnBackdropPress
         backdropClass="bg-black/45"
-        class="items-center justify-start pt-16"
+        class="items-center justify-start pt-14"
       >
         <View
           testID="font-settings-dialog"
-          class="w-[460px] max-w-[92%] p-4 rounded-lg border border-border bg-popover shadow-xl gap-3.5 select-none"
+          class="w-[480px] max-w-[92%] p-4 rounded-lg border border-border bg-popover shadow-xl gap-3.5 select-none"
         >
           <View class="flex-row items-center justify-between">
             <Text class="text-xs font-semibold text-foreground">
-              Preferences: Font & Terminal
+              Preferences: Theme, Font & Terminal
             </Text>
             <Button
               testID="font-dialog-close"
@@ -492,6 +606,14 @@ function FontSettingsDialog(props: {
             >
               <Icon name="close" size={11} tint="#888888" />
             </Button>
+          </View>
+
+          <View class="gap-1.5">
+            <Text class="text-[11px] text-muted-foreground">Color Theme</Text>
+            <ThemeSwatchRow
+              activeThemeId={props.themeId}
+              onSelectTheme={props.onSetTheme}
+            />
           </View>
 
           <View class="gap-1.5">
@@ -612,32 +734,108 @@ function FontSettingsDialog(props: {
 }
 
 function WelcomePanel(props: {
+  root: Accessor<string>;
+  recentWorkspaces: Accessor<string[]>;
+  theme: Accessor<EditorTheme>;
+  onSelectTheme: (id: string) => void;
   onOpenFolder: () => void;
+  onSelectRecentWorkspace: (folderPath: string) => void;
   onQuickOpen: () => void;
 }): JSX.Element {
   return (
-    <View class="flex-1 items-center justify-center p-8 gap-4 bg-background select-none">
-      <Text class="text-2xl font-bold text-foreground">Native Editor</Text>
-      <Text class="text-sm text-muted-foreground max-w-md text-center">
-        Lightweight native editor and multi-format previewer.
-      </Text>
-      <View class="flex-row gap-3 mt-4">
+    <View
+      testID="welcome-panel"
+      class="flex-1 items-center justify-center p-8 gap-5 select-none"
+      style={{ backgroundColor: props.theme().ui.background }}
+    >
+      <View class="items-center gap-2">
+        <AppLogo size={54} />
+        <Text
+          style={{ color: props.theme().ui.foreground }}
+          class="text-2xl font-bold tracking-tight mt-1"
+        >
+          Native Editor
+        </Text>
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-xs max-w-md text-center"
+        >
+          Lightweight native code editor and multi-format document previewer.
+        </Text>
+      </View>
+
+      <View class="flex-row gap-3">
         <Button
+          testID="welcome-open-folder"
           onPress={props.onOpenFolder}
-          class="px-4 py-2 rounded bg-primary hover:bg-primary/90"
+          class="px-4 py-2 rounded-md bg-primary hover:bg-primary/90 shadow-none"
         >
           <Text class="text-xs text-primary-foreground font-medium">
-            Open Folder
+            Open Folder (⌘O)
           </Text>
         </Button>
-        <Button
-          onPress={props.onQuickOpen}
-          class="px-4 py-2 rounded bg-secondary hover:bg-secondary/80"
+        <If when={!!props.root()}>
+          <Button
+            testID="welcome-search-files"
+            onPress={props.onQuickOpen}
+            class="px-4 py-2 rounded-md bg-secondary hover:bg-secondary/80 shadow-none"
+          >
+            <Text class="text-xs text-secondary-foreground font-medium">
+              Search Files (⌘P)
+            </Text>
+          </Button>
+        </If>
+      </View>
+
+      <If when={props.recentWorkspaces().length > 0}>
+        <View class="w-[420px] max-w-full gap-1.5 pt-2">
+          <Text
+            style={{ color: props.theme().ui.mutedForeground }}
+            class="text-[10.5px] font-semibold uppercase tracking-wider"
+          >
+            Recent Workspaces
+          </Text>
+          <View class="gap-1">
+            <Each of={props.recentWorkspaces()} key={(w) => w}>
+              {(ws) => (
+                <Button
+                  onPress={() => props.onSelectRecentWorkspace(ws())}
+                  style={{
+                    backgroundColor: props.theme().ui.card,
+                    borderColor: props.theme().ui.border,
+                  }}
+                  class="w-full h-7 px-3 rounded border flex-row items-center justify-between hover:opacity-90 shadow-none"
+                >
+                  <Text
+                    style={{ color: props.theme().ui.foreground }}
+                    class="text-xs font-medium truncate"
+                  >
+                    {path.basename(ws()) || ws()}
+                  </Text>
+                  <Text
+                    style={{ color: props.theme().ui.mutedForeground }}
+                    class="text-[10.5px] font-mono truncate ml-3"
+                  >
+                    {ws()}
+                  </Text>
+                </Button>
+              )}
+            </Each>
+          </View>
+        </View>
+      </If>
+
+      <View class="w-[460px] max-w-full items-center gap-2 pt-2">
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-[10.5px] font-semibold uppercase tracking-wider"
         >
-          <Text class="text-xs text-secondary-foreground font-medium">
-            Search Files
-          </Text>
-        </Button>
+          Color Theme
+        </Text>
+        <ThemeSwatchRow
+          activeThemeId={() => props.theme().id}
+          onSelectTheme={props.onSelectTheme}
+        />
       </View>
     </View>
   );
@@ -845,6 +1043,7 @@ function createAppActions(opts: {
   fontDialogOpen: Signal<boolean>;
   adjustFontSize: (delta: number) => void;
   resetFont: () => void;
+  cycleTheme: () => void;
   activeFilePath: () => string | null;
   saveFile: (p: string) => void;
   closeTab: (p: string) => void;
@@ -872,41 +1071,82 @@ function createAppActions(opts: {
     resetFont: opts.resetFont,
     saveCurrent: withCurrent(opts.saveFile),
     closeCurrent: withCurrent((p) => opts.closeTab(p)),
-    toggleTheme: () => setColorScheme(colorScheme() === "dark" ? "light" : "dark"),
+    toggleTheme: opts.cycleTheme,
     refresh: opts.refresh,
     setMode: (mode) => withCurrent((p) => opts.setFileMode(p, mode))(),
   };
 }
 
-async function initFontSettings(
+function recordRecentWorkspace(
+  recentWorkspaces: Signal<string[]>,
+  folderPath: string
+): void {
+  if (!folderPath || folderPath === "/") return;
+  const next = [
+    folderPath,
+    ...recentWorkspaces().filter((w) => w !== folderPath),
+  ].slice(0, 5);
+  recentWorkspaces.set(next);
+  Storage.setItem("native-editor.recentWorkspaces", JSON.stringify(next));
+}
+
+function parseRecentWorkspaces(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string" && x.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function resolveSavedFontSize(
+  savedSize: string | null,
+  ghosttySize?: number
+): number | null {
+  const parsed = savedSize ? Number.parseInt(savedSize, 10) : Number.NaN;
+  if (!Number.isNaN(parsed) && parsed >= 9 && parsed <= 28) return parsed;
+  return ghosttySize ? Math.round(ghosttySize) : null;
+}
+
+async function initUserPreferences(
   fontFamily: Signal<string>,
   fontSize: Signal<number>,
+  themeId: Signal<string>,
   defaultShell: Signal<string>,
-  availableShells: Signal<ShellProfile[]>
+  availableShells: Signal<ShellProfile[]>,
+  recentWorkspaces: Signal<string[]>
 ): Promise<void> {
-  const [savedFamily, savedSize, savedShell, env] = await Promise.all([
-    Storage.getItem("native-editor.fontFamily"),
-    Storage.getItem("native-editor.fontSize"),
-    Storage.getItem("native-editor.shell"),
-    discoverTerminalEnvironment(),
-  ]);
-  if (savedFamily) fontFamily.set(savedFamily);
-  else if (env.ghostty.fontFamily) fontFamily.set(env.ghostty.fontFamily);
+  const [savedFamily, savedSize, savedTheme, savedShell, savedRecent, env] =
+    await Promise.all([
+      Storage.getItem("native-editor.fontFamily"),
+      Storage.getItem("native-editor.fontSize"),
+      Storage.getItem("native-editor.theme"),
+      Storage.getItem("native-editor.shell"),
+      Storage.getItem("native-editor.recentWorkspaces"),
+      discoverTerminalEnvironment(),
+    ]);
+  const family = savedFamily || env.ghostty.fontFamily;
+  if (family) fontFamily.set(family);
 
-  const parsedSize = savedSize ? Number.parseInt(savedSize, 10) : Number.NaN;
-  if (!Number.isNaN(parsedSize) && parsedSize >= 9 && parsedSize <= 28) {
-    fontSize.set(parsedSize);
-  } else if (env.ghostty.fontSize) {
-    fontSize.set(Math.round(env.ghostty.fontSize));
-  }
+  const size = resolveSavedFontSize(savedSize, env.ghostty.fontSize);
+  if (size) fontSize.set(size);
+
+  const resolvedTheme = getThemeById(savedTheme || env.ghostty.theme || DEFAULT_THEME_ID);
+  themeId.set(resolvedTheme.id);
+  setColorScheme(resolvedTheme.appearance);
 
   if (env.shells.length > 0) availableShells.set(env.shells);
-  if (savedShell) defaultShell.set(savedShell);
-  else if (env.shells[0]) defaultShell.set(env.shells[0].path);
+  const shell = savedShell || env.shells[0]?.path;
+  if (shell) defaultShell.set(shell);
+
+  recentWorkspaces.set(parseRecentWorkspaces(savedRecent));
 }
 
 function App(): JSX.Element {
   const workspaceRoot = signal<string>(getInitialWorkspaceRoot());
+  const recentWorkspaces = signal<string[]>([]);
   const snapshot = signal<WorkspaceSnapshot>({
     root: "",
     branch: "",
@@ -937,6 +1177,8 @@ function App(): JSX.Element {
 
   const fontFamily = signal<string>(DEFAULT_FONT_FAMILY);
   const fontSize = signal<number>(DEFAULT_FONT_SIZE);
+  const themeId = signal<string>(DEFAULT_THEME_ID);
+  const activeTheme = computed(() => getThemeById(themeId()));
   const defaultShell = signal<string>("/bin/zsh");
   const availableShells = signal<ShellProfile[]>([
     { name: "zsh", path: "/bin/zsh" },
@@ -954,6 +1196,17 @@ function App(): JSX.Element {
     fontSize.set(clamped);
     Storage.setItem("native-editor.fontSize", String(clamped));
   };
+  const selectTheme = (nextId: string) => {
+    const resolved = getThemeById(nextId);
+    themeId.set(resolved.id);
+    setColorScheme(resolved.appearance);
+    Storage.setItem("native-editor.theme", resolved.id);
+  };
+  const cycleTheme = () => {
+    const idx = EDITOR_THEMES.findIndex((t) => t.id === themeId());
+    const next = EDITOR_THEMES[(idx + 1) % EDITOR_THEMES.length];
+    selectTheme(next.id);
+  };
   const setShellPath = (next: string) => {
     defaultShell.set(next);
     Storage.setItem("native-editor.shell", next);
@@ -968,10 +1221,21 @@ function App(): JSX.Element {
     snapshot.set(await scanWorkspace(workspaceRoot()));
   };
 
+  const switchToWorkspace = async (folderPath: string) => {
+    if (!folderPath) return;
+    workspaceRoot.set(folderPath);
+    recordRecentWorkspace(recentWorkspaces, folderPath);
+    openTabs.set([]);
+    activeFilePath.set(null);
+    await refresh();
+  };
+
   const openExternalFile = async (filePath: string) => {
     const cleanRoot = workspaceRoot().replace(/\/+$/, "");
-    if (!filePath.startsWith(`${cleanRoot}/`)) {
-      workspaceRoot.set(path.dirname(filePath));
+    if (!cleanRoot || !filePath.startsWith(`${cleanRoot}/`)) {
+      const parentDir = path.dirname(filePath);
+      workspaceRoot.set(parentDir);
+      recordRecentWorkspace(recentWorkspaces, parentDir);
       await refresh();
     }
     await openFileInTab(filePath);
@@ -980,6 +1244,9 @@ function App(): JSX.Element {
 
   effect(() => {
     refresh().then(async () => {
+      if (workspaceRoot()) {
+        recordRecentWorkspace(recentWorkspaces, workspaceRoot());
+      }
       const initFile = getInitialOpenFile();
       if (initFile) await openExternalFile(initFile);
       const queued = await consumeFinderOpenQueue();
@@ -987,7 +1254,14 @@ function App(): JSX.Element {
         await openExternalFile(f);
       }
     });
-    initFontSettings(fontFamily, fontSize, defaultShell, availableShells);
+    initUserPreferences(
+      fontFamily,
+      fontSize,
+      themeId,
+      defaultShell,
+      availableShells,
+      recentWorkspaces
+    );
     const timer = setInterval(async () => {
       const queued = await consumeFinderOpenQueue();
       for (const f of queued) {
@@ -1025,10 +1299,7 @@ function App(): JSX.Element {
   const handleOpenFolder = async () => {
     const chosen = await pickWorkspaceFolder(workspaceRoot());
     if (!chosen) return;
-    workspaceRoot.set(chosen);
-    openTabs.set([]);
-    activeFilePath.set(null);
-    await refresh();
+    await switchToWorkspace(chosen);
   };
 
   const handleSave = (filePath: string) =>
@@ -1051,6 +1322,7 @@ function App(): JSX.Element {
     fontDialogOpen,
     adjustFontSize,
     resetFont,
+    cycleTheme,
     activeFilePath: () => activeFilePath(),
     saveFile: handleSave,
     closeTab,
@@ -1076,36 +1348,45 @@ function App(): JSX.Element {
 
   return (
     <View
-      class="flex-1 flex-col bg-background overflow-hidden"
+      class="flex-1 flex-col overflow-hidden"
+      style={{ backgroundColor: activeTheme().ui.background }}
       onFileDrop={({ uris }) => {
         const p = decodeDroppedUri(uris[0]);
-        if (p) openFileInTab(p);
+        if (p) openExternalFile(p);
       }}
     >
       <WindowTitleBar
         leftPad={leftPad}
         root={workspaceRoot}
+        theme={activeTheme}
         sidebarOpen={sidebarOpen}
         terminalOpen={terminalOpen}
         onQuickOpen={actions.openQuickOpen}
+        onOpenFolder={handleOpenFolder}
         onToggleSidebar={actions.toggleSidebar}
         onToggleTerminal={actions.toggleTerminal}
       />
 
-      <View testID="main-dock" class="flex-1 min-h-0 overflow-hidden bg-background">
+      <View
+        testID="main-dock"
+        class="flex-1 min-h-0 overflow-hidden"
+        style={{ backgroundColor: activeTheme().ui.background }}
+      >
         <ResizablePanelGroup
           axis="horizontal"
-          class="flex-1 min-h-0 overflow-hidden bg-background"
+          class="flex-1 min-h-0 overflow-hidden"
+          style={{ backgroundColor: activeTheme().ui.background }}
           handleClass="bg-border hover:bg-sky-500/60 active:bg-sky-400 transition-colors"
         >
           <ResizablePanel
-            visible={sidebarOpen()}
+            visible={sidebarOpen() && workspaceRoot().length > 0}
             fixed
             size={sidebarWidth()}
             minSize={160}
             maxSize={480}
             onResize={({ size }) => sidebarWidth.set(Math.round(size))}
-            class="bg-sidebar flex-col overflow-hidden"
+            style={{ backgroundColor: activeTheme().ui.sidebar }}
+            class="flex-col overflow-hidden"
           >
             <Sidebar
               root={workspaceRoot}
@@ -1121,22 +1402,26 @@ function App(): JSX.Element {
 
           <ResizablePanel
             minSize={320}
-            class="flex-1 flex-col min-w-0 bg-background overflow-hidden"
+            style={{ backgroundColor: activeTheme().ui.background }}
+            class="flex-1 flex-col min-w-0 overflow-hidden"
           >
             <ResizablePanelGroup
               axis="vertical"
-              class="flex-1 min-h-0 overflow-hidden bg-background"
+              class="flex-1 min-h-0 overflow-hidden"
+              style={{ backgroundColor: activeTheme().ui.background }}
               handleClass="bg-border hover:bg-sky-500/60 active:bg-sky-400 transition-colors"
             >
               <ResizablePanel
                 minSize={140}
-                class="flex-1 flex-col min-h-0 bg-background overflow-hidden"
+                style={{ backgroundColor: activeTheme().ui.background }}
+                class="flex-1 flex-col min-h-0 overflow-hidden"
               >
                 <EditorHeader
                   tabs={openTabs}
                   activePath={activeFilePath}
                   loadedFiles={loadedFiles}
                   activeFile={activeFile}
+                  theme={activeTheme}
                   onSelectTab={(p) => {
                     activeFilePath.set(p);
                     selectedPath.set(p);
@@ -1148,13 +1433,17 @@ function App(): JSX.Element {
                   }}
                 />
 
-                <View class="flex-1 min-h-0 bg-background overflow-hidden">
+                <View
+                  class="flex-1 min-h-0 overflow-hidden"
+                  style={{ backgroundColor: activeTheme().ui.background }}
+                >
                   <If when={activeFile() !== undefined}>
                     <PreviewPane
                       file={activeFile}
                       workspaceRoot={workspaceRoot}
                       fontFamily={fontFamily}
                       fontSize={fontSize}
+                      theme={activeTheme}
                       onTextChange={handleTextChange}
                       onSave={handleSave}
                       onModeChange={handleModeChange}
@@ -1167,7 +1456,12 @@ function App(): JSX.Element {
                   </If>
                   <If when={activeFile() === undefined}>
                     <WelcomePanel
+                      root={workspaceRoot}
+                      recentWorkspaces={recentWorkspaces}
+                      theme={activeTheme}
+                      onSelectTheme={selectTheme}
                       onOpenFolder={handleOpenFolder}
+                      onSelectRecentWorkspace={switchToWorkspace}
                       onQuickOpen={actions.openQuickOpen}
                     />
                   </If>
@@ -1181,7 +1475,8 @@ function App(): JSX.Element {
                 minSize={100}
                 maxSize={560}
                 onResize={({ size }) => terminalHeight.set(Math.round(size))}
-                class="bg-sidebar flex-col overflow-hidden"
+                style={{ backgroundColor: activeTheme().ui.sidebar }}
+                class="flex-col overflow-hidden"
               >
                 <TerminalPane
                   cwd={workspaceRoot}
@@ -1205,6 +1500,8 @@ function App(): JSX.Element {
         col={cursorCol}
         fontFamily={fontFamily}
         fontSize={fontSize}
+        theme={activeTheme}
+        onSelectTheme={selectTheme}
         onOpenFontSettings={actions.openFontSettings}
         onRefresh={refresh}
         onToggleTheme={actions.toggleTheme}
@@ -1214,8 +1511,10 @@ function App(): JSX.Element {
         open={fontDialogOpen}
         fontFamily={fontFamily}
         fontSize={fontSize}
+        themeId={themeId}
         defaultShell={defaultShell}
         shells={availableShells}
+        onSetTheme={selectTheme}
         onSetFamily={setFontFamily}
         onAdjustSize={adjustFontSize}
         onSetShell={setShellPath}

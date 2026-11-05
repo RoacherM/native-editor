@@ -444,7 +444,7 @@ function startPtySession(
 ): void {
   if (sessions.has(tab.id)) return;
   try {
-    const cwd = untracked(() => cwdAccessor());
+    const cwd = untracked(() => cwdAccessor()) || os.homedir();
     const app = untracked(() => primaryApp());
     const termProgram = app?.termProgram || process.env.TERM_PROGRAM || "NativeEditor";
     const resourcesDir = app?.resourcesDir || "";

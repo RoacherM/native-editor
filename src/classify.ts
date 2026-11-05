@@ -54,6 +54,16 @@ const LANGUAGE_BY_FILENAME: Record<string, string> = {
   ".dockerignore": "gitignore",
   ".gitattributes": "gitignore",
   ".env": "dotenv",
+  ".env.local": "dotenv",
+  ".env.example": "dotenv",
+  ".editorconfig": "ini",
+  ".npmrc": "ini",
+  ".prettierrc": "json",
+  ".eslintrc": "json",
+  ".babelrc": "json",
+  ".zshrc": "bash",
+  ".bashrc": "bash",
+  ".zprofile": "bash",
   "cmakelists.txt": "cmake",
 };
 
@@ -136,6 +146,11 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   cmake: "cmake",
   bat: "batch",
   cmd: "batch",
+  srt: "srt",
+  vtt: "vtt",
+  ass: "ini",
+  lock: "toml",
+  env: "dotenv",
   txt: "plaintext",
   log: "plaintext",
 };

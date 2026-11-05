@@ -30,6 +30,12 @@ import type { PreviewMode } from "./classify";
 import { AppLogo, Icon } from "./icons";
 import { MermaidDiagramBlock, MermaidRendererHost } from "./mermaid";
 import {
+  buildEditorThemeStyles,
+  computeSyntaxDecorations,
+  EDITOR_THEMES,
+  type EditorTheme,
+} from "./themes";
+import {
   openInDefaultApp,
   openQuickLookModal,
   type LoadedFile,
@@ -45,6 +51,7 @@ export interface PreviewPaneProps {
   workspaceRoot: Accessor<string>;
   fontFamily?: Accessor<string>;
   fontSize?: Accessor<number>;
+  theme?: Accessor<EditorTheme>;
   onTextChange: (filePath: string, newText: string) => void;
   onSave: (filePath: string) => void;
   onModeChange?: (filePath: string, mode: PreviewMode) => void;
@@ -116,6 +123,7 @@ function DiffBody(props: {
   file: Accessor<LoadedFile>;
   diffLayout: Signal<DiffLayout>;
   fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const f = props.file;
   const oldVal = computed(() => resolveDiffOldValue(f()));
@@ -129,7 +137,10 @@ function DiffBody(props: {
   });
 
   return (
-    <View class="flex-1 relative bg-background">
+    <View
+      class="flex-1 relative"
+      style={{ backgroundColor: props.theme().ui.background }}
+    >
       <DiffView
         testID="preview-diff"
         patch={f().diffPatch || undefined}
@@ -141,13 +152,19 @@ function DiffBody(props: {
         fontFamily={props.fontStyle().fontFamily}
         fontSize={props.fontStyle().fontSize}
         lineHeight={Math.round(props.fontStyle().fontSize * 1.65)}
+        styles={{
+          gutter: { backgroundColor: props.theme().ui.gutter },
+          lineNumber: { color: props.theme().ui.mutedForeground },
+          content: {
+            backgroundColor: props.theme().ui.background,
+            color: props.theme().ui.foreground,
+          },
+        }}
         classes={{
-          gutter: "bg-muted/40",
-          lineNumber: "text-muted-foreground",
-          content: "text-foreground",
           line: "whitespace-nowrap",
         }}
-        class="flex-1 bg-background"
+        style={{ backgroundColor: props.theme().ui.background }}
+        class="flex-1"
       />
       <View class="absolute bottom-3 right-4 flex-row items-center gap-2 px-2.5 py-1 rounded bg-card border border-border shadow-md select-none">
         <Text class="text-[11px] font-mono text-muted-foreground">
@@ -173,11 +190,30 @@ function EditorBody(props: {
   file: Accessor<LoadedFile>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
   fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
+  theme: Accessor<EditorTheme>;
   onTextChange: (val: string) => void;
   onCursorChange?: (line: number, col: number) => void;
 }): JSX.Element {
   const f = props.file;
   let editorRef: EditorRef | null = null;
+  const editorStyles = computed(() => buildEditorThemeStyles(props.theme()));
+  const decorations = signal(
+    computeSyntaxDecorations(
+      f().text,
+      f().classification.language,
+      props.theme().syntaxClasses
+    )
+  );
+
+  effect(() => {
+    const text = f().text;
+    const lang = f().classification.language;
+    const palette = props.theme().syntaxClasses;
+    const timer = setTimeout(() => {
+      decorations.set(computeSyntaxDecorations(text, lang, palette));
+    }, 10);
+    return () => clearTimeout(timer);
+  });
 
   effect(() => {
     void f().path;
@@ -203,6 +239,8 @@ function EditorBody(props: {
         }
       }}
       search={props.search()}
+      decorations={decorations()}
+      styles={editorStyles()}
       lineNumbers
       softWrap
       highlighting
@@ -213,13 +251,10 @@ function EditorBody(props: {
       fontSize={props.fontStyle().fontSize}
       lineHeight={Math.round(props.fontStyle().fontSize * 1.65)}
       classes={{
-        gutter: "bg-muted/40",
-        lineNumber: "text-muted-foreground",
-        activeLineNumber: "text-foreground font-semibold",
-        content: "text-foreground",
         line: "whitespace-nowrap",
       }}
-      class="flex-1 bg-background"
+      style={{ backgroundColor: props.theme().ui.background }}
+      class="flex-1"
     />
   );
 }
@@ -512,6 +547,7 @@ function PreviewBody(props: {
   diffLayout: Signal<DiffLayout>;
   tableSort: Signal<DataTableSort | null>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
+  theme: Accessor<EditorTheme>;
   paneProps: PreviewPaneProps;
 }): JSX.Element {
   const activeView = computed(() => getActiveView(props.file()));
@@ -521,12 +557,16 @@ function PreviewBody(props: {
   }));
 
   return (
-    <View class="flex-1">
+    <View
+      class="flex-1"
+      style={{ backgroundColor: props.theme().ui.background }}
+    >
       <If when={activeView() === "diff"}>
         <DiffBody
           file={props.file}
           diffLayout={props.diffLayout}
           fontStyle={fontStyle}
+          theme={props.theme}
         />
       </If>
       <If when={activeView() === "quicklook"}>
@@ -545,12 +585,17 @@ function PreviewBody(props: {
           fontFamily={fontStyle().fontFamily}
           fontSize={fontStyle().fontSize}
           lineHeight={Math.round(fontStyle().fontSize * 1.65)}
+          styles={buildEditorThemeStyles(props.theme())}
           classes={{ line: "whitespace-nowrap" }}
+          style={{ backgroundColor: props.theme().ui.background }}
           class="flex-1"
         />
       </If>
       <If when={activeView() === "markdown"}>
-        <Scroll class="flex-1 p-6">
+        <Scroll
+          class="flex-1 p-6"
+          style={{ backgroundColor: props.theme().ui.background }}
+        >
           <TextView
             testID="preview-markdown"
             markdown={props.file().text}
@@ -568,7 +613,11 @@ function PreviewBody(props: {
         </Scroll>
       </If>
       <If when={activeView() === "mermaid"}>
-        <Scroll testID="preview-mermaid" class="flex-1 p-6">
+        <Scroll
+          testID="preview-mermaid"
+          class="flex-1 p-6"
+          style={{ backgroundColor: props.theme().ui.background }}
+        >
           <MermaidDiagramBlock
             code={() => props.file().text}
             fontStyle={fontStyle}
@@ -592,6 +641,7 @@ function PreviewBody(props: {
           file={props.file}
           search={props.search}
           fontStyle={fontStyle}
+          theme={props.theme}
           onTextChange={(val) => props.paneProps.onTextChange(props.file().path, val)}
           onCursorChange={props.paneProps.onCursorChange}
         />
@@ -605,6 +655,7 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
   const findQuery = signal("");
   const diffLayout = signal<DiffLayout>("split");
   const tableSort = signal<DataTableSort | null>(null);
+  const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
 
   cleanup(
     keymap.bind({
@@ -619,7 +670,11 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
   );
 
   return (
-    <View class="flex-1 bg-background">
+    <View
+      class="flex-1"
+      style={{ backgroundColor: activeTheme().ui.background }}
+    >
+      <View class="hidden text-rose-400 text-emerald-300 text-fuchsia-300 text-stone-500 text-teal-300 text-amber-200 text-sky-300 text-orange-300 text-amber-300 text-purple-400 text-lime-300 text-orange-400 text-slate-500 text-cyan-300 text-blue-400 text-amber-400 text-violet-300 text-green-300 text-zinc-500 text-yellow-200 text-blue-300 text-pink-300 text-pink-400 text-emerald-400 text-red-400 text-yellow-300 text-sky-400 text-cyan-400 text-rose-300 text-teal-200 text-purple-300 text-indigo-300 text-red-600 text-blue-900 text-blue-600 text-emerald-700 text-amber-700 text-purple-700 text-blue-700 italic font-semibold" />
       <MermaidRendererHost />
       <If when={props.file()}>
         {(currentFile) => (
@@ -631,6 +686,7 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
               diffLayout={diffLayout}
               tableSort={tableSort}
               search={searchParam}
+              theme={activeTheme}
               paneProps={props}
             />
           </View>
