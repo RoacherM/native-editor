@@ -90,7 +90,8 @@
         "GHOSTTY_RESOURCES_DIR",
         "LANG",
         "PWD",
-        "NATIVE_EDITOR_ROOT"
+        "NATIVE_EDITOR_ROOT",
+        "NATIVE_EDITOR_OPEN_FILE"
       ]
     },
     "clipboard": true,

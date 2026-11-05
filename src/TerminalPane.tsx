@@ -573,10 +573,6 @@ function TermTabChip(props: {
   );
 }
 
-function clearTabLines(tab: TermTab | undefined): void {
-  if (tab) tab.lines.set([]);
-}
-
 function setTabInput(tab: TermTab | undefined, value: string): void {
   if (tab) tab.input.set(value);
 }
@@ -691,10 +687,6 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
     writeCommandToSession(activeTab(), sessions, text);
     focusInput();
   };
-  const clearActive = () => {
-    clearTabLines(activeTab());
-    focusInput();
-  };
 
   const addTab = () => {
     const tab = createTermTab(nextId(), selectedShell());
@@ -785,7 +777,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
           </Button>
         </View>
 
-        <View class="flex-row items-center gap-1.5 shrink-0">
+        <View class="flex-row items-center pr-0.5 shrink-0">
           <Select
             testID="terminal-shell-select"
             items={shellItems()}
@@ -811,16 +803,6 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
             popupClass="w-52 rounded-md border border-border bg-popover shadow-xl p-1"
             itemClass="px-2 py-1 rounded text-xs font-mono text-foreground hover:bg-muted/60"
           />
-
-          <Button
-            testID="terminal-clear-btn"
-            onPress={clearActive}
-            class="h-5 px-1.5 items-center justify-center rounded hover:bg-muted/50 bg-transparent border-none shadow-none p-0"
-          >
-            <Text class="text-[10.5px] font-mono text-muted-foreground hover:text-foreground">
-              Clear
-            </Text>
-          </Button>
         </View>
       </View>
 

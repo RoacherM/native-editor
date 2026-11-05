@@ -40,7 +40,9 @@ import {
   type ShellProfile,
 } from "./src/TerminalPane";
 import {
+  consumeFinderOpenQueue,
   getFileDiffPatch,
+  getInitialOpenFile,
   getInitialWorkspaceRoot,
   loadFile,
   lookupGitStatus,
@@ -966,9 +968,33 @@ function App(): JSX.Element {
     snapshot.set(await scanWorkspace(workspaceRoot()));
   };
 
+  const openExternalFile = async (filePath: string) => {
+    const cleanRoot = workspaceRoot().replace(/\/+$/, "");
+    if (!filePath.startsWith(`${cleanRoot}/`)) {
+      workspaceRoot.set(path.dirname(filePath));
+      await refresh();
+    }
+    await openFileInTab(filePath);
+    if (desktopAvailable) Window.orderFront();
+  };
+
   effect(() => {
-    refresh();
+    refresh().then(async () => {
+      const initFile = getInitialOpenFile();
+      if (initFile) await openExternalFile(initFile);
+      const queued = await consumeFinderOpenQueue();
+      for (const f of queued) {
+        await openExternalFile(f);
+      }
+    });
     initFontSettings(fontFamily, fontSize, defaultShell, availableShells);
+    const timer = setInterval(async () => {
+      const queued = await consumeFinderOpenQueue();
+      for (const f of queued) {
+        await openExternalFile(f);
+      }
+    }, 450);
+    cleanup(() => clearInterval(timer));
   });
 
   const openFileInTab = async (filePath: string, openInDiff?: boolean) => {

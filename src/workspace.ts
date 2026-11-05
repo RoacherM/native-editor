@@ -89,14 +89,42 @@ function isOpaqueFile(classification: FileClassification): boolean {
   return OPAQUE_KINDS.has(classification.kind);
 }
 
+const FINDER_OPEN_QUEUE_PATH = "/tmp/native-editor-open.queue";
+
+/** Resolve initial file opened from Finder or environment. */
+export function getInitialOpenFile(): string | null {
+  const fromHost = host?.params?.openFile;
+  if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
+  const fromEnv = process.env.NATIVE_EDITOR_OPEN_FILE;
+  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  return null;
+}
+
+/** Read and clear any file paths queued by the macOS Finder open-file bridge. */
+export async function consumeFinderOpenQueue(): Promise<string[]> {
+  try {
+    const bytes = await fs.readFile(FINDER_OPEN_QUEUE_PATH);
+    await fs.writeFile(FINDER_OPEN_QUEUE_PATH, "");
+    const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 /** Resolve initial workspace root from host.params.workspaceRoot, process.env.NATIVE_EDITOR_ROOT, process.env.PWD, or os.homedir(). */
 export function getInitialWorkspaceRoot(): string {
   const fromHost = host?.params?.workspaceRoot;
   if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
   const fromEnv = process.env.NATIVE_EDITOR_ROOT;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
+  const initialFile = getInitialOpenFile();
+  if (initialFile) return path.dirname(initialFile);
   const pwd = process.env.PWD;
-  if (pwd && pwd.length > 0) return pwd;
+  if (pwd && pwd.length > 1 && pwd !== "/") return pwd;
   return os.homedir();
 }
 

@@ -244,6 +244,5 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
       { timeout: 8000 }
     );
     await app.press("id:terminal-add-btn");
-    await app.press("id:terminal-clear-btn");
   });
 });

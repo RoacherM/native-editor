@@ -19,6 +19,8 @@ echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
 rm -rf "$INSTALL_DIR/$APP_NAME"
 mv "$TMP_DIR/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
 xattr -cr "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
+"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
+"$INSTALL_DIR/$APP_NAME/Contents/MacOS/set_default_handlers" 2>/dev/null || true
 
-echo "==> Installed successfully: $INSTALL_DIR/$APP_NAME"
+echo "==> Installed successfully and set as default document editor: $INSTALL_DIR/$APP_NAME"
 open "$INSTALL_DIR/$APP_NAME"
