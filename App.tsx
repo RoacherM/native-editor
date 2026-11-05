@@ -737,7 +737,6 @@ function WelcomePanel(props: {
   root: Accessor<string>;
   recentWorkspaces: Accessor<string[]>;
   theme: Accessor<EditorTheme>;
-  onSelectTheme: (id: string) => void;
   onOpenFolder: () => void;
   onSelectRecentWorkspace: (folderPath: string) => void;
   onQuickOpen: () => void;
@@ -788,7 +787,7 @@ function WelcomePanel(props: {
       </View>
 
       <If when={props.recentWorkspaces().length > 0}>
-        <View class="w-[420px] max-w-full gap-1.5 pt-2">
+        <View class="w-[440px] max-w-full gap-1.5 pt-2">
           <Text
             style={{ color: props.theme().ui.mutedForeground }}
             class="text-[10.5px] font-semibold uppercase tracking-wider"
@@ -804,17 +803,17 @@ function WelcomePanel(props: {
                     backgroundColor: props.theme().ui.card,
                     borderColor: props.theme().ui.border,
                   }}
-                  class="w-full h-7 px-3 rounded border flex-row items-center justify-between hover:opacity-90 shadow-none"
+                  class="w-full h-7 px-3 rounded border flex-row items-center justify-between gap-3 overflow-hidden hover:opacity-90 shadow-none"
                 >
                   <Text
                     style={{ color: props.theme().ui.foreground }}
-                    class="text-xs font-medium truncate"
+                    class="text-xs font-medium shrink-0"
                   >
                     {path.basename(ws()) || ws()}
                   </Text>
                   <Text
                     style={{ color: props.theme().ui.mutedForeground }}
-                    class="text-[10.5px] font-mono truncate ml-3"
+                    class="text-[10.5px] font-mono flex-1 min-w-0 text-right truncate"
                   >
                     {ws()}
                   </Text>
@@ -824,19 +823,6 @@ function WelcomePanel(props: {
           </View>
         </View>
       </If>
-
-      <View class="w-[460px] max-w-full items-center gap-2 pt-2">
-        <Text
-          style={{ color: props.theme().ui.mutedForeground }}
-          class="text-[10.5px] font-semibold uppercase tracking-wider"
-        >
-          Color Theme
-        </Text>
-        <ThemeSwatchRow
-          activeThemeId={() => props.theme().id}
-          onSelectTheme={props.onSelectTheme}
-        />
-      </View>
     </View>
   );
 }
@@ -1459,7 +1445,6 @@ function App(): JSX.Element {
                       root={workspaceRoot}
                       recentWorkspaces={recentWorkspaces}
                       theme={activeTheme}
-                      onSelectTheme={selectTheme}
                       onOpenFolder={handleOpenFolder}
                       onSelectRecentWorkspace={switchToWorkspace}
                       onQuickOpen={actions.openQuickOpen}

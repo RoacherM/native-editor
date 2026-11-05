@@ -112,7 +112,7 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
 });
 
 describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", () => {
-  test("clean launch without workspace hides file tree and shows themed welcome panel", async () => {
+  test("clean launch without workspace hides file tree and shows clean welcome panel", async () => {
     const cleanApp = await open("./App.tsx", {
       platform: "macos",
       width: 1280,
@@ -121,9 +121,7 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
     await cleanApp.waitFor("id:welcome-panel");
     expect(cleanApp.shows("id:welcome-panel")).toBe(true);
     expect(cleanApp.shows("id:workspace-tree")).toBe(false);
-    expect(cleanApp.shows("id:theme-preset-tokyo-night")).toBe(true);
-    await cleanApp.press("id:theme-preset-tokyo-night");
-    expect(cleanApp.shows("text:Tokyo Night")).toBe(true);
+    expect(cleanApp.shows("id:theme-preset-tokyo-night")).toBe(false);
   });
 
   test("renders multi-format & multimedia previews, switches modes, searches files, and runs PTY commands", async () => {
@@ -238,6 +236,8 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
 
     await app.press("id:statusbar-font-btn");
     await app.waitFor("id:font-settings-dialog");
+    expect(app.shows("id:theme-preset-tokyo-night")).toBe(true);
+    await app.press("id:theme-preset-tokyo-night");
     await app.press("id:font-preset-Menlo");
     await app.press("id:font-size-inc");
     expect(app.shows("text:15px")).toBe(true);
