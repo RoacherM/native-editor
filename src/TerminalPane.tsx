@@ -133,6 +133,7 @@ const SHELL_CANDIDATES = [
  * The PTY bridge: `pty.fork()` gives the shell a real terminal, configured
  * dynamically with the selected shell binary and terminal program environment.
  */
+// DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」
 const PY_PTY_SCRIPT = `
 import fcntl, os, pty, select, struct, sys, termios
 
@@ -611,6 +612,41 @@ function resolveShellByPath(
  * iTerm2, Warp, kitty, WezTerm, Alacritty, Terminal) and installed shells,
  * applies local Ghostty font/theme settings, and spawns interactive PTY tabs.
  */
+function ShellSelectOptionRow(props: {
+  value: string;
+  title: string;
+  selected: boolean;
+  highlighted: boolean;
+}): JSX.Element {
+  const shellName = props.value.split("/").pop() || props.title;
+  return (
+    <View
+      testID={`shell-option-${shellName}`}
+      class={`h-7 px-2.5 rounded flex-row items-center justify-between gap-2 select-none ${
+        props.highlighted || props.selected ? "bg-accent" : "hover:bg-muted/60"
+      }`}
+    >
+      <View class="flex-row items-center gap-2 min-w-0 flex-1">
+        <Text
+          class={`text-xs font-mono text-foreground shrink-0 ${
+            props.selected ? "font-semibold" : "font-normal"
+          }`}
+        >
+          {shellName}
+        </Text>
+        <Text class="text-[10.5px] font-mono text-muted-foreground truncate">
+          {props.value}
+        </Text>
+      </View>
+      <View class="w-3.5 items-center justify-center shrink-0">
+        <If when={props.selected}>
+          <Icon name="check" size={11.5} tint="#38bdf8" />
+        </If>
+      </View>
+    </View>
+  );
+}
+
 export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   let counter = 1;
   let inputRef: InputRef | null = null;
@@ -784,6 +820,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
             value={activeTab().shell().path}
             placement="top"
             align="end"
+            offset={6}
             onChange={({ value }) => {
               const next = resolveShellByPath(
                 shells(),
@@ -793,15 +830,26 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
               applyShellSelection(next, true);
             }}
             trigger={
-              <View class="h-5 px-2 flex-row items-center gap-1 rounded bg-card hover:bg-muted/60 border border-border">
+              <View
+                testID="terminal-shell-trigger"
+                class="h-5 px-2 flex-row items-center gap-1 rounded bg-card hover:bg-muted/60 border border-border"
+              >
                 <Text class="text-[11px] font-mono text-foreground">
                   {activeTab().shell().name}
                 </Text>
                 <Icon name="chevron-down" size={10} tint="#8c8c8c" />
               </View>
             }
-            popupClass="w-52 rounded-md border border-border bg-popover shadow-xl p-1"
-            itemClass="px-2 py-1 rounded text-xs font-mono text-foreground hover:bg-muted/60"
+            popupClass="w-56 rounded-lg border border-border bg-popover shadow-2xl p-1"
+            itemClass="rounded cursor-pointer"
+            renderItem={(item) => (
+              <ShellSelectOptionRow
+                value={item.value}
+                title={item.title}
+                selected={item.selected}
+                highlighted={item.highlighted}
+              />
+            )}
           />
         </View>
       </View>

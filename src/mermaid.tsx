@@ -46,6 +46,7 @@ interface WorkerMessage {
   error?: string;
 }
 
+// DESIGN.md「文件预览与 Mermaid 渲染契约」
 const CACHE_DIR = "/tmp/native-editor-mermaid";
 const CACHED_BUNDLE_PATH = `${CACHE_DIR}/mermaid-docu-bundle.js`;
 const MERMAID_START_MARKER = "var __esbuild_esm_mermaid_nm;";

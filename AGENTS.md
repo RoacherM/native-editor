@@ -1,73 +1,49 @@
-# AGENTS.md
+# native-editor contributor entrypoint
 
-Lightweight native editor and multi-format file previewer built on Native Shell (`nsh 0.3.0`, pure TSX `--template ts`). No plugin system. Ships a dockable workspace (`DockArea`), file tree with Git status (`Tree`), quick open / command palette (`Command`), multi-format file preview (`Editor`, `TextView`, `DataTable`, `DiffView`, `Image`, `Video`, `WebView`, Quick Look, Hex), and a built-in interactive PTY terminal (`process.spawn` + Python `pty`).
+Lightweight macOS native editor, multi-format previewer (`code`, `markdown`, `mermaid`, `table`, `diff`, `image`, `video`, `audio`, `quicklook`, `binary`), and interactive PTY terminal built on Native Shell (`nsh 0.3.0`, pure TSX `--template ts`). No plugin system or network backend.
 
-## Layout
+## 1. 目录与边界测试（The Boundary Test）
 
-```text
-nsh.json              App manifest and capability grants (fs, process, webview, clipboard, openUrl)
-tsconfig.json         TypeScript config (.nsh/types)
-App.tsx               Window chrome, menu bar, DockArea layout, keybindings, state wiring
-src/
-  workspace.ts        Directory listing, git status (-z), folder picker (osascript), file read/write
-  classify.ts         File kind detection, CSV/TSV/JSONL parser, hex dump formatter, Quick Look helper
-  Sidebar.tsx         Explorer tree (All / Changed filter) and Cmd+P / Cmd+Shift+P Command palette
-  PreviewPane.tsx     Preview / Source switch and renderers per file kind
-  TerminalPane.tsx    Bottom dock multi-tab PTY terminal (python3 pty bridge, ANSI SGR, input/history)
-App.test.tsx          End-to-end headless & interactive verification (nsh/test)
-```
+| 目录 / 文件 | 职责 | 放进这里的判断标准 |
+|---|---|---|
+| `App.tsx` | 窗口壳层、标题栏、可拖拽分栏（`ResizablePanelGroup`）、Tab 与快捷键状态编排 | 改这行是在改顶层窗口布局/状态路由，还是具体面板内部渲染？ |
+| `src/` | 业务模块：`workspace.ts`（目录/Git/Finder 队列）、`classify.ts`（类型判定/CSV-JSONL/Hex/sips）、`PreviewPane.tsx`、`mermaid.tsx`、`Sidebar.tsx`、`TerminalPane.tsx`、`themes.ts`、`icons.tsx` | 纯解析逻辑与 I/O 外壳分离；读取或探测失败返回 `null`/`undefined`，不伪造空数据 |
+| `scripts/` | macOS 打包脚本（`package-macos.sh`）、Finder 桥接动态库（`finder_bridge.m`）、CLI 启动器（`launcher.c`）、UTI 注册（`set_default_handlers.m`） | 是在改 `.app` Bundle 注入、签名、DMG 或 LaunchServices 关联吗？ |
+| `App.test.tsx` + `fixtures/` | `nsh test` 免预启动单测与桌面无头端到端契约测试及固定测试样本 | 不依赖外部服务、不改用户 `/Applications` 或配置即可跑通吗？ |
+| `.scratch/` | 临时截图、一次性排查产物与手工原型（已 `.gitignore`） | 是一次性排查数据或草稿吗？严禁放进 `docs/` 或提交入库 |
 
-## NSH Constraints (Verified in 0.3.0)
+## 2. 按任务读取文档（不要全量扫 `docs/`）
 
-- **Tags and imports**: Every JSX tag is PascalCase (`<View>`, `<Text>`, `<If>`, `<Each>`). Lowercase HTML tags fail to compile. `<If when={...}>` and `<Each of={...}>{(item, index) => ...}</Each>` are globals (do **not** import `If` or `Each`). Import primitives (`View`, `Text`, `Scroll`, `Image`, `Video`, `WebView`, `Overlay`, `signal`, `computed`, `effect`, `cleanup`, `keymap`, `mount`, `colorScheme`, `setColorScheme`) from `"nsh"`, base components (`DockArea`, `Editor`, `TextView`, `DataTable`, `DiffView`, `Tree`, `Command`, `Dialog`, `Button`, `Input`, `Menu`) from `"nsh/base"`, desktop window/menu APIs (`Window`, `Menu`, `titleBar`) from `"nsh/desktop"`, and standard modules (`"fs/promises"`, `"process"`, `"path"`, `"os"`, `"url"`, `"buffer"`) as bare specifiers without `node:`.
-- **Event payloads**: Every NSH event passes a single object (`onChange={({ value }) => …}`, `onLayoutChange={({ layout }) => …}`, `onSelectedChange={({ selected }) => …}`, `renderPanel={({ id }) => …}`).
-- **Subprocesses and filesystem**: `process.run` and `process.spawn` require an explicit `{ cwd }` within a granted `capabilities.fs.write` root (`${homeDir}` or `/tmp`); omitting `cwd` throws when no host data directory is set. Never use `~` or `$HOME` in `nsh.json`—use `${homeDir}`.
-- **Local images**: Read bytes with `fs.readFile(path)` and pass `URL.createObjectURL(new Blob([bytes], { type }))` to `<Image src={blobUrl} />`. `nsh-js` resolves `blob:` URLs directly from the `Blob`'s `Arc<[u8]>` in Rust without copying or base64 encoding.
+- 架构、模块契约、持久化标识与踩坑记录：`DESIGN.md`
+  - 改 `src/classify.ts` / `src/PreviewPane.tsx` / `src/mermaid.tsx` → 读 `DESIGN.md「文件预览与 Mermaid 渲染契约」`
+  - 改 `src/workspace.ts` / `scripts/` / `nsh.json` → 读 `DESIGN.md「术语与边界」` 与 `DESIGN.md「Finder 桥接与打包流水线」`
+  - 改 `src/TerminalPane.tsx` / `src/themes.ts` → 读 `DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」`
+- 待修问题与待办队列：`docs/issues/INDEX.md`
+- 历史归档：`docs/archive/`（**日常开发严禁读取**）
 
-## Commands & Verification
+## 3. 常用命令
 
 ```sh
-nsh check                           # TypeScript 7 native typecheck (~0.2s)
-nsh test --trace                    # Headless end-to-end test + commit/frame metrics (~1.0s)
-nsh test App.tsx --target macos     # Real AppKit window test driven via stdin steps
-nsh run --target macos              # Development host with hot reload
-nsh package --target macos          # Standalone macOS .app bundle (~64ms warm, ~37 MB)
+nsh check                           # TypeScript 原生类型检查（~0.2s）
+nsh test --trace                    # 免预启动单测 + 桌面无头 E2E 测试（~1.0s）
+nsh test App.tsx --target macos     # 真机 AppKit 窗口交互测试
+nsh run --target macos              # 开发热重载宿主
+nsh package --target macos          # 仅打包 .nsh/out/Native Editor.app（不写 /Applications）
+sh scripts/package-macos.sh         # 完整构建、签名、写 /Applications 并注册默认打开方式（需用户确认）
 ```
 
-- **Desktop headless test options**: In `App.test.tsx`, always call `open("./App.tsx", { platform: "macos", width: 1280, height: 800 })`. Without `platform: "macos"`, `nsh/test` defaults to `"ios"` (390×844), which disables `fs/promises` and `process` and collapses `DockArea` into mobile drawer mode (< 600pt).
-- **Single-runner rule**: Only the lead coordinator runs `nsh check`, `nsh test`, `nsh package`, or `ub-mode`. Worker agents edit their assigned files and report back.
+## 4. 必须遵守的 6 条规则
 
-## Herdr-Native Development Workflow (All Operations in Herdr)
+1. **环境与数据隔离**：日常验证只跑 `nsh check`、`nsh test --trace` 和 `nsh package --target macos`。未经用户明确要求，严禁运行 `sh scripts/package-macos.sh` 或 `install.sh`（会覆盖 `/Applications/Native Editor.app` 并篡改系统 UTI 默认应用关联）。
+2. **协议与持久化先行**：修改 `nsh.json` 权限、`Storage` 键名（`native-editor.*`）、环境变量（`NATIVE_EDITOR_*`）或 `/tmp/native-editor-*` 路径前，先更新 `DESIGN.md「术语与边界」`，写清旧缓存/旧配置兼容行为并配测试。
+3. **修 Bug 先红后绿**：修任何 bug 必须先在 `App.test.tsx` 写出旧代码 FAIL（Red）、新代码 PASS（Green）的测试；改完源码运行 `ub-mode`（`crapper` / `dryer`）并汇报数字。
+4. **实测与版本绑定**：NSH 与系统命令行为必须绑定实测版本（当前 `nsh 0.3.0`）；写文档引用代码前当场重读源文件核实；`App.test.tsx` 中调用 `open("./App.tsx", ...)` 必须显式传 `{ platform: "macos", width: 1280, height: 800 }`。
+5. **完成定义（DoD）**：`nsh check` 与 `nsh test --trace` 全部通过 + `DESIGN.md` 同步更新 + `docs/issues/INDEX.md` 状态更新 + `doc-lint` 零告警；工作区有其它改动时一律用 `git commit --only -- <paths>` 提交。
+6. **按需独立审查**：当改动触及 `nsh.json` 权限边界、`scripts/` 原生 C/ObjC 桥接与签名、或 `Storage`/队列协议时，交由不同于当前作者的模型独立审查 `git diff`。
 
-**All operations—coding (`epi`), code review (`ub-mode`), testing (`nsh check`, `nsh test`), and packaging (`nsh package`)—must execute visibly inside Herdr tabs/terminals in the current Herdr space** (`native-editor`, space ID from `herdr-app ls`, lead terminal `$HC_TERMINAL_ID`). Never run build/review/package stages hidden in background tool subshells when the user is observing the space.
+## 5. Issue 自动处理闭环
 
-1. **Coding (`epi` Multi-Model Workers)**:
-   - `antigravity/gemini-3.8-flash`: UI shell, `DockArea` integration, `Sidebar.tsx`, `PreviewPane.tsx`, `App.tsx`.
-   - `factory/deepseek-v4.1-flash`: Data layer, file classification/parsers, `workspace.ts`, `classify.ts`, `TerminalPane.tsx`, `App.test.tsx`.
-   ```sh
-   hc run --bg --name epi-gemini --cwd /Users/byronwayne/Projects/sides/native-editor \
-     --label herdr.space=<current-space-id> \
-     epi --model antigravity/gemini-3.8-flash
-
-   hc run --bg --name epi-deepseek --cwd /Users/byronwayne/Projects/sides/native-editor \
-     --label herdr.space=<current-space-id> \
-     epi --model factory/deepseek-v4.1-flash
-   ```
-   - Wait for readiness with `hc wait <name>`, then assign file-scoped tasks with `hc send <name> "<task>. Report with hc send $HC_TERMINAL_ID when done or stuck."`
-   - Workers must not spawn subagents or touch files outside their scope.
-
-2. **Review, Testing & Packaging in Dedicated Herdr Tabs**:
-   - Open or reuse a visible tab in the current Herdr space (`herdr-app do tab.new --space <current-space-id> --name <tab-name> --folder /Users/byronwayne/Projects/sides/native-editor`) and run commands via `hc send <terminal-id> '<cmd>'`:
-     - **Review & Quality Gate (`review` / `package` tab)**:
-       ```sh
-       hc send <term> 'nsh check && sh ~/.gemini/config/skills/ub-mode/scripts/ub crapper --no-coverage App.tsx src/ && sh ~/.gemini/config/skills/ub-mode/scripts/ub dryer App.tsx src/'
-       ```
-     - **Testing (`test` / `package` tab)**:
-       ```sh
-       hc send <term> 'nsh test --trace && nsh test App.tsx --target macos'
-       ```
-     - **Packaging (`package` tab)**:
-       ```sh
-       hc send <term> 'rm -rf .nsh/out && nsh check && nsh test && nsh package --target macos && ls -lh ".nsh/out/Native Editor.app/Contents/MacOS"'
-       ```
-   - Keep the `package` / verification tab open for the user to inspect logs, and clean up temporary `epi` worker terminals (`hc kill <name>; hc rm <name>`) only after completion. Never close or modify pre-existing user spaces, tabs, or panes.
+当被要求「修 Issue」或推进 `docs/issues/INDEX.md` 时：
+1. 只认领 `status: ready` 的第一条 `I-<id>`；遇到 `needs-decision` / `external-blocked` / `ops-approval` 只向用户汇总提问，不擅改代码。
+2. 按卡片 `verify` 跑出 Red → 最小化修改源码跑出 Green → 跑全量 `nsh check && nsh test --trace` 及 `ub-mode`。
+3. 用 `git commit --only -- <paths>` 原子提交，同步更新 `DESIGN.md`，在 `docs/issues/INDEX.md` 将条目移入 `done`（记录 commit SHA 与测试名），并立即删除已 `done` 的单张 `docs/issues/I-*.md`。

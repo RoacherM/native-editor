@@ -1,316 +1,150 @@
-# Native Editor 调研与架构设计草案
-
-目标：用 NSH（`nsh 0.3.0`）做一个轻量级、类似 VS Code 的桌面编辑器。核心诉求是**不同类型文件的预览**与**内置终端等常用工作区功能**，不做插件系统。
-
+---
+title: Native Editor 架构与模块契约
+description: 基于 Native Shell (nsh 0.3.0) 的 macOS 原生多格式预览器、代码编辑器与内置 PTY 终端架构、持久化契约与实测踩坑记录。
 ---
 
-## 1. 调研与实测结论
+# Native Editor 架构与模块契约
 
-我们在本机 `nsh 0.3.0 (df6aa34)` 上对 `~/.nsh/source` 源码和两种项目模板（`--template ts` 与 `--template mixed`）做了实操验证：
+## 术语与边界
 
-### 1.1 NSH 已内置的原生能力（Rust 层直接提供，无需手写底层）
-`nsh-base` 和 `nsh-core` 已经在 Rust 侧实现了编辑器所需的重组件，TSX 只负责声明布局和状态绑定：
-- **`DockArea`（可停靠工作区）**：支持 `left`（文件树）、`center`（多 Tab 组、水平/垂直分屏、拖拽 Tab 到边缘自动分屏、`toggleZoom` 组最大化）、`bottom`（终端面板）。内容按 `PanelId` 保持在原生层，跨分屏拖拽 Tab 不会丢失编辑器光标、滚动位置或终端会话。
-- **`Editor`（代码编辑器）**：底层是 Rust `ropey::Rope` + `two_face`（`bat` 的扩展 `syntect` 语法库，覆盖 200+ 语言），支持行号、代码折叠、多光标、括号匹配、正则查找替换、诊断标记。20 万行文本布局约 30ms。
-- **`TextView`（文档渲染）**：原生解析并渲染 CommonMark + GFM（表格、任务列表、脚注、GitHub Alerts、LaTeX 公式、语法高亮代码块）和 HTML。
-- **`DiffView`（对比视图）**：支持 `oldValue` / `newValue` 或直接传入 `git diff` patch，支持 Split / Unified 切换和按 hunk 跳转。
-- **`DataTable`（双向虚拟滚动表格）**：按视口行范围（`onVisibleRowsChange`）喂数据，百万行级 CSV / TSV / JSONL 表格滚动只消耗屏幕可见行的开销，支持列宽拖拽、固定列、排序。
-- **`Tree` 与 `Command`**：虚拟化文件树（单 Tab 焦点，方向键展开/收起）和虚拟化命令面板（`Cmd+P` 文件快搜、`Cmd+Shift+P` 命令面板，5000+ 文件按键级原生过滤）。
-- **`Image` / `Video` / `WebView`**：本地文件通过 `fs.readFile(path)` 拿到 `Uint8Array`，构造 `URL.createObjectURL(new Blob([bytes], { type }))` 传给 `<Image src={blobUrl} />`。`nsh-js` 直接在 Rust 侧共享 `Blob` 的 `Arc<[u8]>`，零拷贝、不转 base64。
+Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量级 macOS 原生文件预览器、编辑器与终端工作区。
 
-### 1.2 为什么选纯 TSX（`--template ts`）而不是混合 Rust（`--template mixed`）
-我们在 `scratch/` 下分别初始化并实测了两个原型：
+- **拥有边界**：
+  - 工作区目录扫描（深度 ≤ 4，单目录上限 200 项）、Git 变更状态解析（`git status --porcelain=v1 -z -uall`）与单文件 Diff 预览。
+  - 10 类文件路由与渲染：`code`、`markdown`、`mermaid`、`html`、`table`（CSV/TSV/JSONL）、`diff`、`image`（PNG/JPG/GIF/WebP/AVIF/SVG）、`video`、`audio`、`quicklook`（PDF）、`binary`（4 KB Hex + ASCII）。
+  - 内置多标签真 PTY 终端（`python3` `pty.fork()` 桥接）与本机 Ghostty 字体/主题/Shell 自动探测。
+  - macOS Finder 双击/拖拽打开文件桥接（`libFinderBridge.dylib` + `launcher.c`）与 UTI 默认处理程序注册（`set_default_handlers.m`）。
+- **不拥有边界**：不做插件市场/扩展宿主，不做 LSP 语言服务器客户端，不自带网络后端服务。
 
-| 维度 | 纯 TSX (`--template ts`) | 混合模板 (`--template mixed`) |
+### 进程权限白名单（`nsh.json` `capabilities.process.execute`）
+
+只放 app 自己 `process.run` / `process.spawn` 的 4 个二进制：`git`（状态与 diff）、`python3`（PTY 桥）、`sips`（PDF 预览图）、`osascript`（选目录）。终端里的 Shell 由 `python3` 的 `execvp` 拉起，不经过 nsh 的白名单，所以不需要列 `zsh` / `bash` / `sh`。新增一个 `process.run` 调用时，同时改这个列表和 `App.test.tsx` 里的最小权限断言。
+
+### 持久化标识与 IPC 契约（不可随意改名）
+
+| 类别 | 标识符 / 路径 | 用途与新旧兼容约定 |
 |---|---|---|
-| `nsh check` 耗时 | **~0.2s**（直接跑内置原生 `tsc`） | 首次 **40.2s**，增量检查需走 Cargo |
-| `nsh test` 耗时 | **0.75s – 1.0s**（含 `DockArea` + `Editor` + `fs` + `pty`） | 首次编译 192 MB 测试二进制耗时 **1m 10s** |
-| `nsh package --target macos` | 复用预编译 runner，打包仅 **64ms**（`.app` 大小 **37 MB**） | 每次改 Rust 需重链 release runner |
-| 多 Agent 并行开发 | 零 Cargo 锁冲突，极适合 `epi` 多模型并行改 TSX | 并发触发 `cargo` 会锁死 `.nsh/rust` |
-| 本地文件与终端能力 | `nsh.json` 声明 `capabilities.fs` (`${homeDir}`, `/tmp`) 与 `capabilities.process` 即可直接调用 | 需手写 `#[module]` / `#[class]` 胶水代码 |
-
-**实测踩坑与关键发现（已写入 `AGENTS.md`）**：
-1. `nsh test` 默认把 headless 视口设为 `{ platform: "ios", width: 390, height: 844 }`，此时 `fs/promises` 和 `process` 会报错 `native filesystem unavailable on this platform`，且 `DockArea` 因宽度 `< 600pt` 会折叠成移动端抽屉。测试桌面应用时必须传 `open("./App.tsx", { platform: "macos", width: 1280, height: 800 })`。
-2. `process.run` 和 `process.spawn` 在未配置宿主 `dataDir` 时必须显式传入 `{ cwd }`（且 `cwd` 在 `capabilities.fs.write` 授权目录内，如 `os.homedir()` 或当前工作区路径）。
-3. **内置真 PTY 终端无需写 Rust 扩展**：通过 `process.spawn("python3", ["-u", "-c", PY_PTY_SCRIPT], { cwd, stdin: "pipe" })` 调用标准库 `pty.fork()` 启动 `$SHELL`，我们在 `nsh test` 中实测验证了子进程内 `sys.stdin.isatty() === True`。
+| Bundle ID | `dev.byronwayne.nativeeditor` | `nsh.json` 与 `scripts/set_default_handlers.m` 共用；改名会导致 LaunchServices 默认打开关联失效 |
+| `Storage` 键 | `native-editor.fontFamily` | 用户字体名；未设置时回退到 Ghostty 配置或 `JetBrainsMono Nerd Font Mono` |
+| `Storage` 键 | `native-editor.fontSize` | 字号（`9`–`28` 整数字符串）；非法值回退到 Ghostty 字号或 `13` |
+| `Storage` 键 | `native-editor.theme` | 主题 ID（6 套内置主题，默认 `kanagawa-dragon`）；未知 ID 回退默认主题 |
+| `Storage` 键 | `native-editor.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`） |
+| `Storage` 键 | `native-editor.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个非 `/` 目录）；解析失败回退 `[]` |
+| 环境变量 / Host 参数 | `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置且无打开文件时返回 `""`（展示 Welcome 面板，绝不自动扫 `$HOME` 或 `/`） |
+| 环境变量 / Host 参数 | `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接打开的初始文件绝对路径 |
+| Finder 队列文件 | `/tmp/native-editor-open.queue` | `finder_bridge.m` 与 `launcher.c` 追加写入待打开文件路径（每行一个），`App.tsx` 每 450ms 通过 `consumeFinderOpenQueue()` 读取并清空 |
+| 临时缓存目录 | `/tmp/native-editor-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
+| 临时缓存目录 | `/tmp/native-editor-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
 
 ---
 
-## 2. 架构设计
-
-### 2.1 整体界面布局（单窗口极简 IDE）
+## 结构与数据流
 
 ```text
 +-----------------------------------------------------------------------------------+
-| ● ● ●  [Native Editor]   📁 ~/Projects/...   [🔍 Quick Open (⌘P)]    [☀️/🌙] [⌘J] |  <- 自定义 TitleBar (38pt, windowDrag)
+| ● ● ●                       [ 🔍 native-editor (⌘P) ]                  [◧] [◨]   | <- WindowTitleBar (30pt, windowDrag)
 +--------------------+--------------------------------------------------------------+
-| EXPLORER           | [📄 README.md ×] [🦀 main.rs • ×] [📊 data.csv ×]  [Preview|Source] |
-| [All] [Changed 3]  +--------------------------------------------------------------+
-|                    |                                                              |
-| ▾ src/             |                                                              |
-|     App.tsx      M |                 多格式文件预览 / 编辑器主区域                   |
-|     workspace.ts   |       (Editor / TextView / DataTable / DiffView /            |
-| ▸ assets/          |        Image / Video / WebView / Quick Look / Hex)           |
-|   README.md        |                                                              |
-|   data.csv         |                                                              |
+| EXPLORER           | [📄 README.md ×] [📐 arch.mmd ×] [📊 metrics.csv ×]          | <- TabBar (34pt)
+| [All] [Changed]    | src > components > 📄 README.md            [Preview] [Code]  | <- Breadcrumb & ModeBar (26pt)
+| ▾ src/             +--------------------------------------------------------------+
+|     App.tsx      M |                                                              |
+|     classify.ts    |                 PreviewPane (按 FileKind 分发)               |
+|     mermaid.tsx    |   Editor / TextView+Mermaid / DataTable / DiffView /         |
+|     workspace.ts   |   Image (Zoom+Grid) / Video / Audio / QuickLook / Hex        |
 |                    +--------------------------------------------------------------+
-|                    | TERMINAL  [zsh 1 ×] [zsh 2 ×] [+]               [Clear] [×]  |
-|                    | $ git status                                                 |
-|                    | On branch main ...                                           |
-|                    | > ________________________________________________ [Send ⏎]  |
+|                    | TERMINAL  [zsh 1 ×] [+]                      [zsh ▾] [×]     | <- TerminalPane (ResizablePanel)
+|                    | $ echo NSH_PTY_OK_2026                                       |
+|                    | zsh $ _____________________________________________________  |
 +--------------------+--------------------------------------------------------------+
-| ⎇ main  •  2 changed  |  UTF-8  |  Markdown (Preview)  |  Ln 12, Col 4            |  <- StatusBar (24pt)
-+-----------------------------------------------------------------------------------+
+| ⎇ master*  ↻       | README.md · 2.1 KB · Ln 1, Col 1 · markdown | Theme | Font  | <- StatusBar (22pt)
++--------------------+--------------------------------------------------------------+
 ```
 
-### 2.2 文件预览路由（`src/classify.ts` + `src/PreviewPane.tsx`）
+### 模块职责表
 
-所有文件打开后先根据扩展名与前 4 KB 字节（是否含 `\0`）判定类型。支持预览的格式在面板右上角提供 **`Preview` / `Source`（或 `Diff`）** 一键切换，以及 **在系统默认应用中打开** 按钮：
-
-1. **代码与配置文件**（`.rs`, `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.json`, `.toml`, `.yaml`, `.sh`, `.css`, `.sql`, `Dockerfile`, `Makefile` 等 200+ 种）：
-   - 渲染组件：`<Editor value={...} language={ext} />`。
-   - 功能：语法高亮、行号、代码折叠、`Cmd+F` 页内搜索替换、`Cmd+S` 保存修改（未保存时 Tab 显示圆点 `•`）。
-2. **Markdown 文档**（`.md`, `.markdown`, `.mdx`）：
-   - 默认 `Preview`：`<TextView markdown={text} selectable />`（若装有 `mmd2txt` 则自动预处理 ` ```mermaid ` 块；点击文档内相对路径链接直接在编辑器新 Tab 打开对应文件）。
-   - 切 `Source`：`<Editor value={text} language="markdown" />`。
-3. **表格数据**（`.csv`, `.tsv`, `.jsonl`）：
-   - 默认 `Preview`：解析表头与行数据，通过 `<DataTable columns={...} data={slice} dataStart={...} rowCount={total} />` 渲染，支持点击列头升/降序排序。
-   - 切 `Source`：`<Editor value={text} />`。
-4. **Diff / Git 变更预览**（`.diff`, `.patch` 文件，或在左侧 `Changed` 列表点击带 `M`/`A`/`D` 标记的文件）：
-   - 渲染组件：`<DiffView patch={gitDiffOutput} layout="split" | "unified" />`，带 `Prev / Next Hunk` 导航和 `+a -d` 统计。
-5. **图片与矢量图**（`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.bmp`, `.ico`）：
-   - 默认 `Preview`：`fs.readFile` -> `Blob` -> `URL.createObjectURL` -> `<Image src={blobUrl} style={{ objectFit: "contain" }} />`，底部显示分辨率与文件大小（`.svg` 额外支持切换 `Source` 编辑 XML）。
-6. **HTML 网页**（`.html`, `.htm`）：
-   - 默认 `Preview`：`<WebView html={text} />`（支持切换 `Source` 查看 HTML 源码）。
-7. **PDF / Office / iWork 等系统文档**（`.pdf`, `.doc`, `.docx`, `.xls`, `.xlsx`, `.ppt`, `.pptx`, `.pages`, `.numbers`, `.key`, `.rtf`）：
-   - 复用 `herdr-app` `my-files` 验证过的轻量方案：通过 `qlmanage -t -s 2000` 生成高清预览图缓存到 `/tmp/native-editor-ql/`，再用 `<Image />` 展示首页/帧预览，并提供一键调用系统 `open` 打开原文件。
-8. **音视频媒体**（`.mp4`, `.mov`, `.webm`, `.mp3`, `.wav`, `.m4a`）：
-   - 渲染组件：`<Video src={fileUrlOrBlob} controls />`。
-9. **二进制文件兜底**（含 `\0` 的未知二进制文件）：
-   - 读取前 4 KB 格式化为 `偏移量 | 16 进制字节 | ASCII 可打印字符` 的只读 `<Editor />` 视图，绝不卡死 UI。
-
-### 2.3 内置终端（`src/TerminalPane.tsx`）
-- 每个终端 Tab 对应一个 `PtySession` 实例：
-  - 使用 `process.spawn("python3", ["-u", "-c", PY_PTY_BRIDGE], { cwd: workspaceRoot, stdin: "pipe" })` 启动真实伪终端（`pty.fork()` + `$SHELL -l`）。
-  - 输出流处理：处理回车覆盖 `\r`、退格 `\b`、清屏 `\x1b[2J` / `\x1b[3J`，并将 ANSI SGR 颜色码解析为带颜色的文本行（保留最近 2000 行缓冲）。
-  - 交互控制：支持多 Tab 新建（`+`）、关闭、切换；输入栏支持 `Enter` 执行、`↑`/`↓` 历史命令回溯、`Ctrl+C`（发送 `\x03` 中断前台命令）、`Clear` 清屏，以及快捷运行当前打开的脚本文件。
-
-### 2.4 常用快捷键与工作区功能
-- `Cmd+O`：通过 macOS 原生 `osascript -e 'POSIX path of (choose folder)'` 选择并切换工作区目录（同时支持拖拽文件夹/文件到窗口 `onFileDrop`）。
-- `Cmd+P` / `Cmd+K`：打开 `Command` 面板快速模糊搜索并打开工作区内的文件。
-- `Cmd+Shift+P`：打开命令面板（切换侧边栏、切换终端、分屏预览、切换亮暗主题、保存文件、刷新文件树）。
-- `Cmd+B`：展开/收起左侧文件树 Dock。
-- `` Ctrl+` `` / `Cmd+J`：展开/收起底部内置终端 Dock。
-- `Cmd+S`：保存当前激活的编辑器文件并刷新 Git 状态。
-- `Cmd+W`：关闭当前激活的 Tab。
+| 文件 | 核心导出 | 职责边界 |
+|---|---|---|
+| `App.tsx` | `App` (mount root) | 顶层信号状态、可拖拽分栏（水平 `Sidebar` + 垂直 `PreviewPane`/`TerminalPane`）、快捷键、Finder 队列轮询、Preferences 弹窗 |
+| `src/classify.ts` | `classifyFile`, `parseTableData`, `formatHexDump`, `probeImageDimensions`, `generateQuickLookUrl`, `createBlobUrl` | 纯文件类型判定（扩展名 + 前 4 KB `\0` 探测）、CSV/TSV/JSONL 解析、4 KB 十六进制格式化、PNG/GIF/SVG 尺寸探测、PDF `sips` 缩略图生成 |
+| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `scanWorkspace`, `loadFile`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder` | 工作区文件树与 Git 状态扫描、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
+| `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
+| `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender` | 隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL |
+| `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
+| `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig` | 多标签 Python `pty.fork()` 终端会话、ANSI CSI/OSC 流式剥离与回车覆盖处理、本机 Shell 与 Ghostty 配置探测 |
+| `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 6 套配色主题（Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、GitHub Dark、Rose Pine、One Light）及多语言正则语法高亮装饰器 |
+| `src/icons.tsx` | `Icon`, `FileBadge`, `AppLogo` | 内联矢量图标与按文件扩展名着色的类型徽章 |
 
 ---
 
-## 3. 基于 `epi` + Herdr 当前 Space 的全流程开发规范（All-in-Herdr）
+## 文件预览与 Mermaid 渲染契约
 
-当前会话运行在 Herdr 的 `native-editor` space（`spbfa2a29fdfc6274e8990c72f4e0ff3e1`，主终端 `t1k`）。**所有开发动作（Code、Review、Test、Package）必须在当前 Herdr Space 的可见终端/标签页内执行**，不把构建、审查或打包藏在不可见的后台子进程里：
-
-1. **脚手架初始化**：
-   - 初始化 `nsh.json`、`tsconfig.json` 与基础目录结构，生成 `.nsh/types` 类型声明，定义好 `src/` 各模块的 TypeScript 接口签名。
-2. **Code：在当前 Herdr Space 启动双模型 `epi` Workers**：
-   - **Worker 1 (`epi-deepseek`, `factory/deepseek-v4.1-flash`)**：
-     - 负责 `src/workspace.ts`、`src/classify.ts` 以及 `src/TerminalPane.tsx`。
-   - **Worker 2 (`epi-gemini`, `antigravity/gemini-3.8-flash`)**：
-     - 负责 `src/Sidebar.tsx`、`src/PreviewPane.tsx` 以及 `App.tsx`。
-3. **Review / Test / Package：在当前 Herdr Space 打开可见终端标签页执行**：
-   - 通过 `herdr-app do tab.new --space <space-id> --name <tab> --folder /Users/byronwayne/Projects/sides/native-editor` 创建或复用可见终端（如 `t2b`），用 `hc send <term> '<cmd>'` 驱动全流程，方便实时观察输出：
-     - **Review（类型与代码质量审查）**：在 Herdr 终端内运行 `nsh check` 与 `ub-mode`（`crapper` 复杂度 < 10、`dryer` 重复率检查、`mutator` 变异测试）。
-     - **Test（无头与真机窗口实操测试）**：在 Herdr 终端内运行 `nsh test --trace` 与 `nsh test App.tsx --target macos`。
-     - **Package（发布打包）**：在 Herdr 终端内运行 `nsh package --target macos` 并保留标签页供随时查看日志或直接启动 `.nsh/out/Native Editor.app`。
+1. **类型判定与大文件保护（`src/classify.ts` + `src/workspace.ts`）**：
+   - `video`（`.mp4`, `.mov`, `.m4v`, `.webm`）与 `audio`（`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`）在 `loadFile()` 中只调用 `fs.stat()` 获取字节数并直接将文件路径传给 `<Video src={filePath} />`，绝不 `fs.readFile` 全量读入内存。
+   - 图片（`.png`, `.jpg`, `.gif`, `.webp`, `.avif`, `.svg`）通过 `fs.readFile` 构造 `URL.createObjectURL(new Blob([bytes], { type }))`，由 `nsh-js` 在 Rust 侧零拷贝读取 `Blob` 的 `Arc<[u8]>`。
+   - 未知扩展名文件读取前 4 KB，含 `\0` 字节则归类为 `binary`，展示只读 4 KB Hex + ASCII 视图。
+2. **模式胶囊按钮显示规则（`App.tsx` `hasRichPreview`）**：
+   - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
+3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
+   - Markdown 中的 ` ```mermaid ` 代码块（通过 `TextView` 的 `extensions` 拦截）与独立 `.mmd` / `.mermaid` 文件共用 `MermaidDiagramBlock`。
+   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/native-editor-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。
+   - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。
 
 ---
 
-## 4. 模块接口契约（TypeScript 精确签名）
+## 内置 PTY 终端与 Ghostty 配置探测
 
-为确保 `epi-deepseek` 与 `epi-gemini` 并行开发零冲突，各模块导出签名固定如下：
+- **无需 Rust 原生扩展的真 PTY**：`src/TerminalPane.tsx` 使用 `process.spawn("python3", ["-u", "-c", PY_PTY_SCRIPT, shellPath, termProgram, ghosttyResourcesDir], { cwd, stdin: "pipe" })`，在 Python 标准库中调用 `pty.fork()` 与 `termios.TIOCSWINSZ`（32×140）启动登录 Shell（`execvp(shell, [shell, "-l"])`）。
+- **流式 ANSI 解析与半截转义序列拼接**：`extractProcessableChunk()` 使用 `INCOMPLETE_ANSI_TAIL` 缓存跨 chunk 截断的 ESC/CSI/OSC 序列，剥离非 CSI 控制码，处理 `\r` 行内覆盖、`\b` 退格、`CSI K` 清行与 `CSI 2J`/`3J` 清屏，每个会话保留最近 `1000` 行输出。
+- **Ghostty 与 Shell 环境继承**：启动时 `discoverTerminalEnvironment()` 扫描 `~/.config/ghostty/config*` 与 `~/Library/Application Support/com.mitchellh.ghostty/config*`，自动继承用户的 `font-family`、`font-size`、`theme` 与 `command`，并探测本机已安装的 `zsh`、`fish`、`nu`、`bash`、`sh` 供终端顶栏下拉切换。
 
-### 4.1 `src/classify.ts`（由 `epi-deepseek` 实现）
+---
 
-```ts
-import type { DataTableColumn } from "nsh/base";
+## Finder 桥接与打包流水线
 
-export type FileKind =
-  | "code"
-  | "markdown"
-  | "html"
-  | "table"
-  | "diff"
-  | "image"
-  | "video"
-  | "quicklook"
-  | "binary";
+`nsh package --target macos` 生成的基础 Runner 默认不处理 macOS Finder 的 `application:openFile:` / `application:openFiles:` / `application:openURLs:` 事件，也不解析命令行传入的文件路径。`scripts/package-macos.sh` 通过 3 个原生组件补齐完整桌面体验：
 
-export type PreviewMode = "preview" | "source" | "diff";
+1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/NativeEditor`）**：
+   - 原 `NativeEditor` 二进制被重命名为 `NativeEditorCore`。
+   - `launcher` 解析命令行参数：目录参数写入 `NATIVE_EDITOR_ROOT`，文件参数写入 `NATIVE_EDITOR_OPEN_FILE` 并追加到 `/tmp/native-editor-open.queue`，随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("NativeEditorCore")`。
+2. **`scripts/finder_bridge.m`（`libFinderBridge.dylib`）**：
+   - 在 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警）。
+   - Method Swizzle `NSApplication setDelegate:`，向宿主 Delegate 动态注入 `application:openFile:`、`application:openFiles:` 与 `application:openURLs:`，将 Finder 双击或拖拽打开的文件路径写入 `/tmp/native-editor-open.queue`。
+3. **`scripts/set_default_handlers.m`**：
+   - 调用 `LSSetDefaultRoleHandlerForContentType` 将 `dev.byronwayne.nativeeditor` 注册为 Markdown、Mermaid（`.mmd`）、JSON/JSONL、CSV/TSV、YAML/TOML、Diff 及主流源码文件的系统默认编辑器。
 
-export interface TableData {
-  columns: DataTableColumn[];
-  rows: (string | number)[][];
-}
+---
 
-export interface FileClassification {
-  kind: FileKind;
-  language: string;
-  defaultMode: PreviewMode;
-  supportsPreview: boolean;
-  mimeType: string;
-}
+## 关键决定与踩坑记录（Verified Facts & Traps）
 
-/** Classify a file by its path and optional leading bytes (up to 4 KB). */
-export function classifyFile(filePath: string, sampleBytes?: Uint8Array): FileClassification;
+1. **`nsh 0.3.0` 桌面无头测试平台参数**：
+   - `nsh/test` 的 `open("./App.tsx")` 默认使用 `{ platform: "ios", width: 390, height: 844 }`，会禁用 `fs/promises` 与 `process`。在 `App.test.tsx` 中必须显式传入 `{ platform: "macos", width: 1280, height: 800 }`。
+2. **`process.run` / `process.spawn` 必须显式传 `{ cwd }`（`nsh 0.3.0`）**：
+   - 未配置宿主 `dataDir` 时省略 `cwd` 会直接抛错；且 `cwd` 必须落在 `nsh.json` 的 `capabilities.fs.write` 授权目录内（`${homeDir}` 或 `/tmp`）。`nsh.json` 中绝不能写 `~` 或 `$HOME`，必须写 `${homeDir}`。
+3. **JSX 标签与内置控制流（`nsh 0.3.0`）**：
+   - 所有组件标签必须大写开头（`<View>`、`<Text>`）；小写 HTML 标签编译失败。`<If when={...}>` 与 `<Each of={...}>` 是编译器注入的全局宏，**严禁从 `"nsh"` 导入**。
+4. **冷启动绝不自动扫描 `$HOME` 或 `/`**：
+   - 早期版本在未传工作区时回退 `os.homedir()`，导致应用一启动就递归扫描用户主目录并卡顿。现 `getInitialWorkspaceRoot()` 在无显式工作区时返回 `""`，隐藏左侧文件树并渲染干净的 `WelcomePanel`。
+5. **`DYLD_INSERT_LIBRARIES` 泄漏坑**：
+   - 若不在 `finder_bridge.m` 的构造函数里立即 `unsetenv("DYLD_INSERT_LIBRARIES")`，内置 PTY 终端里启动的所有 macOS 系统命令都会尝试加载 `libFinderBridge.dylib`。
+6. **`nsh/base` 无样式原语（`Select` / `Command` / `Tree`）必须传完整浮层与行渲染**：
+   - `Select` 原生不带任何背景、边框或字色（默认字色为纯黑 `#000000`）。使用时必须显式传入 `placement`、`popupClass` / `popupStyle` 及 `renderItem`（显式指定主题 `foreground` 字色、字体与选中/高亮态背景），否则在深色主题下会出现「透明底 + 黑字」悬浮现象。
 
-/** Parse CSV, TSV, or JSONL text into DataTable columns and rows. */
-export function parseTableData(text: string, filePath: string): TableData;
+---
 
-/** Format leading bytes (up to 4 KB) as a classic hex + ASCII dump. */
-export function formatHexDump(bytes: Uint8Array, maxBytes?: number): string;
+## 试过不做的方案（Tried & Rejected）
 
-/** Generate a macOS Quick Look thumbnail PNG for PDF/Office/iWork files and return a blob: URL (or null on failure). */
-export async function generateQuickLookUrl(filePath: string, cwd: string): Promise<string | null>;
+- **混合 Rust 模板（`--template mixed`）**：实测首次 `nsh test` 编译耗时 70s、二进制达 192 MB，且多 Agent 并行时 Cargo 锁冲突严重；纯 TSX（`--template ts`）配合 Python `pty.fork()` 与轻量 C/ObjC 包装即可满足全部原生能力，`nsh check` 仅 0.2s、`nsh test` 仅 1.0s。
+- **使用 `qlmanage` + 底部外部打开操作栏预览 PDF**：`qlmanage -t` 在部分系统环境下会弹窗或阻塞，且底部常驻 `Open in Preview` 操作栏喧宾夺主；已改为直接调用 macOS 内置 `sips -s format png` 生成高清预览图，去掉冗余操作栏。
+- **状态栏字体按钮打开完整 Preferences 弹窗**：用户只想换字体，弹出整页设置（主题、字号、Shell）太重。现在状态栏的主题和字体按钮各自弹出一个简单列表（字体列表每项用该字体本身渲染），完整设置留给 `Cmd+,`。
+- **在 Markdown 预览中用字符画（`mmd2txt`）替代矢量图**：终端适合字符画，但桌面 GUI 编辑器用户期望高分辨率图表；因此采用隐藏 `WebView` + SVG `<foreignObject>` 内联 + 2x Retina PNG 光栅化方案。
 
-/** Create a zero-copy blob: URL from raw file bytes and MIME type. */
-export function createBlobUrl(bytes: Uint8Array, mimeType: string): string;
-```
+---
 
-### 4.2 `src/workspace.ts`（由 `epi-deepseek` 实现）
+## 验证与基准（Verification & Benchmarks）
 
-```ts
-import type { CommandItem, TreeItem } from "nsh/base";
-import type { FileClassification, PreviewMode, TableData } from "./classify";
-
-export type GitStatusCode = "M" | "A" | "D" | "U" | "R";
-
-export interface WorkspaceEntry {
-  path: string;       // absolute path
-  relPath: string;    // relative to workspace root
-  name: string;
-  isDirectory: boolean;
-  gitStatus?: GitStatusCode;
-  children?: WorkspaceEntry[];
-}
-
-export interface WorkspaceSnapshot {
-  root: string;
-  branch: string;
-  entries: WorkspaceEntry[];
-  flatFiles: WorkspaceEntry[];
-  gitStatusMap: Record<string, GitStatusCode>;
-  treeItemsAll: TreeItem[];
-  treeItemsChanged: TreeItem[];
-  commandItems: CommandItem[];
-}
-
-export interface LoadedFile {
-  path: string;
-  relPath: string;
-  name: string;
-  size: number;
-  classification: FileClassification;
-  mode: PreviewMode;
-  text: string;
-  savedText: string;
-  dirty: boolean;
-  blobUrl: string | null;
-  quickLookUrl: string | null;
-  tableData: TableData | null;
-  hexDump: string;
-  diffPatch: string;
-}
-
-/** Resolve initial workspace root from process.env.NATIVE_EDITOR_ROOT or process.cwd() or os.homedir(). */
-export function getInitialWorkspaceRoot(): string;
-
-/** Scan workspace directory, git branch, and git status (-z). */
-export async function scanWorkspace(root: string): Promise<WorkspaceSnapshot>;
-
-/** Load a file for preview/editing (reads bytes, classifies, parses table/hex/diff/blob as needed). */
-export async function loadFile(filePath: string, root: string, preferredMode?: PreviewMode): Promise<LoadedFile>;
-
-/** Save text content to disk and return updated LoadedFile state. */
-export async function saveFileText(file: LoadedFile, newText: string, root: string): Promise<LoadedFile>;
-
-/** Fetch git diff patch for a specific file (staged + unstaged vs HEAD). */
-export async function getFileDiffPatch(filePath: string, root: string): Promise<string>;
-
-/** Open macOS folder picker dialog via osascript and return selected folder path or null. */
-export async function pickWorkspaceFolder(cwd: string): Promise<string | null>;
-
-/** Open file in macOS default application (`open <path>`). */
-export async function openInDefaultApp(filePath: string, cwd: string): Promise<void>;
-
-/** Reveal file in macOS Finder (`open -R <path>`). */
-export async function revealInFinder(filePath: string, cwd: string): Promise<void>;
-```
-
-### 4.3 `src/TerminalPane.tsx`（由 `epi-deepseek` 实现）
-
-```tsx
-import type { Accessor } from "nsh";
-
-export interface TerminalPaneProps {
-  cwd: Accessor<string>;
-  onFileOpen?: (filePath: string) => void;
-}
-
-export function TerminalPane(props: TerminalPaneProps): JSX.Element;
-```
-
-### 4.4 `src/Sidebar.tsx`（由 `epi-gemini` 实现）
-
-```tsx
-import type { Accessor, Signal } from "nsh";
-import type { CommandItem, TreeItem } from "nsh/base";
-import type { GitStatusCode } from "./workspace";
-
-export interface SidebarProps {
-  root: Accessor<string>;
-  branch: Accessor<string>;
-  filterMode: Signal<"all" | "changed">;
-  treeItems: Accessor<TreeItem[]>;
-  expandedIds: Signal<string[]>;
-  selectedPath: Signal<string | null>;
-  gitStatusMap: Accessor<Record<string, GitStatusCode>>;
-  changedCount: Accessor<number>;
-  onSelectFile: (filePath: string, openInDiff?: boolean) => void;
-  onRefresh: () => void;
-  onOpenFolder: () => void;
-}
-
-export function Sidebar(props: SidebarProps): JSX.Element;
-
-export interface CommandPaletteProps {
-  open: Signal<boolean>;
-  mode: Accessor<"files" | "commands">;
-  fileItems: Accessor<CommandItem[]>;
-  commandItems: Accessor<CommandItem[]>;
-  onSelectFile: (filePath: string) => void;
-  onRunCommand: (commandId: string) => void;
-}
-
-export function CommandPalette(props: CommandPaletteProps): JSX.Element;
-```
-
-### 4.5 `src/PreviewPane.tsx`（由 `epi-gemini` 实现）
-
-```tsx
-import type { Accessor } from "nsh";
-import type { LoadedFile } from "./workspace";
-import type { PreviewMode } from "./classify";
-
-export interface PreviewPaneProps {
-  file: Accessor<LoadedFile | undefined>;
-  workspaceRoot: Accessor<string>;
-  onTextChange: (filePath: string, newText: string) => void;
-  onSave: (filePath: string) => void;
-  onModeChange: (filePath: string, mode: PreviewMode) => void;
-  onOpenRelativeLink: (relUrl: string, baseFilePath: string) => void;
-  onCursorChange?: (line: number, column: number) => void;
-}
-
-export function PreviewPane(props: PreviewPaneProps): JSX.Element;
-```
-
+| 检查项 | 命令 | 基准指标（macOS arm64，`nsh 0.3.0`） |
+|---|---|---|
+| 类型检查 | `nsh check` | ~0.2s，0 errors |
+| 单测与桌面无头 E2E | `nsh test --trace` | ~1.0s，覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析与真 PTY 回显 |
+| 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
+| 打包体积与速度 | `nsh package --target macos` | 增量打包 ~64ms，`.app` 体积 ~37 MB |

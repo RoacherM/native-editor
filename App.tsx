@@ -424,6 +424,95 @@ function shortFontLabel(family: string, size: number): string {
   return `${short} · ${size}px`;
 }
 
+function ThemeSelectOptionRow(props: {
+  optionId: string;
+  selected: boolean;
+  highlighted: boolean;
+  activeTheme: Accessor<EditorTheme>;
+}): JSX.Element {
+  const opt = getThemeById(props.optionId);
+  const current = props.activeTheme();
+  return (
+    <View
+      testID={`theme-option-${opt.id}`}
+      style={{
+        backgroundColor:
+          props.highlighted || props.selected
+            ? current.ui.selection
+            : "transparent",
+      }}
+      class="h-7 px-2.5 rounded flex-row items-center justify-between gap-2.5 select-none"
+    >
+      <View class="flex-row items-center gap-2 min-w-0">
+        <View
+          style={{
+            backgroundColor: opt.ui.background,
+            borderColor: opt.ui.border,
+          }}
+          class="px-1.5 py-0.5 rounded border flex-row items-center gap-1 shrink-0"
+        >
+          <View
+            class="w-1.5 h-1.5 rounded-full"
+            style={{ backgroundColor: opt.syntax.keyword }}
+          />
+          <View
+            class="w-1.5 h-1.5 rounded-full"
+            style={{ backgroundColor: opt.syntax.string }}
+          />
+          <View
+            class="w-1.5 h-1.5 rounded-full"
+            style={{ backgroundColor: opt.syntax.function }}
+          />
+        </View>
+        <Text
+          style={{ color: current.ui.foreground }}
+          class={`text-xs font-mono truncate ${
+            props.selected ? "font-semibold" : "font-normal"
+          }`}
+        >
+          {opt.name}
+        </Text>
+      </View>
+      <View class="w-3.5 items-center justify-center shrink-0">
+        <If when={props.selected}>
+          <Icon name="check" size={11.5} tint={current.ui.accent} />
+        </If>
+      </View>
+    </View>
+  );
+}
+
+function FontSelectOptionRow(props: {
+  family: string;
+  selected: boolean;
+  highlighted: boolean;
+  activeTheme: Accessor<EditorTheme>;
+}): JSX.Element {
+  const ui = props.activeTheme().ui;
+  return (
+    <View
+      testID={`font-option-${props.family.split(/\s+/)[0]}`}
+      style={{
+        backgroundColor:
+          props.highlighted || props.selected ? ui.selection : "transparent",
+      }}
+      class="h-7 px-2.5 rounded flex-row items-center justify-between gap-2.5 select-none"
+    >
+      <Text
+        style={{ color: ui.foreground, fontFamily: props.family }}
+        class="text-xs truncate"
+      >
+        {props.family}
+      </Text>
+      <View class="w-3.5 items-center justify-center shrink-0">
+        <If when={props.selected}>
+          <Icon name="check" size={11.5} tint={ui.accent} />
+        </If>
+      </View>
+    </View>
+  );
+}
+
 function StatusBar(props: {
   branch: Accessor<string>;
   changedCount: Accessor<number>;
@@ -434,7 +523,7 @@ function StatusBar(props: {
   fontSize: Accessor<number>;
   theme: Accessor<EditorTheme>;
   onSelectTheme: (themeId: string) => void;
-  onOpenFontSettings: () => void;
+  onSelectFont: (family: string) => void;
   onRefresh: () => void;
   onToggleTheme: () => void;
 }): JSX.Element {
@@ -448,6 +537,13 @@ function StatusBar(props: {
     value: t.id,
     title: t.name,
   }));
+  const fontOptions = computed(() => {
+    const current = props.fontFamily();
+    const families = FONT_FAMILY_PRESETS.includes(current)
+      ? FONT_FAMILY_PRESETS
+      : [current, ...FONT_FAMILY_PRESETS];
+    return families.map((f) => ({ value: f, title: f }));
+  });
 
   return (
     <View
@@ -484,11 +580,31 @@ function StatusBar(props: {
           testID="statusbar-theme-select"
           value={props.theme().id}
           items={themeOptions}
+          placement="top"
+          align="end"
+          offset={6}
           onChange={({ value }) => {
             if (value) props.onSelectTheme(value);
           }}
+          popupClass="w-56 rounded-lg border shadow-2xl p-1"
+          popupStyle={{
+            backgroundColor: props.theme().ui.card,
+            borderColor: props.theme().ui.border,
+          }}
+          itemClass="rounded cursor-pointer"
+          renderItem={(item) => (
+            <ThemeSelectOptionRow
+              optionId={item.value}
+              selected={item.selected}
+              highlighted={item.highlighted}
+              activeTheme={props.theme}
+            />
+          )}
           trigger={
-            <View class="h-4 px-1.5 rounded flex-row items-center gap-1 hover:bg-muted/60">
+            <View
+              testID="statusbar-theme-trigger"
+              class="h-4 px-1.5 rounded flex-row items-center gap-1 hover:bg-muted/60"
+            >
               <View
                 class="w-2 h-2 rounded-full"
                 style={{ backgroundColor: props.theme().ui.accent }}
@@ -500,15 +616,42 @@ function StatusBar(props: {
           }
           class="h-4"
         />
-        <Button
-          testID="statusbar-font-btn"
-          onPress={props.onOpenFontSettings}
-          class="h-4 px-1.5 items-center justify-center rounded bg-transparent hover:bg-muted/60 border-none shadow-none p-0"
-        >
-          <Text class="text-[10.5px] font-mono text-muted-foreground hover:text-foreground">
-            {fontBadge()}
-          </Text>
-        </Button>
+        <Select
+          testID="statusbar-font-select"
+          value={props.fontFamily()}
+          items={fontOptions()}
+          placement="top"
+          align="end"
+          offset={6}
+          onChange={({ value }) => {
+            if (value) props.onSelectFont(value);
+          }}
+          popupClass="w-64 rounded-lg border shadow-2xl p-1"
+          popupStyle={{
+            backgroundColor: props.theme().ui.card,
+            borderColor: props.theme().ui.border,
+          }}
+          itemClass="rounded cursor-pointer"
+          renderItem={(item) => (
+            <FontSelectOptionRow
+              family={item.value}
+              selected={item.selected}
+              highlighted={item.highlighted}
+              activeTheme={props.theme}
+            />
+          )}
+          trigger={
+            <View
+              testID="statusbar-font-trigger"
+              class="h-4 px-1.5 rounded flex-row items-center hover:bg-muted/60"
+            >
+              <Text class="text-[10.5px] font-mono text-muted-foreground">
+                {fontBadge()}
+              </Text>
+            </View>
+          }
+          class="h-4"
+        />
         <Button
           testID="titlebar-toggle-theme"
           onPress={props.onToggleTheme}
@@ -1487,7 +1630,7 @@ function App(): JSX.Element {
         fontSize={fontSize}
         theme={activeTheme}
         onSelectTheme={selectTheme}
-        onOpenFontSettings={actions.openFontSettings}
+        onSelectFont={setFontFamily}
         onRefresh={refresh}
         onToggleTheme={actions.toggleTheme}
       />

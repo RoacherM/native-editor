@@ -7,12 +7,12 @@
 ## Features
 
 - **Native Editor & Markdown / Mermaid Preview**:
-  - Syntax-highlighted code editor with inline Find (`Cmd+F`) and dirty-state tracking (`Cmd+S`).
-  - Markdown preview with automatic **Mermaid diagram rendering** (via local `mmd2txt` + `beautiful-mermaid` ASCII/Unicode or vector diagram fallback) and standalone `.mmd` / `.mermaid` file preview.
+  - Syntax-highlighted code editor with inline Find (`Cmd+F`), 6 color themes, and dirty-state tracking (`Cmd+S`).
+  - Markdown preview with automatic **Mermaid diagram rendering** (offscreen WebKit SVG layout + 2x Retina PNG rasterization with zoom & Diagram/Code toggle) and standalone `.mmd` / `.mermaid` file preview.
 - **Multi-Format & Multimedia Preview**:
   - **Tables**: Native `DataTable` viewer for `.csv`, `.tsv`, and `.jsonl`.
   - **Diff**: Unified and Split Git diff viewer (`DiffView`) for `.diff` / `.patch` and modified workspace files.
-  - **Multimedia**: Raster & SVG image viewer with zoom (`25%` – `400%`) and checkerboard backdrop toggle, native video player (`.mp4`, `.mov`, `.m4v`), native audio player (`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`), PDF/Document Quick Look preview, and binary Hex + ASCII dump.
+  - **Multimedia**: Raster & SVG image viewer with zoom (`25%` – `400%`) and checkerboard backdrop toggle, native video player (`.mp4`, `.mov`, `.m4v`), native audio player (`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`), PDF preview via macOS `sips`, and binary Hex + ASCII dump.
 - **Interactive PTY Terminal & Shell Selector**:
   - Built-in multi-tab PTY terminal (`process.spawn` + Python `pty.fork()`) with inline prompt and automatic Ghostty font/theme detection.
   - Switch between installed shells (`zsh`, `fish`, `bash`, `nu`, `sh`) directly from the terminal header dropdown or the Preferences dialog (`Cmd+,`).

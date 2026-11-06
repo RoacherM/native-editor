@@ -7,6 +7,7 @@ import {
 } from "./src/classify";
 import { detectMermaidKind, preprocessMermaidCode } from "./src/mermaid";
 import { parseGhosttyConfig } from "./src/TerminalPane";
+import manifest from "./nsh.json";
 import {
   computeSyntaxDecorations,
   EDITOR_THEMES,
@@ -108,6 +109,15 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
       tokyo.syntax
     );
     expect(tsDecos.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test("enforces least-privilege process.execute allowlist in nsh.json", () => {
+    expect(manifest.capabilities.process.execute).toEqual([
+      "git",
+      "python3",
+      "sips",
+      "osascript",
+    ]);
   });
 });
 
@@ -230,11 +240,24 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
     await app.press("id:titlebar-toggle-sidebar");
     await app.waitFor("id:workspace-tree");
 
-    // 12. Theme toggle (Dark <-> Light) & Font Family/Size configuration
+    // 12. Theme toggle (Dark <-> Light), Statusbar Theme Select popup & Font Family/Size configuration
     await app.press("id:titlebar-toggle-theme");
     await app.press("id:titlebar-toggle-theme");
 
-    await app.press("id:statusbar-font-btn");
+    await app.press("id:statusbar-theme-trigger");
+    await app.waitFor("id:theme-option-tokyo-night");
+    expect(app.shows("id:theme-option-tokyo-night")).toBe(true);
+    await app.press("id:theme-option-tokyo-night");
+    expect(app.shows("text:Tokyo Night")).toBe(true);
+
+    // Status-bar font badge opens a plain font list, not the Preferences dialog
+    await app.press("id:statusbar-font-trigger");
+    await app.waitFor("id:font-option-Menlo");
+    expect(app.shows("id:font-settings-dialog")).toBe(false);
+    await app.press("id:font-option-Menlo");
+    await app.waitFor("text:Menlo · 14px");
+
+    await app.keyboard.press("mod+,");
     await app.waitFor("id:font-settings-dialog");
     expect(app.shows("id:theme-preset-tokyo-night")).toBe(true);
     await app.press("id:theme-preset-tokyo-night");

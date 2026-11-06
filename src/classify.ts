@@ -3,6 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import process from "process";
 
+// DESIGN.md「文件预览与 Mermaid 渲染契约」
 export type FileKind =
   | "code"
   | "markdown"
@@ -36,7 +37,7 @@ export interface FileClassification {
   mimeType: string;
 }
 
-/** The directory Quick Look thumbnails are cached in (inside the /tmp grant). */
+/** The directory PDF preview thumbnails are cached in (inside the /tmp grant). */
 const QUICK_LOOK_DIR = "/tmp/native-editor-ql";
 
 /** A cell that reads as a number becomes one, so a table sorts numerically. */

@@ -32,7 +32,8 @@ export type IconName =
   | "play"
   | "music"
   | "zoom-in"
-  | "zoom-out";
+  | "zoom-out"
+  | "check";
 
 type DrawFn = (cx: CanvasRenderingContext2D) => void;
 
@@ -195,6 +196,9 @@ const GLYPHS: Record<IconName, DrawFn> = {
     strokeCircle(c, 8.8, 8.8, 4.8);
     strokeLine(c, [6.8, 8.8, 10.8, 8.8]);
     strokeLine(c, [12.4, 12.4, 16.5, 16.5]);
+  },
+  check: (c) => {
+    strokeLine(c, [4.5, 10.5, 8.3, 14.2, 15.5, 6]);
   },
 };
 

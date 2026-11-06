@@ -89,6 +89,7 @@ function isOpaqueFile(classification: FileClassification): boolean {
   return OPAQUE_KINDS.has(classification.kind);
 }
 
+// DESIGN.md「术语与边界」
 const FINDER_OPEN_QUEUE_PATH = "/tmp/native-editor-open.queue";
 
 /** Resolve initial file opened from Finder or environment. */

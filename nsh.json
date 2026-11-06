@@ -66,19 +66,7 @@
       "write": ["${homeDir}", "/tmp"]
     },
     "process": {
-      "execute": [
-        "sh",
-        "zsh",
-        "bash",
-        "git",
-        "python3",
-        "qlmanage",
-        "sips",
-        "open",
-        "osascript",
-        "mmd2txt",
-        "rg"
-      ],
+      "execute": ["git", "python3", "sips", "osascript"],
       "exit": true,
       "env": [
         "SHELL",
