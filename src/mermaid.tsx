@@ -20,6 +20,7 @@ import {
 import { Button } from "nsh/base";
 import { createBlobUrl } from "./classify";
 import { Icon } from "./icons";
+import { EDITOR_THEMES, type EditorTheme, type ThemeUiColors } from "./themes";
 
 export interface MermaidRenderResult {
   blobUrl: string;
@@ -31,6 +32,7 @@ interface PendingJob {
   id: number;
   code: string;
   theme: "dark" | "light";
+  palette: ThemeUiColors;
   fontFamily: string;
   resolve: (res: MermaidRenderResult) => void;
   reject: (err: Error) => void;
@@ -47,7 +49,7 @@ interface WorkerMessage {
 }
 
 // DESIGN.md「文件预览与 Mermaid 渲染契约」
-const CACHE_DIR = "/tmp/native-editor-mermaid";
+const CACHE_DIR = "/tmp/aed-mermaid";
 const CACHED_BUNDLE_PATH = `${CACHE_DIR}/mermaid-docu-bundle.js`;
 const MERMAID_START_MARKER = "var __esbuild_esm_mermaid_nm;";
 const MERMAID_END_MARKER =
@@ -185,10 +187,10 @@ function resolveLegibleTextColor(raw, isDark, fallback) {
   return raw;
 }
 
-function inlineForeignObjects(svgEl, isDark) {
+function inlineForeignObjects(svgEl, isDark, textHex, bgHex) {
   const ns = "http://www.w3.org/2000/svg";
-  const defaultColor = isDark ? "#f1f5f9" : "#1f2937";
-  const edgeBg = isDark ? "#18181b" : "#f8fafc";
+  const defaultColor = textHex || (isDark ? "#ede8de" : "#141414");
+  const edgeBg = bgHex || (isDark ? "#232220" : "#f7f4ee");
   svgEl.querySelectorAll("foreignObject").forEach((fo) => {
     const lines = parseSvgLines(fo);
     if (lines.length === 0) {
@@ -201,8 +203,8 @@ function inlineForeignObjects(svgEl, isDark) {
     const h = parseFloat(fo.getAttribute("height") || "0") || fo.clientHeight || 36;
     const targetEl = fo.querySelector(".nodeLabel, .edgeLabel, .cluster-label, span, div") || fo;
     const cs = window.getComputedStyle(targetEl);
-    const fontSize = parseFloat(cs.fontSize || "13.5") || 13.5;
-    const lineHeight = fontSize * 1.32;
+    const fontSize = parseFloat(cs.fontSize || "13") || 13;
+    const lineHeight = fontSize * 1.35;
     const color = resolveLegibleTextColor(cs.color, isDark, defaultColor);
     const fontFamily = cs.fontFamily || '-apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
     const fontWeight = cs.fontWeight || "500";
@@ -215,7 +217,7 @@ function inlineForeignObjects(svgEl, isDark) {
       rect.setAttribute("height", String(h + 4));
       rect.setAttribute("rx", "4");
       rect.setAttribute("fill", edgeBg);
-      rect.setAttribute("fill-opacity", "0.92");
+      rect.setAttribute("fill-opacity", "0.94");
       g.appendChild(rect);
     }
     const textEl = document.createElementNS(ns, "text");
@@ -243,8 +245,8 @@ function inlineForeignObjects(svgEl, isDark) {
   });
 }
 
-function inlineExistingTextStyles(svgEl, isDark) {
-  const fallback = isDark ? "#f1f5f9" : "#1f2937";
+function inlineExistingTextStyles(svgEl, isDark, textHex) {
+  const fallback = textHex || (isDark ? "#ede8de" : "#141414");
   svgEl.querySelectorAll("text").forEach((t) => {
     const cs = window.getComputedStyle(t);
     const existingFill = t.getAttribute("fill");
@@ -315,40 +317,52 @@ window.__nshRenderMermaid = async function(req) {
   const stage = document.getElementById("stage");
   try {
     const isDark = req.theme !== "light";
+    const p = req.palette || {};
+    const fg = p.foreground || (isDark ? "#ede8de" : "#141414");
+    const card = p.card || (isDark ? "#232220" : "#f7f4ee");
+    const sidebar = p.sidebar || (isDark ? "#1d1c1a" : "#e5e0d5");
+    const bg = p.background || (isDark ? "#161514" : "#efebe3");
+    const border = p.border || (isDark ? "#33312d" : "#cfc8bb");
+    const muted = p.mutedForeground || (isDark ? "#8f897e" : "#6d685f");
     const font = (req.fontFamily ? req.fontFamily + ", " : "") +
       '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif';
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "loose",
-      theme: isDark ? "dark" : "default",
+      theme: "base",
       look: "classic",
       fontFamily: font,
       flowchart: { htmlLabels: true, curve: "basis", padding: 14 },
       sequence: { useMaxWidth: false },
-      themeVariables: isDark ? {
+      themeVariables: {
+        darkMode: isDark,
         fontFamily: font,
-        fontSize: "13.5px",
+        fontSize: "13px",
         background: "transparent",
-        primaryColor: "#1e293b",
-        primaryTextColor: "#e2e8f0",
-        primaryBorderColor: "#475569",
-        lineColor: "#94a3b8",
-        secondaryColor: "#1e1b4b",
-        tertiaryColor: "#0f172a",
-        clusterBkg: "#111827",
-        clusterBorder: "#374151",
-      } : {
-        fontFamily: font,
-        fontSize: "13.5px",
-        background: "transparent",
+        primaryColor: card,
+        primaryTextColor: fg,
+        primaryBorderColor: border,
+        lineColor: muted,
+        secondaryColor: sidebar,
+        tertiaryColor: bg,
+        clusterBkg: sidebar,
+        clusterBorder: border,
+        edgeLabelBackground: card,
+        actorBkg: card,
+        actorBorder: border,
+        actorTextColor: fg,
+        signalColor: fg,
+        noteBkgColor: sidebar,
+        noteTextColor: fg,
+        noteBorderColor: border,
       },
     });
     const out = await mermaid.render("nsh-mmd-" + req.id, req.code);
     stage.innerHTML = out.svg;
     const svgEl = stage.querySelector("svg");
     if (!svgEl) throw new Error("Mermaid did not produce an SVG element");
-    inlineForeignObjects(svgEl, isDark);
-    inlineExistingTextStyles(svgEl, isDark);
+    inlineForeignObjects(svgEl, isDark, fg, card);
+    inlineExistingTextStyles(svgEl, isDark, fg);
     const png = await rasterizeSvgToPng(svgEl);
     stage.innerHTML = "";
     window.nsh.postMessage(JSON.stringify({
@@ -408,6 +422,7 @@ function flushPendingJobs(): void {
       id: job.id,
       code: job.code,
       theme: job.theme,
+      palette: job.palette,
       fontFamily: job.fontFamily,
     });
     activeWebViewRef.injectJavaScript(`window.__nshRenderMermaid(${payload});`);
@@ -458,12 +473,18 @@ function ensureWorkerInitialized(): void {
 /** Render Mermaid diagram source into a Retina PNG blob: URL via the hidden WebKit host. */
 export function requestMermaidRender(
   rawCode: string,
-  theme: "dark" | "light",
+  themeOrAppearance: "dark" | "light" | EditorTheme,
   fontFamily = ""
 ): Promise<MermaidRenderResult> {
   ensureWorkerInitialized();
+  const resolvedTheme: EditorTheme =
+    typeof themeOrAppearance === "string"
+      ? themeOrAppearance === "light"
+        ? EDITOR_THEMES[0]
+        : EDITOR_THEMES[1]
+      : themeOrAppearance;
   const normalized = preprocessMermaidCode(rawCode);
-  const cacheKey = `${theme}:${fontFamily}:${normalized}`;
+  const cacheKey = `${resolvedTheme.id}:${fontFamily}:${normalized}`;
   const cached = renderCache.get(cacheKey);
   if (cached) return Promise.resolve(cached);
 
@@ -475,7 +496,8 @@ export function requestMermaidRender(
     pendingQueue.push({
       id: jobCounter,
       code: normalized,
-      theme,
+      theme: resolvedTheme.appearance,
+      palette: resolvedTheme.ui,
       fontFamily,
       resolve: (res) => {
         renderCache.set(cacheKey, res);
@@ -527,13 +549,114 @@ export function MermaidRendererHost(): JSX.Element {
   );
 }
 
+function MermaidBlockToolbar(props: {
+  kindLabel: Accessor<string>;
+  zoom: Accessor<number>;
+  showCode: Accessor<boolean>;
+  copied: Accessor<boolean>;
+  theme: Accessor<EditorTheme>;
+  onZoomDelta: (delta: number) => void;
+  onZoomReset: () => void;
+  onCopy: () => void;
+  onToggleCode: () => void;
+}): JSX.Element {
+  return (
+    <View
+      style={{ backgroundColor: props.theme().ui.sidebar }}
+      class="h-8 px-3 flex-row items-center justify-between select-none"
+    >
+      <Text
+        style={{ color: props.theme().ui.mutedForeground }}
+        class="text-xs font-mono"
+      >
+        {props.kindLabel()}
+      </Text>
+      <View class="flex-row items-center gap-1">
+        <If when={!props.showCode()}>
+          <View class="flex-row items-center gap-1 mr-1">
+            <Button
+              testID="mermaid-zoom-out"
+              onPress={() => props.onZoomDelta(-25)}
+              style={{ backgroundColor: props.theme().ui.card }}
+              class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
+            >
+              <Icon
+                name="zoom-out"
+                size={12}
+                tint={() => props.theme().ui.foreground}
+              />
+            </Button>
+            <Button
+              testID="mermaid-zoom-reset"
+              onPress={props.onZoomReset}
+              style={{ backgroundColor: props.theme().ui.card }}
+              class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
+            >
+              <Text
+                style={{ color: props.theme().ui.foreground }}
+                class="text-[11px] font-mono"
+              >
+                {`${props.zoom()}%`}
+              </Text>
+            </Button>
+            <Button
+              testID="mermaid-zoom-in"
+              onPress={() => props.onZoomDelta(25)}
+              style={{ backgroundColor: props.theme().ui.card }}
+              class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
+            >
+              <Icon
+                name="zoom-in"
+                size={12}
+                tint={() => props.theme().ui.foreground}
+              />
+            </Button>
+          </View>
+        </If>
+        <Button
+          testID="mermaid-copy-code"
+          onPress={props.onCopy}
+          style={{ backgroundColor: props.theme().ui.card }}
+          class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
+        >
+          <Text
+            style={{ color: props.theme().ui.foreground }}
+            class="text-[11px] font-medium"
+          >
+            {props.copied() ? "Copied" : "Copy"}
+          </Text>
+        </Button>
+        <Button
+          testID="mermaid-toggle-code"
+          onPress={props.onToggleCode}
+          style={{ backgroundColor: props.theme().ui.card }}
+          class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
+        >
+          <Text
+            style={{ color: props.theme().ui.foreground }}
+            class="text-[11px] font-medium"
+          >
+            {props.showCode() ? "Diagram" : "Code"}
+          </Text>
+        </Button>
+      </View>
+    </View>
+  );
+}
+
 /** Interactive Mermaid diagram block with zoom controls and Diagram/Code toggle (inspired by docu.md). */
 export function MermaidDiagramBlock(props: {
   code: string | Accessor<string>;
   fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
+  theme?: Accessor<EditorTheme>;
 }): JSX.Element {
   const rawCode = computed(() =>
     typeof props.code === "function" ? props.code() : props.code
+  );
+  const activeTheme = computed(
+    () =>
+      props.theme?.() ??
+      (colorScheme() === "light" ? EDITOR_THEMES[0] : EDITOR_THEMES[1])
   );
   const kindLabel = computed(() => detectMermaidKind(rawCode()));
   const zoom = signal(100);
@@ -552,10 +675,10 @@ export function MermaidDiagramBlock(props: {
 
   effect(() => {
     const code = rawCode();
-    const scheme = colorScheme() === "light" ? "light" : "dark";
+    const currentTheme = activeTheme();
     const font = props.fontStyle().fontFamily ?? "";
     errorMsg.set(null);
-    void requestMermaidRender(code, scheme, font)
+    void requestMermaidRender(code, currentTheme, font)
       .then((res) => {
         rendered.set(res);
       })
@@ -578,68 +701,26 @@ export function MermaidDiagramBlock(props: {
   return (
     <View
       testID="mermaid-block"
-      class="w-full my-3 rounded-lg border border-border bg-card/40 overflow-hidden"
+      style={{ backgroundColor: activeTheme().ui.card }}
+      class="w-full my-4 rounded-lg overflow-hidden"
     >
-      <View class="h-7 px-3 bg-muted/40 border-b border-border flex-row items-center justify-between select-none">
-        <View class="flex-row items-center gap-2">
-          <Text class="text-[10.5px] font-mono font-bold text-teal-400">
-            MERMAID
-          </Text>
-          <Text class="text-[10.5px] font-mono text-muted-foreground">
-            {kindLabel()}
-          </Text>
-        </View>
-        <View class="flex-row items-center gap-1">
-          <If when={!showCode()}>
-            <View class="flex-row items-center gap-1 mr-1">
-              <Button
-                testID="mermaid-zoom-out"
-                onPress={() => zoom.update((z) => clampZoom(z - 25))}
-                class="h-5 w-5 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none p-0"
-              >
-                <Icon name="zoom-out" size={10.5} tint="#cccccc" />
-              </Button>
-              <Button
-                testID="mermaid-zoom-reset"
-                onPress={() => zoom.set(100)}
-                class="h-5 px-1.5 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
-              >
-                <Text class="text-[10px] font-mono text-secondary-foreground">
-                  {`${zoom()}%`}
-                </Text>
-              </Button>
-              <Button
-                testID="mermaid-zoom-in"
-                onPress={() => zoom.update((z) => clampZoom(z + 25))}
-                class="h-5 w-5 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none p-0"
-              >
-                <Icon name="zoom-in" size={10.5} tint="#cccccc" />
-              </Button>
-            </View>
-          </If>
-          <Button
-            testID="mermaid-copy-code"
-            onPress={copySource}
-            class="h-5 px-2 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
-          >
-            <Text class="text-[10.5px] text-secondary-foreground font-medium">
-              {copied() ? "Copied" : "Copy"}
-            </Text>
-          </Button>
-          <Button
-            testID="mermaid-toggle-code"
-            onPress={() => showCode.update((v) => !v)}
-            class="h-5 px-2 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
-          >
-            <Text class="text-[10.5px] text-secondary-foreground font-medium">
-              {showCode() ? "Diagram" : "Code"}
-            </Text>
-          </Button>
-        </View>
-      </View>
+      <MermaidBlockToolbar
+        kindLabel={kindLabel}
+        zoom={zoom}
+        showCode={showCode}
+        copied={copied}
+        theme={activeTheme}
+        onZoomDelta={(d) => zoom.update((z) => clampZoom(z + d))}
+        onZoomReset={() => zoom.set(100)}
+        onCopy={copySource}
+        onToggleCode={() => showCode.update((v) => !v)}
+      />
 
       <If when={showCode() || !!errorMsg()}>
-        <View class="p-3.5 bg-background/80 gap-2">
+        <View
+          style={{ backgroundColor: activeTheme().ui.card }}
+          class="p-4 gap-2"
+        >
           <If when={errorMsg()}>
             {(err) => (
               <Text class="text-xs font-mono text-destructive">{err()}</Text>
@@ -647,8 +728,11 @@ export function MermaidDiagramBlock(props: {
           </If>
           <Text
             testID="mermaid-code-view"
-            style={props.fontStyle()}
-            class="select-text text-xs font-mono text-foreground"
+            style={{
+              ...props.fontStyle(),
+              color: activeTheme().ui.foreground,
+            }}
+            class="select-text text-xs font-mono"
           >
             {rawCode().trim()}
           </Text>
@@ -656,7 +740,10 @@ export function MermaidDiagramBlock(props: {
       </If>
 
       <If when={!showCode() && !errorMsg()}>
-        <View class="w-full items-center justify-center p-4 bg-background/30">
+        <View
+          style={{ backgroundColor: activeTheme().ui.card }}
+          class="w-full items-center justify-center p-4"
+        >
           <If when={rendered()}>
             {(res) => (
               <Scroll horizontal class="w-full">
@@ -677,10 +764,13 @@ export function MermaidDiagramBlock(props: {
           <If when={!rendered()}>
             <View
               testID="mermaid-loading"
-              class="w-full py-6 items-center justify-center gap-1.5"
+              class="w-full py-6 items-center justify-center gap-2"
             >
-              <Text class="text-xs font-mono text-muted-foreground">
-                {`Rendering ${kindLabel()} diagram...`}
+              <Text
+                style={{ color: activeTheme().ui.mutedForeground }}
+                class="text-xs font-mono"
+              >
+                {`Rendering ${kindLabel()}`}
               </Text>
             </View>
           </If>

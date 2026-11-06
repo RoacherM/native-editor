@@ -90,13 +90,13 @@ function isOpaqueFile(classification: FileClassification): boolean {
 }
 
 // DESIGN.md「术语与边界」
-const FINDER_OPEN_QUEUE_PATH = "/tmp/native-editor-open.queue";
+const FINDER_OPEN_QUEUE_PATH = "/tmp/aed-open.queue";
 
 /** Resolve initial file opened from Finder or environment. */
 export function getInitialOpenFile(): string | null {
   const fromHost = host?.params?.openFile;
   if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
-  const fromEnv = process.env.NATIVE_EDITOR_OPEN_FILE;
+  const fromEnv = process.env.AED_OPEN_FILE || process.env.NATIVE_EDITOR_OPEN_FILE;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
   return null;
 }
@@ -116,11 +116,11 @@ export async function consumeFinderOpenQueue(): Promise<string[]> {
   }
 }
 
-/** Resolve initial workspace root from host.params.workspaceRoot, process.env.NATIVE_EDITOR_ROOT, or initial openFile; returns "" on clean launch so $HOME or / is never auto-scanned. */
+/** Resolve initial workspace root from host.params.workspaceRoot, process.env.AED_ROOT (or legacy NATIVE_EDITOR_ROOT), or initial openFile; returns "" on clean launch so $HOME or / is never auto-scanned. */
 export function getInitialWorkspaceRoot(): string {
   const fromHost = host?.params?.workspaceRoot;
   if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
-  const fromEnv = process.env.NATIVE_EDITOR_ROOT;
+  const fromEnv = process.env.AED_ROOT || process.env.NATIVE_EDITOR_ROOT;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
   const initialFile = getInitialOpenFile();
   if (initialFile) return path.dirname(initialFile);

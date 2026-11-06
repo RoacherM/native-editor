@@ -85,24 +85,37 @@ function sortRows(
 function FindBar(props: {
   findOpen: Signal<boolean>;
   findQuery: Signal<string>;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   return (
     <If when={props.findOpen()}>
-      <View class="h-8 flex-row items-center px-3 bg-muted/40 border-b border-border gap-2 shrink-0">
+      <View
+        style={{ backgroundColor: props.theme().ui.sidebar }}
+        class="h-8 flex-row items-center px-3 gap-2 shrink-0"
+      >
         <Input
           testID="editor-find-input"
           autoFocus
           value={props.findQuery()}
           onChange={({ value }) => props.findQuery.set(value)}
-          placeholder="Find in file..."
-          style={{ height: 24 }}
-          class="flex-1 h-6 px-2 text-xs text-foreground placeholder:text-muted-foreground bg-background rounded border border-border"
+          placeholder="Find"
+          style={{
+            height: 24,
+            backgroundColor: props.theme().ui.background,
+            color: props.theme().ui.foreground,
+          }}
+          class="flex-1 h-6 px-2 text-xs text-foreground placeholder:text-muted-foreground rounded border-none"
         />
         <Button
           onPress={() => props.findOpen.set(false)}
-          class="px-2 py-0.5 rounded hover:bg-muted"
+          class="h-6 px-2 items-center justify-center rounded bg-transparent border-none shadow-none"
         >
-          <Text class="text-xs text-muted-foreground">Close</Text>
+          <Text
+            style={{ color: props.theme().ui.mutedForeground }}
+            class="text-xs"
+          >
+            Close
+          </Text>
         </Button>
       </View>
     </If>
@@ -125,11 +138,11 @@ function DiffBody(props: {
   const oldVal = computed(() => resolveDiffOldValue(f()));
   const newVal = computed(() => (f().diffPatch ? undefined : f().text));
   const statusText = computed(() => {
-    if (f().diffPatch) return "Git Diff vs HEAD";
-    if (f().gitStatus === "U") return "Untracked file (all lines added)";
-    if (f().gitStatus === "A") return "Staged new file (all lines added)";
-    if (f().dirty) return "Unsaved buffer changes";
-    return "Working tree clean (no changes vs HEAD)";
+    if (f().diffPatch) return "Git diff vs HEAD";
+    if (f().gitStatus === "U") return "Untracked file";
+    if (f().gitStatus === "A") return "Staged new file";
+    if (f().dirty) return "Unsaved changes";
+    return "Working tree clean";
   });
 
   return (
@@ -162,8 +175,14 @@ function DiffBody(props: {
         style={{ backgroundColor: props.theme().ui.background }}
         class="flex-1"
       />
-      <View class="absolute bottom-3 right-4 flex-row items-center gap-2 px-2.5 py-1 rounded bg-card border border-border shadow-md select-none">
-        <Text class="text-[11px] font-mono text-muted-foreground">
+      <View
+        style={{ backgroundColor: props.theme().ui.card }}
+        class="absolute bottom-3 right-4 flex-row items-center gap-2 px-3 py-1 rounded-md shadow-lg select-none"
+      >
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-[11px] font-mono"
+        >
           {statusText()}
         </Text>
         <Button
@@ -171,9 +190,13 @@ function DiffBody(props: {
           onPress={() =>
             props.diffLayout.update((l) => (l === "split" ? "unified" : "split"))
           }
-          class="px-2 py-0.5 rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
         >
-          <Text class="text-[11px] text-secondary-foreground font-medium">
+          <Text
+            style={{ color: props.theme().ui.foreground }}
+            class="text-[11px] font-medium"
+          >
             {props.diffLayout() === "split" ? "Unified View" : "Split View"}
           </Text>
         </Button>
@@ -258,6 +281,7 @@ function EditorBody(props: {
 function TableBody(props: {
   file: Accessor<LoadedFile>;
   sort: Signal<DataTableSort | null>;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const f = props.file;
   const sortedTableRows = computed(() =>
@@ -275,40 +299,108 @@ function TableBody(props: {
       stripe
       rowHeader
       classes={{
-        headerCell: "text-foreground font-semibold bg-muted/60 border-b border-r border-border px-2.5",
-        cell: "text-foreground border-b border-r border-border/40 px-2.5",
+        headerCell: "text-foreground font-medium bg-muted/60 border-b border-r border-border px-3",
+        cell: "text-foreground border-b border-r border-border/40 px-3",
         rowOdd: "bg-muted/15",
         rowHover: "bg-muted/30",
         rowHeader: "text-muted-foreground bg-muted/40 border-b border-r border-border px-2",
         rowHeaderCorner: "bg-muted/60 border-b border-r border-border",
       }}
-      class="flex-1 bg-background"
+      style={{ backgroundColor: props.theme().ui.background }}
+      class="flex-1"
     />
   );
 }
 
 function QuickLookBody(props: {
   file: Accessor<LoadedFile>;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const f = props.file;
+  const zoom = signal<number>(100);
+  const sheetWidth = computed(() => Math.round(580 * (zoom() / 100)));
+  const sheetHeight = computed(() => Math.round(750 * (zoom() / 100)));
+
   return (
-    <View class="flex-1 relative bg-background">
+    <View
+      style={{ backgroundColor: props.theme().ui.background }}
+      class="flex-1 relative"
+    >
       <If when={f().quickLookUrl}>
         {(url) => (
-          <View class="flex-1 p-4 items-center justify-center">
-            <Image
-              testID="preview-quicklook"
-              src={url()}
-              class="w-full h-full flex-1"
-              style={{ objectFit: "contain" }}
-            />
+          <View class="flex-1">
+            <Scroll class="flex-1">
+              <View class="flex-1 min-h-full items-center justify-center p-6">
+                <View
+                  testID="preview-quicklook-sheet"
+                  style={{
+                    backgroundColor: "#f7f4ee",
+                    width: sheetWidth(),
+                    height: sheetHeight(),
+                  }}
+                  class="rounded shadow-2xl items-center justify-center overflow-hidden"
+                >
+                  <Image
+                    testID="preview-quicklook"
+                    src={url()}
+                    style={{
+                      width: sheetWidth(),
+                      height: sheetHeight(),
+                      objectFit: "contain",
+                    }}
+                  />
+                </View>
+              </View>
+            </Scroll>
+            <View
+              style={{ backgroundColor: props.theme().ui.card }}
+              class="absolute bottom-3 left-3 h-7 px-2 rounded shadow-xl flex-row items-center gap-1"
+            >
+              <Button
+                testID="quicklook-zoom-out"
+                onPress={() => zoom.update((z) => Math.max(50, z - 25))}
+                class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
+              >
+                <Icon
+                  name="zoom-out"
+                  size={12}
+                  tint={() => props.theme().ui.foreground}
+                />
+              </Button>
+              <Button
+                testID="quicklook-zoom-reset"
+                onPress={() => zoom.set(100)}
+                class="h-6 px-2 rounded bg-transparent border-none shadow-none"
+              >
+                <Text
+                  style={{ color: props.theme().ui.foreground }}
+                  class="text-xs font-mono"
+                >
+                  {`${zoom()}%`}
+                </Text>
+              </Button>
+              <Button
+                testID="quicklook-zoom-in"
+                onPress={() => zoom.update((z) => Math.min(300, z + 25))}
+                class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
+              >
+                <Icon
+                  name="zoom-in"
+                  size={12}
+                  tint={() => props.theme().ui.foreground}
+                />
+              </Button>
+            </View>
           </View>
         )}
       </If>
       <If when={!f().quickLookUrl}>
         <View class="flex-1 items-center justify-center p-6 gap-2">
-          <Text class="text-sm text-muted-foreground">
-            Document preview not available for this file.
+          <Text
+            style={{ color: props.theme().ui.mutedForeground }}
+            class="text-xs"
+          >
+            Preview unavailable
           </Text>
         </View>
       </If>
@@ -330,6 +422,7 @@ export function formatMediaMeta(file: LoadedFile): string {
 
 function ImageBody(props: {
   file: Accessor<LoadedFile>;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const zoom = signal(100);
   const lightBg = signal(false);
@@ -339,9 +432,10 @@ function ImageBody(props: {
   return (
     <View
       testID="preview-image-container"
-      class={`flex-1 relative items-center justify-center p-6 ${
-        lightBg() ? "bg-neutral-200" : "bg-muted/10"
-      }`}
+      style={{
+        backgroundColor: lightBg() ? "#e5e5e5" : props.theme().ui.background,
+      }}
+      class="flex-1 relative items-center justify-center p-6"
     >
       <If when={props.file().blobUrl}>
         {(url) => (
@@ -361,39 +455,63 @@ function ImageBody(props: {
           </View>
         )}
       </If>
-      <View class="absolute bottom-4 self-center flex-row items-center gap-1.5 px-2.5 py-1 rounded-md bg-card/95 border border-border shadow-md select-none">
-        <Text class="text-[11px] font-mono text-muted-foreground pr-1">
+      <View
+        style={{ backgroundColor: props.theme().ui.card }}
+        class="absolute bottom-4 self-center flex-row items-center gap-2 px-3 py-1 rounded-md shadow-lg select-none"
+      >
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-[11px] font-mono pr-1"
+        >
           {metaText()}
         </Text>
         <Button
           testID="image-zoom-out"
           onPress={() => zoom.update((z) => clampZoom(z - 25))}
-          class="h-5 w-5 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none p-0"
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
         >
-          <Icon name="zoom-out" size={11} tint="#cccccc" />
+          <Icon
+            name="zoom-out"
+            size={12}
+            tint={() => props.theme().ui.foreground}
+          />
         </Button>
         <Button
           testID="image-zoom-reset"
           onPress={() => zoom.set(100)}
-          class="h-5 px-1.5 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
         >
-          <Text class="text-[10.5px] font-mono text-secondary-foreground">
+          <Text
+            style={{ color: props.theme().ui.foreground }}
+            class="text-[11px] font-mono"
+          >
             {`${zoom()}%`}
           </Text>
         </Button>
         <Button
           testID="image-zoom-in"
           onPress={() => zoom.update((z) => clampZoom(z + 25))}
-          class="h-5 w-5 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none p-0"
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
         >
-          <Icon name="zoom-in" size={11} tint="#cccccc" />
+          <Icon
+            name="zoom-in"
+            size={12}
+            tint={() => props.theme().ui.foreground}
+          />
         </Button>
         <Button
           testID="image-bg-toggle"
           onPress={() => lightBg.update((v) => !v)}
-          class="h-5 px-2 items-center justify-center rounded bg-secondary hover:bg-secondary/80 border-none shadow-none"
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
         >
-          <Text class="text-[10.5px] text-secondary-foreground">
+          <Text
+            style={{ color: props.theme().ui.foreground }}
+            class="text-[11px] font-medium"
+          >
             {lightBg() ? "Dark BG" : "Light BG"}
           </Text>
         </Button>
@@ -422,26 +540,47 @@ function VideoBody(props: {
 
 function AudioBody(props: {
   file: Accessor<LoadedFile>;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const metaText = computed(() => props.file().classification.mimeType);
   return (
     <View
       testID="preview-audio-container"
-      class="flex-1 relative items-center justify-center p-8 bg-background"
+      style={{ backgroundColor: props.theme().ui.background }}
+      class="flex-1 relative items-center justify-center p-8"
     >
-      <View class="w-[540px] max-w-full p-6 rounded-xl bg-card border border-border items-center gap-4 shadow-md">
-        <View class="w-12 h-12 rounded-full bg-muted items-center justify-center">
-          <Icon name="music" size={22} tint="#38bdf8" />
+      <View
+        style={{ backgroundColor: props.theme().ui.card }}
+        class="w-[520px] max-w-full p-6 rounded-xl items-center gap-4"
+      >
+        <View
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="w-12 h-12 rounded-lg items-center justify-center"
+        >
+          <Icon
+            name="music"
+            size={20}
+            tint={() => props.theme().ui.accent}
+          />
         </View>
         <View class="items-center gap-1">
-          <Text class="text-sm font-semibold text-foreground">
+          <Text
+            style={{ color: props.theme().ui.foreground }}
+            class="text-sm font-medium"
+          >
             {props.file().name}
           </Text>
-          <Text class="text-xs font-mono text-muted-foreground">
+          <Text
+            style={{ color: props.theme().ui.mutedForeground }}
+            class="text-xs font-mono"
+          >
             {metaText()}
           </Text>
         </View>
-        <View class="w-full h-28 rounded-lg overflow-hidden bg-black/50 border border-border">
+        <View
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="w-full h-28 rounded-lg overflow-hidden"
+        >
           <Video
             testID="preview-audio"
             src={props.file().path}
@@ -483,10 +622,14 @@ function PreviewBody(props: {
         />
       </If>
       <If when={activeView() === "quicklook"}>
-        <QuickLookBody file={props.file} />
+        <QuickLookBody file={props.file} theme={props.theme} />
       </If>
       <If when={activeView() === "table"}>
-        <TableBody file={props.file} sort={props.tableSort} />
+        <TableBody
+          file={props.file}
+          sort={props.tableSort}
+          theme={props.theme}
+        />
       </If>
       <If when={activeView() === "binary"}>
         <Editor
@@ -516,7 +659,11 @@ function PreviewBody(props: {
             codeBlockActions={[{ id: "copy" }]}
             extensions={MARKDOWN_MERMAID_EXTENSIONS}
             renderCustom={(node) => (
-              <MermaidDiagramBlock code={node.text ?? ""} fontStyle={fontStyle} />
+              <MermaidDiagramBlock
+                code={node.text ?? ""}
+                fontStyle={fontStyle}
+                theme={props.theme}
+              />
             )}
             styles={{ codeBlockCode: fontStyle(), code: fontStyle() }}
             onLinkPress={({ url }) =>
@@ -534,6 +681,7 @@ function PreviewBody(props: {
           <MermaidDiagramBlock
             code={() => props.file().text}
             fontStyle={fontStyle}
+            theme={props.theme}
           />
         </Scroll>
       </If>
@@ -541,13 +689,13 @@ function PreviewBody(props: {
         <WebView testID="preview-webview" html={props.file().text} class="flex-1" />
       </If>
       <If when={activeView() === "image"}>
-        <ImageBody file={props.file} />
+        <ImageBody file={props.file} theme={props.theme} />
       </If>
       <If when={activeView() === "video"}>
         <VideoBody file={props.file} />
       </If>
       <If when={activeView() === "audio"}>
-        <AudioBody file={props.file} />
+        <AudioBody file={props.file} theme={props.theme} />
       </If>
       <If when={activeView() === "editor"}>
         <EditorBody
@@ -592,7 +740,11 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
       <If when={props.file()}>
         {(currentFile) => (
           <View class="flex-1">
-            <FindBar findOpen={findOpen} findQuery={findQuery} />
+            <FindBar
+              findOpen={findOpen}
+              findQuery={findQuery}
+              theme={activeTheme}
+            />
             <PreviewBody
               file={currentFile}
               root={props.workspaceRoot}
@@ -607,9 +759,23 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
       </If>
       <If when={!props.file()}>
         <View class="flex-1 items-center justify-center p-6 gap-3 select-none">
-          <AppLogo size={56} />
-          <Text class="text-sm font-medium text-foreground">Native Editor</Text>
-          <Text class="text-xs text-muted-foreground">Select a file or press ⌘P to quick open</Text>
+          <AppLogo
+            size={48}
+            ink={() => activeTheme().ui.foreground}
+            accent={() => activeTheme().ui.accent}
+          />
+          <Text
+            style={{ color: activeTheme().ui.foreground }}
+            class="text-sm font-medium"
+          >
+            Aed
+          </Text>
+          <Text
+            style={{ color: activeTheme().ui.mutedForeground }}
+            class="text-xs"
+          >
+            Select a file or press ⌘P to quick open
+          </Text>
         </View>
       </If>
     </View>

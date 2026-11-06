@@ -13,10 +13,10 @@ static void recordArgPath(const char *arg) {
   struct stat st;
   if (stat(resolved, &st) != 0) return;
   if (S_ISDIR(st.st_mode)) {
-    setenv("NATIVE_EDITOR_ROOT", resolved, 1);
+    setenv("AED_ROOT", resolved, 1);
   } else if (S_ISREG(st.st_mode)) {
-    setenv("NATIVE_EDITOR_OPEN_FILE", resolved, 1);
-    FILE *fp = fopen("/tmp/native-editor-open.queue", "a");
+    setenv("AED_OPEN_FILE", resolved, 1);
+    FILE *fp = fopen("/tmp/aed-open.queue", "a");
     if (fp) {
       fprintf(fp, "%s\n", resolved);
       fclose(fp);
@@ -27,7 +27,7 @@ static void recordArgPath(const char *arg) {
 int main(int argc, char *argv[]) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
-      setenv("NATIVE_EDITOR_ROOT", argv[i + 1], 1);
+      setenv("AED_ROOT", argv[i + 1], 1);
       i++;
     } else {
       recordArgPath(argv[i]);
@@ -50,10 +50,10 @@ int main(int argc, char *argv[]) {
   setenv("DYLD_INSERT_LIBRARIES", dylibPath, 1);
 
   char corePath[PATH_MAX];
-  snprintf(corePath, sizeof(corePath), "%s/NativeEditorCore", realExe);
+  snprintf(corePath, sizeof(corePath), "%s/AedCore", realExe);
 
   char *newArgv[2] = {corePath, NULL};
   execv(corePath, newArgv);
-  perror("execv NativeEditorCore");
+  perror("execv AedCore");
   return 1;
 }

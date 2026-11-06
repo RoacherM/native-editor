@@ -1,6 +1,6 @@
 {
-  "name": "Native Editor",
-  "id": "dev.byronwayne.nativeeditor",
+  "name": "Aed",
+  "id": "dev.byronwayne.aed",
   "version": "0.0.1",
   "build": 1,
   "icon": "assets/icon.png",
@@ -90,6 +90,8 @@
         "GHOSTTY_RESOURCES_DIR",
         "LANG",
         "PWD",
+        "AED_ROOT",
+        "AED_OPEN_FILE",
         "NATIVE_EDITOR_ROOT",
         "NATIVE_EDITOR_OPEN_FILE"
       ]

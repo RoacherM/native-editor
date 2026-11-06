@@ -16,12 +16,14 @@ import {
 } from "nsh";
 import { Button, Input, Select, type SelectItem } from "nsh/base";
 import { Icon } from "./icons";
+import { EDITOR_THEMES, type EditorTheme } from "./themes";
 
 export interface TerminalPaneProps {
   cwd: Accessor<string>;
   fontFamily?: Accessor<string>;
   fontSize?: Accessor<number>;
   shellPath?: Accessor<string>;
+  theme?: Accessor<EditorTheme>;
   onShellChange?: (shellPath: string) => void;
   onFileOpen?: (filePath: string) => void;
 }
@@ -139,7 +141,7 @@ import fcntl, os, pty, select, struct, sys, termios
 
 def main():
     shell = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else (os.environ.get("SHELL") or "/bin/sh")
-    term_prog = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "NativeEditor"
+    term_prog = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "Aed"
     ghostty_res = sys.argv[3] if len(sys.argv) > 3 else ""
     pid, master = pty.fork()
     if pid == 0:
@@ -447,7 +449,7 @@ function startPtySession(
   try {
     const cwd = untracked(() => cwdAccessor()) || os.homedir();
     const app = untracked(() => primaryApp());
-    const termProgram = app?.termProgram || process.env.TERM_PROGRAM || "NativeEditor";
+    const termProgram = app?.termProgram || process.env.TERM_PROGRAM || "Aed";
     const resourcesDir = app?.resourcesDir || "";
     const shellPath = untracked(() => tab.shell().path);
     const child = process.spawn(
@@ -542,22 +544,35 @@ function removeTabAndSelectReplacement(
 function TermTabChip(props: {
   tab: Accessor<TermTab>;
   activeId: Accessor<number>;
+  theme: Accessor<EditorTheme>;
   onSelect: (id: number) => void;
   onClose: (id: number) => void;
 }): JSX.Element {
   const isActive = computed(() => props.tab().id === props.activeId());
   return (
     <View
-      class={`flex-row items-center rounded px-1.5 py-0.5 gap-1 ${
-        isActive()
-          ? "bg-card text-foreground border border-border"
-          : "bg-transparent text-muted-foreground hover:text-foreground"
-      }`}
+      style={{
+        backgroundColor: isActive()
+          ? props.theme().ui.background
+          : "transparent",
+      }}
+      class="h-8 px-3 flex-row items-center gap-2 shrink-0 select-none"
     >
+      <If when={isActive()}>
+        <View
+          style={{ backgroundColor: props.theme().ui.accent }}
+          class="absolute left-0 right-0 top-0 h-[2px]"
+        />
+      </If>
       <View onPress={() => props.onSelect(props.tab().id)} role="button">
         <Text
-          class={`text-[11px] font-mono ${
-            isActive() ? "text-foreground font-medium" : "text-muted-foreground"
+          style={{
+            color: isActive()
+              ? props.theme().ui.foreground
+              : props.theme().ui.mutedForeground,
+          }}
+          class={`text-xs font-mono ${
+            isActive() ? "font-medium" : "font-normal"
           }`}
         >
           {props.tab().title()}
@@ -566,9 +581,13 @@ function TermTabChip(props: {
       <View
         onPress={() => props.onClose(props.tab().id)}
         role="button"
-        class="p-0.5 items-center justify-center"
+        class="h-4 w-4 items-center justify-center rounded"
       >
-        <Icon name="close" size={10} tint="#7a7a7a" />
+        <Icon
+          name="close"
+          size={10}
+          tint={() => props.theme().ui.mutedForeground}
+        />
       </View>
     </View>
   );
@@ -617,30 +636,43 @@ function ShellSelectOptionRow(props: {
   title: string;
   selected: boolean;
   highlighted: boolean;
+  theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const shellName = props.value.split("/").pop() || props.title;
   return (
     <View
       testID={`shell-option-${shellName}`}
-      class={`h-7 px-2.5 rounded flex-row items-center justify-between gap-2 select-none ${
-        props.highlighted || props.selected ? "bg-accent" : "hover:bg-muted/60"
-      }`}
+      style={{
+        backgroundColor:
+          props.highlighted || props.selected
+            ? props.theme().ui.selection
+            : "transparent",
+      }}
+      class="h-7 px-3 rounded flex-row items-center justify-between gap-2 select-none"
     >
       <View class="flex-row items-center gap-2 min-w-0 flex-1">
         <Text
-          class={`text-xs font-mono text-foreground shrink-0 ${
-            props.selected ? "font-semibold" : "font-normal"
+          style={{ color: props.theme().ui.foreground }}
+          class={`text-xs font-mono shrink-0 ${
+            props.selected ? "font-medium" : "font-normal"
           }`}
         >
           {shellName}
         </Text>
-        <Text class="text-[10.5px] font-mono text-muted-foreground truncate">
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-[11px] font-mono truncate"
+        >
           {props.value}
         </Text>
       </View>
-      <View class="w-3.5 items-center justify-center shrink-0">
+      <View class="w-4 items-center justify-center shrink-0">
         <If when={props.selected}>
-          <Icon name="check" size={11.5} tint="#38bdf8" />
+          <Icon
+            name="check"
+            size={12}
+            tint={() => props.theme().ui.accent}
+          />
         </If>
       </View>
     </View>
@@ -782,17 +814,27 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
     return { fontFamily: family, fontSize: size };
   });
 
+  const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
+
   return (
-    <View class="flex-1 flex-col bg-sidebar" testID="terminal-pane">
-      <View class="h-[28px] px-2.5 bg-sidebar border-b border-border flex-row items-center justify-between gap-2 shrink-0 select-none">
+    <View
+      style={{ backgroundColor: activeTheme().ui.sidebar }}
+      class="flex-1 flex-col"
+      testID="terminal-pane"
+    >
+      <View
+        style={{ backgroundColor: activeTheme().ui.sidebar }}
+        class="h-8 pr-3 flex-row items-center justify-between gap-2 shrink-0 select-none"
+      >
         <View class="flex-1 flex-row items-center gap-1 min-w-0 overflow-hidden">
           <Scroll horizontal class="flex-initial">
-            <View class="flex-row items-center gap-1">
+            <View class="flex-row items-stretch h-8">
               <Each of={tabs()} key={(tab) => tab.id}>
                 {(tab) => (
                   <TermTabChip
                     tab={tab}
                     activeId={activeId}
+                    theme={activeTheme}
                     onSelect={(id) => {
                       activeId.set(id);
                       focusInput();
@@ -807,13 +849,17 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
             testID="terminal-add-btn"
             onPress={addTab}
             accessibilityLabel="New terminal tab"
-            class="h-5 w-5 items-center justify-center rounded hover:bg-muted/50 bg-transparent border-none shadow-none p-0 shrink-0"
+            class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0 shrink-0"
           >
-            <Icon name="plus" size={12} tint="#8c8c8c" />
+            <Icon
+              name="plus"
+              size={12}
+              tint={() => activeTheme().ui.mutedForeground}
+            />
           </Button>
         </View>
 
-        <View class="flex-row items-center pr-0.5 shrink-0">
+        <View class="flex-row items-center shrink-0">
           <Select
             testID="terminal-shell-select"
             items={shellItems()}
@@ -832,15 +878,24 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
             trigger={
               <View
                 testID="terminal-shell-trigger"
-                class="h-5 px-2 flex-row items-center gap-1 rounded bg-card hover:bg-muted/60 border border-border"
+                style={{ backgroundColor: activeTheme().ui.background }}
+                class="h-6 px-2 flex-row items-center gap-1.5 rounded"
               >
-                <Text class="text-[11px] font-mono text-foreground">
+                <Text
+                  style={{ color: activeTheme().ui.foreground }}
+                  class="text-[11px] font-mono"
+                >
                   {activeTab().shell().name}
                 </Text>
-                <Icon name="chevron-down" size={10} tint="#8c8c8c" />
+                <Icon
+                  name="chevron-down"
+                  size={10}
+                  tint={() => activeTheme().ui.mutedForeground}
+                />
               </View>
             }
-            popupClass="w-56 rounded-lg border border-border bg-popover shadow-2xl p-1"
+            popupClass="w-56 rounded-lg shadow-2xl p-1"
+            popupStyle={{ backgroundColor: activeTheme().ui.card }}
             itemClass="rounded cursor-pointer"
             renderItem={(item) => (
               <ShellSelectOptionRow
@@ -848,39 +903,51 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
                 title={item.title}
                 selected={item.selected}
                 highlighted={item.highlighted}
+                theme={activeTheme}
               />
             )}
           />
         </View>
       </View>
 
-      <View class="flex-1 bg-background" onPress={focusInput}>
+      <View
+        style={{ backgroundColor: activeTheme().ui.background }}
+        class="flex-1"
+        onPress={focusInput}
+      >
         <Scroll
           ref={(r) => {
             scrollRef = r;
           }}
           keyboardShouldPersistTaps="always"
-          class="flex-1 bg-background"
-          contentClass="p-2.5"
+          style={{ backgroundColor: activeTheme().ui.background }}
+          class="flex-1"
+          contentClass="p-3"
         >
           <View class="flex-col" onPress={focusInput}>
             <Each of={activeTab().lines()} key="index">
               {(line) => (
                 <Text
-                  class="select-text font-mono text-xs text-foreground leading-relaxed"
-                  style={termFontStyle()}
+                  class="select-text font-mono text-xs leading-relaxed"
+                  style={{
+                    ...termFontStyle(),
+                    color: activeTheme().ui.foreground,
+                  }}
                 >
                   {line()}
                 </Text>
               )}
             </Each>
             <View
-              class="flex-row items-center min-h-[20px] gap-1.5"
+              class="flex-row items-center min-h-[20px] gap-2"
               onPress={focusInput}
             >
               <Text
-                class="font-mono text-xs text-foreground leading-relaxed shrink-0"
-                style={termFontStyle()}
+                class="font-mono text-xs leading-relaxed shrink-0"
+                style={{
+                  ...termFontStyle(),
+                  color: activeTheme().ui.foreground,
+                }}
               >
                 {activeTab().current().trimEnd()}
               </Text>
@@ -898,9 +965,10 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
                   height: 20,
                   paddingHorizontal: 0,
                   paddingVertical: 0,
+                  color: activeTheme().ui.foreground,
                   ...termFontStyle(),
                 }}
-                class="flex-1 h-5 font-mono text-xs text-foreground bg-transparent border-none outline-none p-0 m-0"
+                class="flex-1 h-5 font-mono text-xs bg-transparent border-none outline-none p-0 m-0"
                 value={activeTab().input()}
                 onChange={({ value }) => setTabInput(activeTab(), value)}
                 onSubmit={({ text }) => sendCommand(text)}

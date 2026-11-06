@@ -38,7 +38,7 @@ export interface FileClassification {
 }
 
 /** The directory PDF preview thumbnails are cached in (inside the /tmp grant). */
-const QUICK_LOOK_DIR = "/tmp/native-editor-ql";
+const QUICK_LOOK_DIR = "/tmp/aed-ql";
 
 /** A cell that reads as a number becomes one, so a table sorts numerically. */
 const NUMERIC_PATTERN = /^-?\d+(?:\.\d+)?$/;
@@ -495,12 +495,16 @@ export function probeImageDimensions(
   return text ? probeSvgDimensions(text) : null;
 }
 
-/** Generate a macOS preview PNG for a PDF document via CoreGraphics `sips` and return a blob: URL, or null on failure. */
+/** Generate a macOS 2x Retina preview PNG for a PDF document via CoreGraphics `sips` and return a blob: URL, or null on failure. */
 export async function generateQuickLookUrl(filePath: string, cwd: string): Promise<string | null> {
   try {
     await fs.mkdir(QUICK_LOOK_DIR, { recursive: true });
     const pngPath = path.join(QUICK_LOOK_DIR, `${path.basename(filePath)}.png`);
-    await process.run("sips", ["-s", "format", "png", filePath, "--out", pngPath], { cwd });
+    await process.run(
+      "sips",
+      ["-Z", "1800", "-s", "format", "png", filePath, "--out", pngPath],
+      { cwd }
+    );
     const bytes = await fs.readFile(pngPath);
     return createBlobUrl(bytes, "image/png");
   } catch {

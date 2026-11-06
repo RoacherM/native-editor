@@ -1,13 +1,13 @@
 ---
-title: Native Editor 架构与模块契约
-description: 基于 Native Shell (nsh 0.3.0) 的 macOS 原生多格式预览器、代码编辑器与内置 PTY 终端架构、持久化契约与实测踩坑记录。
+title: Aed 架构与模块契约
+description: 基于 Native Shell (nsh 0.3.0) 的 macOS 原生多格式预览器、代码编辑器与内置 PTY 终端（Aed — Another Editor）架构、持久化契约与实测踩坑记录。
 ---
 
-# Native Editor 架构与模块契约
+# Aed 架构与模块契约
 
 ## 术语与边界
 
-Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量级 macOS 原生文件预览器、编辑器与终端工作区。
+Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量级 macOS 原生文件预览器、编辑器与终端工作区。
 
 - **拥有边界**：
   - 工作区目录扫描（深度 ≤ 4，单目录上限 200 项）、Git 变更状态解析（`git status --porcelain=v1 -z -uall`）与单文件 Diff 预览。
@@ -24,17 +24,17 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 
 | 类别 | 标识符 / 路径 | 用途与新旧兼容约定 |
 |---|---|---|
-| Bundle ID | `dev.byronwayne.nativeeditor` | `nsh.json` 与 `scripts/set_default_handlers.m` 共用；改名会导致 LaunchServices 默认打开关联失效 |
-| `Storage` 键 | `native-editor.fontFamily` | 用户字体名；未设置时回退到 Ghostty 配置或 `JetBrainsMono Nerd Font Mono` |
-| `Storage` 键 | `native-editor.fontSize` | 字号（`9`–`28` 整数字符串）；非法值回退到 Ghostty 字号或 `13` |
-| `Storage` 键 | `native-editor.theme` | 主题 ID（8 套内置主题，默认 `industrial-paper`）；未知 ID 回退默认主题 |
-| `Storage` 键 | `native-editor.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`） |
-| `Storage` 键 | `native-editor.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个非 `/` 目录）；解析失败回退 `[]` |
-| 环境变量 / Host 参数 | `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置且无打开文件时返回 `""`（展示 Welcome 面板，绝不自动扫 `$HOME` 或 `/`） |
-| 环境变量 / Host 参数 | `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接打开的初始文件绝对路径 |
-| Finder 队列文件 | `/tmp/native-editor-open.queue` | `finder_bridge.m` 与 `launcher.c` 追加写入待打开文件路径（每行一个），`App.tsx` 每 450ms 通过 `consumeFinderOpenQueue()` 读取并清空 |
-| 临时缓存目录 | `/tmp/native-editor-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
-| 临时缓存目录 | `/tmp/native-editor-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
+| Bundle ID | `dev.byronwayne.aed` | `nsh.json` 与 `scripts/set_default_handlers.m` 共用；改名会导致 LaunchServices 默认打开关联失效 |
+| `Storage` 键 | `aed.fontFamily` | 用户字体名；未设置时依次回退旧键 `native-editor.fontFamily`、Ghostty 配置或 `JetBrainsMono Nerd Font Mono` |
+| `Storage` 键 | `aed.fontSize` | 字号（`9`–`28` 整数字符串）；未设置时回退旧键 `native-editor.fontSize`，非法值回退 Ghostty 字号或 `13` |
+| `Storage` 键 | `aed.theme` | 主题 ID（8 套内置主题，默认 `industrial-paper`）；未设置时回退旧键 `native-editor.theme`，未知 ID 回退默认主题 |
+| `Storage` 键 | `aed.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`）；未设置时回退旧键 `native-editor.shell` |
+| `Storage` 键 | `aed.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个非 `/` 目录）；未设置时回退旧键 `native-editor.recentWorkspaces`，解析失败回退 `[]` |
+| 环境变量 / Host 参数 | `AED_ROOT` / `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置且无打开文件时返回 `""`（展示 Welcome 面板，绝不自动扫 `$HOME` 或 `/`） |
+| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接打开的初始文件绝对路径 |
+| Finder 队列文件 | `/tmp/aed-open.queue` | `finder_bridge.m` 与 `launcher.c` 追加写入待打开文件路径（每行一个），`App.tsx` 每 450ms 通过 `consumeFinderOpenQueue()` 读取并清空 |
+| 临时缓存目录 | `/tmp/aed-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
+| 临时缓存目录 | `/tmp/aed-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
 
 ---
 
@@ -42,21 +42,21 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 
 ```text
 +-----------------------------------------------------------------------------------+
-| ● ● ●                       [ 🔍 native-editor (⌘P) ]                  [◧] [◨]   | <- WindowTitleBar (30pt, windowDrag)
+| ● ● ●                       [ 🔍 native-editor (⌘P) ]                  [◧] [◨]   | <- WindowTitleBar (32pt, windowDrag)
 +--------------------+--------------------------------------------------------------+
-| EXPLORER           | [📄 README.md ×] [📐 arch.mmd ×] [📊 metrics.csv ×]          | <- TabBar (34pt)
-| [All] [Changed]    | src > components > 📄 README.md            [Preview] [Code]  | <- Breadcrumb & ModeBar (26pt)
+| fixtures           | [📄 README.md ×] [📐 arch.mmd ×] [📊 metrics.csv ×]          | <- TabBar (36pt)
+| [All] [Changed]    | src > components > 📄 README.md            [Preview] [Code]  | <- Breadcrumb & ModeBar (28pt)
 | ▾ src/             +--------------------------------------------------------------+
 |     App.tsx      M |                                                              |
 |     classify.ts    |                 PreviewPane (按 FileKind 分发)               |
 |     mermaid.tsx    |   Editor / TextView+Mermaid / DataTable / DiffView /         |
 |     workspace.ts   |   Image (Zoom+Grid) / Video / Audio / QuickLook / Hex        |
 |                    +--------------------------------------------------------------+
-|                    | TERMINAL  [zsh 1 ×] [+]                      [zsh ▾] [×]     | <- TerminalPane (ResizablePanel)
+|                    | [1: zsh ×] [+]                                       [zsh ▾] | <- TerminalPane (ResizablePanel)
 |                    | $ echo NSH_PTY_OK_2026                                       |
 |                    | zsh $ _____________________________________________________  |
 +--------------------+--------------------------------------------------------------+
-| ⎇ master*  ↻       | README.md · 2.1 KB · Ln 1, Col 1 · markdown | Theme | Font  | <- StatusBar (22pt)
+| ⎇ master*  ↻       | README.md · 2.1 KB · Ln 1, Col 1 · markdown | Theme | Font  | <- StatusBar (24pt)
 +--------------------+--------------------------------------------------------------+
 ```
 
@@ -86,7 +86,7 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
    - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
 3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
    - Markdown 中的 ` ```mermaid ` 代码块（通过 `TextView` 的 `extensions` 拦截）与独立 `.mmd` / `.mermaid` 文件共用 `MermaidDiagramBlock`。
-   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/native-editor-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。
+   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/aed-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。
    - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。
 
 ---
@@ -103,14 +103,15 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 
 `nsh package --target macos` 生成的基础 Runner 默认不处理 macOS Finder 的 `application:openFile:` / `application:openFiles:` / `application:openURLs:` 事件，也不解析命令行传入的文件路径。`scripts/package-macos.sh` 通过 3 个原生组件补齐完整桌面体验：
 
-1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/NativeEditor`）**：
-   - 原 `NativeEditor` 二进制被重命名为 `NativeEditorCore`。
-   - `launcher` 解析命令行参数：目录参数写入 `NATIVE_EDITOR_ROOT`，文件参数写入 `NATIVE_EDITOR_OPEN_FILE` 并追加到 `/tmp/native-editor-open.queue`，随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("NativeEditorCore")`。
+1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/Aed`）**：
+   - 原 `Aed` 二进制被重命名为 `AedCore`。
+   - `launcher` 解析命令行参数：目录参数写入 `AED_ROOT`，文件参数写入 `AED_OPEN_FILE` 并追加到 `/tmp/aed-open.queue`，随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
 2. **`scripts/finder_bridge.m`（`libFinderBridge.dylib`）**：
    - 在 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警）。
-   - Method Swizzle `NSApplication setDelegate:`，向宿主 Delegate 动态注入 `application:openFile:`、`application:openFiles:` 与 `application:openURLs:`，将 Finder 双击或拖拽打开的文件路径写入 `/tmp/native-editor-open.queue`。
+   - Method Swizzle `NSApplication setDelegate:`，向宿主 Delegate 动态注入 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`，将 Finder 双击或拖拽打开的文件路径写入 `/tmp/aed-open.queue`，并在 AppKit 层锁定主窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
 3. **`scripts/set_default_handlers.m`**：
-   - 调用 `LSSetDefaultRoleHandlerForContentType` 将 `dev.byronwayne.nativeeditor` 注册为 Markdown、Mermaid（`.mmd`）、JSON/JSONL、CSV/TSV、YAML/TOML、Diff 及主流源码文件的系统默认编辑器。
+   - 先通过 `LSCopyDefaultRoleHandlerForContentType` 查询当前默认打开程序，已绑定 `dev.byronwayne.aed` 的 UTI 直接跳过（避免重复触发 macOS `CoreServicesUIAgent` 确认弹窗），并对 UTI 去重、过滤未声明的 `dyn.*` 动态 UTI。
+   - 默认仅注册 8 个核心文档与数据 UTI（Markdown、Mermaid、JSONL、JSON、CSV、TSV、Plain Text、Diff/Patch）；传入 `--all` 时额外注册常用源码 UTI，也可直接传入指定扩展名（如 `set_default_handlers yaml toml`）。
 
 ---
 
@@ -120,11 +121,11 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 
 | 规则 | 做法 | 代码位置 |
 |---|---|---|
-| 色面分区，不画线 | 标题栏、标签栏、侧栏、编辑区、状态栏靠底色深浅区分；不加 `border-b` / `border-t` / 标签间竖线。浮层（下拉、命令面板）用阴影，不用描边 | `App.tsx` `WindowTitleBar` / `EditorHeader` / `StatusBar` |
-| 只有一个强调色 | `ui.accent`（信号红）只标「当前」：活动标签顶部 2px 条、未保存圆点、光标、拖拽分隔条、Recent 序号、`⌘O`。文件类型徽章一律灰色，不按扩展名上彩虹色 | `TabItem`、`src/icons.tsx` `FileBadge` |
-| 状态栏是一块实色 | `ui.statusBar` / `ui.statusBarForeground`（Industrial Paper 上为墨色底、纸色字）；未设置时回退 `sidebar` / `mutedForeground` | `StatusBar` |
-| 欢迎页是一张海报 | 3 个平面：右侧红色拱形、左下墨色块（它本身就是「Open Folder」主按钮）、两者交界处的石色 1/4 圆。标题 `Helvetica Neue` 粗体、紧字距、两行。所有尺寸由 `posterGrid()` 按面板大小算出，Recent 行数按剩余高度截断，窗口缩小时文字不压到色块上 | `App.tsx` `PosterFields` / `WelcomePanel` |
-| 颜色跟随主题重绘 | `Canvas` 只在 `draw` 内读到的 signal 变化时重绘，所以主题色必须在 `draw` 里读（`AppLogo` 的 `ink` / `accent` 传 accessor） | `src/icons.tsx` `AppLogo` |
+| 色面分区，不画线 | 标题栏（`32pt`）、标签栏（`36pt`）、面包屑栏（`28pt`）、侧栏（`240pt`）、编辑区、终端栏（`32pt`）、状态栏（`24pt`）与 Mermaid 容器全部对齐 `4px` 网格并靠底色深浅（`background` / `sidebar` / `card`）区分；不加 `border-b` / `border-t` / 标签间竖线。浮层（下拉、命令面板、设置弹窗、底部浮动控制条）用阴影，不用描边 | `App.tsx`、`src/Sidebar.tsx`、`src/TerminalPane.tsx`、`src/PreviewPane.tsx`、`src/mermaid.tsx` |
+| 只有一个强调色 | `ui.accent`（信号红）只标「当前」：编辑器与终端活动标签顶部 `2px` 条、未保存圆点、光标、拖拽分隔条、Recent 序号、音频图标与选中勾号。文件类型徽章一律跟随 `ui.mutedForeground`，不按扩展名上彩虹色；Mermaid 渲染器直接注入当前主题 `ui` 色板，消除默认黄/紫底色 | `TabItem`、`TermTabChip`、`src/icons.tsx` `FileBadge`、`src/mermaid.tsx` |
+| 状态栏是一块实色 | `ui.statusBar` / `ui.statusBarForeground`（Industrial Paper 上为墨色底、纸色字）；未设置时回退 `sidebar` / `mutedForeground`；无工作区时隐藏左侧分支与刷新按钮 | `StatusBar` |
+| 欢迎页是一张海报 | 3 个平面：右侧红色拱形、左下墨色块（它本身就是「Open Folder」主按钮）、两者交界处的石色 1/4 圆。标题 `Aed` 采用 `Helvetica Neue` 粗体、紧字距单行展示；标签采用 Sentence case（`Recent`）。窗口最小尺寸锁定为 `760×520pt`（`MIN_WINDOW_WIDTH` / `MIN_WINDOW_HEIGHT` + AppKit `NSWindow.minSize`），`posterGrid()` 对画布尺寸施加 `520×380pt` 结构下限并按列宽与顶栏净空约束字号，保证标题绝不拆词折行、文字不压到色块上 | `App.tsx` `PosterFields` / `WelcomePanel`、`scripts/finder_bridge.m` |
+| 颜色跟随主题重绘 | `Canvas` 只在 `draw` 内读到的 signal 变化时重绘，所以主题色必须在 `draw` 里读（`Icon` 的 `tint` 与 `AppLogo` 的 `ink` / `accent` 均支持传 accessor） | `src/icons.tsx` `Icon` / `AppLogo` |
 
 **为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.3.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
 
@@ -150,7 +151,7 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 ## 试过不做的方案（Tried & Rejected）
 
 - **混合 Rust 模板（`--template mixed`）**：实测首次 `nsh test` 编译耗时 70s、二进制达 192 MB，且多 Agent 并行时 Cargo 锁冲突严重；纯 TSX（`--template ts`）配合 Python `pty.fork()` 与轻量 C/ObjC 包装即可满足全部原生能力，`nsh check` 仅 0.2s、`nsh test` 仅 1.0s。
-- **使用 `qlmanage` + 底部外部打开操作栏预览 PDF**：`qlmanage -t` 在部分系统环境下会弹窗或阻塞，且底部常驻 `Open in Preview` 操作栏喧宾夺主；已改为直接调用 macOS 内置 `sips -s format png` 生成高清预览图，去掉冗余操作栏。
+- **使用 `qlmanage` + 底部外部打开操作栏预览 PDF**：`qlmanage -t` 在部分系统环境下会弹窗或阻塞，且底部常驻 `Open in Preview` 操作栏喧宾夺主；已改为直接调用 macOS 内置 `sips -Z 1800 -s format png` 生成 2x Retina 预览图，并以暖白纸张底衬（`#f7f4ee`）+ 缩放控制条承载，避免透明底黑字在深色主题下不可读。
 - **状态栏字体按钮打开完整 Preferences 弹窗**：用户只想换字体，弹出整页设置（主题、字号、Shell）太重。现在状态栏的主题和字体按钮各自弹出一个简单列表（字体列表每项用该字体本身渲染），完整设置留给 `Cmd+,`。
 - **在 Markdown 预览中用字符画（`mmd2txt`）替代矢量图**：终端适合字符画，但桌面 GUI 编辑器用户期望高分辨率图表；因此采用隐藏 `WebView` + SVG `<foreignObject>` 内联 + 2x Retina PNG 光栅化方案。
 

@@ -205,19 +205,22 @@ const GLYPHS: Record<IconName, DrawFn> = {
 export function Icon(props: {
   name: IconName;
   size?: number;
-  tint?: string;
+  tint?: string | Accessor<string>;
   weight?: number;
 }): JSX.Element {
   const size = props.size ?? 14;
-  const tint = props.tint ?? "#8c8c8c";
-  const weight = props.weight ?? 1.65;
+  const weight = props.weight ?? 1.5;
   return (
     <Canvas
       style={{ pointerEvents: "none", width: size, height: size }}
       draw={(cx, { width }) => {
+        const stroke =
+          typeof props.tint === "function"
+            ? props.tint()
+            : (props.tint ?? "#85858b");
         cx.scale(width / 20, width / 20);
-        cx.strokeStyle = tint;
-        cx.fillStyle = tint;
+        cx.strokeStyle = stroke;
+        cx.fillStyle = stroke;
         cx.lineWidth = weight;
         cx.lineCap = "round";
         cx.lineJoin = "round";
@@ -281,83 +284,52 @@ const EXT_BADGES: Record<string, BadgeSpec> = {
   aif: { glyph: "AUD", color: "#38bdf8" },
 };
 
-export function FileBadge(props: { name: string | Accessor<string> }): JSX.Element {
+export function FileBadge(props: {
+  name: string | Accessor<string>;
+  color?: string | Accessor<string>;
+}): JSX.Element {
   const spec = computed(() => {
     const raw = typeof props.name === "function" ? props.name() : props.name;
     const ext = raw.split(".").pop()?.toLowerCase() ?? "";
     return EXT_BADGES[ext] ?? { glyph: "≡", color: "#7a7a7a" };
   });
+  const textColor = computed(() =>
+    typeof props.color === "function" ? props.color() : props.color
+  );
   return (
-    <View class="w-[22px] items-center justify-center shrink-0">
-      <Text class="text-[8.5px] font-mono font-bold leading-none whitespace-nowrap text-muted-foreground">
+    <View class="w-5 items-center justify-center shrink-0">
+      <Text
+        style={textColor() ? { color: textColor() } : undefined}
+        class="text-[10px] font-mono font-medium leading-none whitespace-nowrap text-muted-foreground"
+      >
         {spec().glyph}
       </Text>
     </View>
   );
 }
 
-/** The app mark. With `ink` and `accent` it is a flat line mark in the theme's colors, read inside `draw` so a theme change redraws it; without, the full-color icon. */
+/** The app mark: a flat line mark in the theme's `ink` and `accent` colors, read inside `draw` so a theme change redraws it. */
 export function AppLogo(props: {
   size?: number;
   ink?: Accessor<string>;
   accent?: Accessor<string>;
 }): JSX.Element {
   const size = props.size ?? 48;
-  const ink = props.ink;
-  const accent = props.accent;
-  if (ink && accent) {
-    return (
-      <Canvas
-        style={{ pointerEvents: "none", width: size, height: size }}
-        draw={(cx, { width }) => {
-          cx.scale(width / 64, width / 64);
-          cx.lineCap = "round";
-          cx.lineJoin = "round";
-          cx.lineWidth = 4.6;
-          cx.strokeStyle = ink();
-          strokeLine(cx, [22, 20, 10, 32, 22, 44]);
-          strokeLine(cx, [42, 20, 54, 32, 42, 44]);
-          cx.strokeStyle = accent();
-          strokeLine(cx, [36, 16, 28, 48]);
-        }}
-      />
-    );
-  }
+  const ink = props.ink ?? (() => "#141414");
+  const accent = props.accent ?? (() => "#d7381e");
   return (
     <Canvas
       style={{ pointerEvents: "none", width: size, height: size }}
       draw={(cx, { width }) => {
-        const s = width / 64;
-        cx.scale(s, s);
-        cx.fillStyle = "#14161f";
-        cx.beginPath();
-        cx.roundRect(4, 4, 56, 56, 13);
-        cx.fill();
-        cx.strokeStyle = "rgba(255, 255, 255, 0.16)";
-        cx.lineWidth = 1.2;
-        cx.stroke();
-
-        cx.fillStyle = "rgba(255, 255, 255, 0.03)";
-        cx.beginPath();
-        cx.roundRect(10, 10, 44, 44, 8.5);
-        cx.fill();
-        cx.strokeStyle = "rgba(255, 255, 255, 0.07)";
-        cx.lineWidth = 0.8;
-        cx.stroke();
-
+        cx.scale(width / 64, width / 64);
         cx.lineCap = "round";
         cx.lineJoin = "round";
-        cx.strokeStyle = "#f8fafc";
-        cx.lineWidth = 3.5;
-        strokeLine(cx, [24.5, 23, 16, 32, 24.5, 41]);
-
-        cx.strokeStyle = "#93c5fd";
-        cx.lineWidth = 3.5;
-        strokeLine(cx, [39.5, 23, 48, 32, 39.5, 41]);
-
-        cx.strokeStyle = "#38bdf8";
-        cx.lineWidth = 3.4;
-        strokeLine(cx, [35, 19.5, 29, 44.5]);
+        cx.lineWidth = 4.6;
+        cx.strokeStyle = ink();
+        strokeLine(cx, [22, 20, 10, 32, 22, 44]);
+        strokeLine(cx, [42, 20, 54, 32, 42, 44]);
+        cx.strokeStyle = accent();
+        strokeLine(cx, [36, 16, 28, 48]);
       }}
     />
   );

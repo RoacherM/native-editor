@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-APP_BUNDLE=".nsh/out/Native Editor.app"
+APP_BUNDLE=".nsh/out/Aed.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 PLIST_PATH="$APP_BUNDLE/Contents/Info.plist"
 SIGN_ID="1BA80B4A6DD4AA3BF2D4A3C39578ED857831F4B5"
@@ -20,11 +20,11 @@ nsh test
 nsh package --target macos
 
 echo "==> 2. Building Finder open-file bridge & CLI launcher..."
-mv "$MACOS_DIR/NativeEditor" "$MACOS_DIR/NativeEditorCore"
+mv "$MACOS_DIR/Aed" "$MACOS_DIR/AedCore"
 clang -dynamiclib -framework Cocoa -O2 \
   -install_name "@executable_path/libFinderBridge.dylib" \
   scripts/finder_bridge.m -o "$MACOS_DIR/libFinderBridge.dylib"
-clang -O2 scripts/launcher.c -o "$MACOS_DIR/NativeEditor"
+clang -O2 scripts/launcher.c -o "$MACOS_DIR/Aed"
 
 echo "==> 3. Updating Info.plist with CFBundleDocumentTypes & UTExportedTypeDeclarations..."
 python3 - "$PLIST_PATH" << 'PYEOF'
@@ -74,8 +74,8 @@ plist["CFBundleDocumentTypes"] = [
             "public.tab-separated-values-text",
             "public.patch-file",
             "public.log",
-            "dev.byronwayne.nativeeditor.mermaid",
-            "dev.byronwayne.nativeeditor.jsonl",
+            "dev.byronwayne.aed.mermaid",
+            "dev.byronwayne.aed.jsonl",
         ],
     },
     {
@@ -88,7 +88,7 @@ plist["CFBundleDocumentTypes"] = [
 
 plist["UTExportedTypeDeclarations"] = [
     {
-        "UTTypeIdentifier": "dev.byronwayne.nativeeditor.mermaid",
+        "UTTypeIdentifier": "dev.byronwayne.aed.mermaid",
         "UTTypeDescription": "Mermaid Diagram",
         "UTTypeConformsTo": ["public.plain-text", "public.text"],
         "UTTypeTagSpecification": {
@@ -97,7 +97,7 @@ plist["UTExportedTypeDeclarations"] = [
         },
     },
     {
-        "UTTypeIdentifier": "dev.byronwayne.nativeeditor.jsonl",
+        "UTTypeIdentifier": "dev.byronwayne.aed.jsonl",
         "UTTypeDescription": "JSON Lines Data",
         "UTTypeConformsTo": ["public.json", "public.plain-text"],
         "UTTypeTagSpecification": {
@@ -111,31 +111,37 @@ with open(plist_path, "wb") as f:
     plistlib.dump(plist, f)
 PYEOF
 
-echo "==> 4. Signing Native Editor.app (identity: $SIGN_ID)..."
+echo "==> 4. Signing Aed.app (identity: $SIGN_ID)..."
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/libFinderBridge.dylib"
-codesign --force --sign "$SIGN_ID" "$MACOS_DIR/NativeEditorCore"
-codesign --force --sign "$SIGN_ID" "$MACOS_DIR/NativeEditor"
+codesign --force --sign "$SIGN_ID" "$MACOS_DIR/AedCore"
+codesign --force --sign "$SIGN_ID" "$MACOS_DIR/Aed"
 codesign --force --deep --sign "$SIGN_ID" "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE"
 
-echo "==> 5. Installing to /Applications & registering default file associations..."
-rm -rf "/Applications/Native Editor.app"
-cp -R "$APP_BUNDLE" "/Applications/Native Editor.app"
-xattr -cr "/Applications/Native Editor.app"
+echo "==> 5. Installing to /Applications & registering LaunchServices..."
+FIRST_INSTALL=0
+if [ ! -d "/Applications/Aed.app" ]; then
+  FIRST_INSTALL=1
+fi
+rm -rf "/Applications/Native Editor.app" "/Applications/Aed.app"
+cp -R "$APP_BUNDLE" "/Applications/Aed.app"
+xattr -cr "/Applications/Aed.app"
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [ -x "$LSREGISTER" ]; then
-  "$LSREGISTER" -f "/Applications/Native Editor.app"
+  "$LSREGISTER" -f "/Applications/Aed.app"
 fi
 
 clang -framework Foundation -framework CoreServices -framework UniformTypeIdentifiers -O2 \
   scripts/set_default_handlers.m -o .nsh/out/set_default_handlers
-cp .nsh/out/set_default_handlers "/Applications/Native Editor.app/Contents/MacOS/set_default_handlers"
+cp .nsh/out/set_default_handlers "/Applications/Aed.app/Contents/MacOS/set_default_handlers"
 cp .nsh/out/set_default_handlers "$MACOS_DIR/set_default_handlers"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/set_default_handlers"
 codesign --force --deep --sign "$SIGN_ID" "$APP_BUNDLE"
-codesign --force --deep --sign "$SIGN_ID" "/Applications/Native Editor.app"
-.nsh/out/set_default_handlers
+codesign --force --deep --sign "$SIGN_ID" "/Applications/Aed.app"
+if [ "$FIRST_INSTALL" = "1" ] || [ "${1:-}" = "--set-default" ]; then
+  .nsh/out/set_default_handlers
+fi
 rm -f .nsh/out/set_default_handlers
 
 echo "==> 6. Building DMG and ZIP release archives..."
@@ -146,16 +152,16 @@ ln -s /Applications .nsh/dmg-stage/Applications
 cat << 'EOF' > ".nsh/dmg-stage/Install & Set Default.command"
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")" && pwd)"
-rm -rf "/Applications/Native Editor.app"
-cp -R "$DIR/Native Editor.app" "/Applications/Native Editor.app"
-xattr -cr "/Applications/Native Editor.app"
-"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "/Applications/Native Editor.app" 2>/dev/null || true
-"/Applications/Native Editor.app/Contents/MacOS/set_default_handlers" 2>/dev/null || true
-open "/Applications/Native Editor.app"
+rm -rf "/Applications/Native Editor.app" "/Applications/Aed.app"
+cp -R "$DIR/Aed.app" "/Applications/Aed.app"
+xattr -cr "/Applications/Aed.app"
+"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "/Applications/Aed.app" 2>/dev/null || true
+"/Applications/Aed.app/Contents/MacOS/set_default_handlers" 2>/dev/null || true
+open "/Applications/Aed.app"
 EOF
 chmod +x ".nsh/dmg-stage/Install & Set Default.command"
 
-ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" .nsh/out/Native-Editor-0.0.1-macos-arm64.zip
-hdiutil create -volname "Native Editor 0.0.1" -srcfolder .nsh/dmg-stage -ov -format UDZO .nsh/out/Native-Editor-0.0.1-macos-arm64.dmg
+ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" .nsh/out/Aed-0.0.1-macos-arm64.zip
+hdiutil create -volname "Aed 0.0.1" -srcfolder .nsh/dmg-stage -ov -format UDZO .nsh/out/Aed-0.0.1-macos-arm64.dmg
 rm -rf .nsh/dmg-stage
 ls -lh .nsh/out/

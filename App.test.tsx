@@ -138,27 +138,42 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
     expect(vars.dark.primary).toBe(carbon.ui.accent);
   });
 
-  test("enforces least-privilege process.execute allowlist in nsh.json", () => {
+  test("enforces least-privilege process.execute allowlist and Aed bundle identity in nsh.json", () => {
+    expect(manifest.name).toBe("Aed");
+    expect(manifest.id).toBe("dev.byronwayne.aed");
     expect(manifest.capabilities.process.execute).toEqual([
       "git",
       "python3",
       "sips",
       "osascript",
     ]);
+    expect(manifest.capabilities.process.env).toContain("AED_ROOT");
+    expect(manifest.capabilities.process.env).toContain("AED_OPEN_FILE");
   });
 });
 
-describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", () => {
-  test("clean launch without workspace hides file tree and shows clean welcome panel", async () => {
+describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
+  test("clean launch without workspace hides file tree, shows Aed welcome panel, and migrates legacy storage", async () => {
     const cleanApp = await open("./App.tsx", {
       platform: "macos",
       width: 1280,
       height: 800,
+      storage: {
+        "native-editor.theme": "tokyo-night",
+      },
     });
     await cleanApp.waitFor("id:welcome-panel");
     expect(cleanApp.shows("id:welcome-panel")).toBe(true);
+    expect(cleanApp.shows("text:Aed")).toBe(true);
+    expect(cleanApp.shows("text:⌘O")).toBe(false);
+    expect(cleanApp.shows("text:Tokyo Night")).toBe(true);
     expect(cleanApp.shows("id:workspace-tree")).toBe(false);
     expect(cleanApp.shows("id:theme-preset-tokyo-night")).toBe(false);
+    expect(cleanApp.shows("text:main")).toBe(false);
+
+    // Shrinking viewport below minimum window dimensions must not crush the poster grid
+    await cleanApp.setViewport(280, 450);
+    expect(cleanApp.spanStyle("text:Aed").fontSize).toBeGreaterThanOrEqual(56);
   });
 
   test("renders multi-format & multimedia previews, switches modes, searches files, and runs PTY commands", async () => {
@@ -176,6 +191,7 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
     await app.waitFor("text:README.md");
     expect(app.shows("id:main-dock")).toBe(true);
     expect(app.shows("id:workspace-tree")).toBe(true);
+    expect(app.shows("text:FIXTURES")).toBe(false);
 
     // 1. Markdown preview + Markdown raw source switch
     await app.press("text:README.md");
@@ -241,10 +257,15 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
     await app.waitFor("id:preview-audio");
     expect(app.shows("id:preview-audio")).toBe(true);
 
-    // 8. Multimedia: PDF Quick Look preview
+    // 8. Multimedia: PDF Quick Look preview (paper sheet + zoom controls)
     await app.press("text:manual.pdf");
     await app.waitFor("id:preview-quicklook");
     expect(app.shows("id:preview-quicklook")).toBe(true);
+    expect(app.shows("id:preview-quicklook-sheet")).toBe(true);
+    await app.press("id:quicklook-zoom-in");
+    expect(app.shows("text:125%")).toBe(true);
+    await app.press("id:quicklook-zoom-reset");
+    expect(app.shows("text:100%")).toBe(true);
 
     // 9. Binary Hex dump preview (mode pills hidden)
     await app.press("text:sample.bin");
@@ -304,6 +325,7 @@ describe("Native Editor E2E desktop UI, multimedia preview & Ghostty terminal", 
     await app.waitFor("id:preview-markdown");
     await app.waitFor("id:mermaid-block >> nth=0");
     expect(app.shows("id:mermaid-block >> nth=0")).toBe(true);
+    expect(app.shows("text:MERMAID")).toBe(false);
     await app.press("id:mermaid-copy-code >> nth=0");
     await app.press("id:mermaid-toggle-code >> nth=0");
     await app.waitFor("id:mermaid-code-view");
