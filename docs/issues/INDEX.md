@@ -31,6 +31,7 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 
 | ID | 子系统 | 标题 | Commit | 回归测试 | 日期 |
 |---|---|---|---|---|---|
+| I-003 | `DESIGN.md` | 开屏海报仅在首次无工作区时显示，工作区内空 Tab 使用安静提示页并自动恢复最近工作区 | `9c00cb9` | `App.test.tsx` › clean launch without workspace hides file tree, shows Aed welcome panel, and migrates legacy storage | 2026-11-06 |
 | I-002 | `DESIGN.md` | Aed 品牌重命名、Industrial 9 轮 UI 打磨、窗口最小尺寸锁定与 PDF 2x 纸张底衬预览 | `e55382d` | `App.test.tsx` › Aed E2E desktop UI, multimedia preview & Ghostty terminal | 2026-11-06 |
 | I-001 | `DESIGN.md` | `nsh.json` 进程白名单收紧到 `git`/`python3`/`sips`/`osascript` | `254ef6b` | `App.test.tsx` › enforces least-privilege process.execute allowlist | 2026-11-06 |
 | I-000 | `DESIGN.md` | 修复 `DYLD_INSERT_LIBRARIES` 泄漏并移除冗余 `qlmanage`/`open` 操作栏 | `e1cf916` | `App.test.tsx` | 2026-04-12 |
