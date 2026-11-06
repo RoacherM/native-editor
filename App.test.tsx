@@ -10,9 +10,12 @@ import { parseGhosttyConfig } from "./src/TerminalPane";
 import manifest from "./nsh.json";
 import {
   computeSyntaxDecorations,
+  DEFAULT_THEME_ID,
   EDITOR_THEMES,
+  fontDisplayName,
   getThemeById,
 } from "./src/themes";
+import { shortenHomePath } from "./src/workspace";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -109,6 +112,30 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
       tokyo.syntax
     );
     expect(tsDecos.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test("shortens home paths and names fonts without Nerd Font suffixes", () => {
+    expect(shortenHomePath("/Users/me/Projects/x", "/Users/me")).toBe("~/Projects/x");
+    expect(shortenHomePath("/Users/me", "/Users/me")).toBe("~");
+    expect(shortenHomePath("/Users/meow/x", "/Users/me")).toBe("/Users/meow/x");
+    expect(shortenHomePath("/tmp/x", "")).toBe("/tmp/x");
+    expect(fontDisplayName("JetBrainsMono Nerd Font Mono")).toBe("JetBrainsMono");
+    expect(fontDisplayName("SF Mono")).toBe("SF Mono");
+    expect(fontDisplayName("Fira Code")).toBe("Fira Code");
+    expect(fontDisplayName("")).toBe("Mono");
+  });
+
+  test("static nsh.json tokens match the default Industrial themes (no black/white split)", () => {
+    const paper = getThemeById(DEFAULT_THEME_ID);
+    const carbon = getThemeById("industrial-carbon");
+    const vars = manifest.theme.cssVars;
+    expect(paper.id).toBe("industrial-paper");
+    expect(vars.light.background).toBe(paper.ui.background);
+    expect(vars.light.foreground).toBe(paper.ui.foreground);
+    expect(vars.light.primary).toBe(paper.ui.accent);
+    expect(vars.dark.background).toBe(carbon.ui.background);
+    expect(vars.dark.foreground).toBe(carbon.ui.foreground);
+    expect(vars.dark.primary).toBe(carbon.ui.accent);
   });
 
   test("enforces least-privilege process.execute allowlist in nsh.json", () => {

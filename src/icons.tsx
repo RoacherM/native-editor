@@ -289,18 +289,40 @@ export function FileBadge(props: { name: string | Accessor<string> }): JSX.Eleme
   });
   return (
     <View class="w-[22px] items-center justify-center shrink-0">
-      <Text
-        class="text-[8.5px] font-mono font-bold leading-none whitespace-nowrap"
-        style={{ color: spec().color }}
-      >
+      <Text class="text-[8.5px] font-mono font-bold leading-none whitespace-nowrap text-muted-foreground">
         {spec().glyph}
       </Text>
     </View>
   );
 }
 
-export function AppLogo(props: { size?: number }): JSX.Element {
+/** The app mark. With `ink` and `accent` it is a flat line mark in the theme's colors, read inside `draw` so a theme change redraws it; without, the full-color icon. */
+export function AppLogo(props: {
+  size?: number;
+  ink?: Accessor<string>;
+  accent?: Accessor<string>;
+}): JSX.Element {
   const size = props.size ?? 48;
+  const ink = props.ink;
+  const accent = props.accent;
+  if (ink && accent) {
+    return (
+      <Canvas
+        style={{ pointerEvents: "none", width: size, height: size }}
+        draw={(cx, { width }) => {
+          cx.scale(width / 64, width / 64);
+          cx.lineCap = "round";
+          cx.lineJoin = "round";
+          cx.lineWidth = 4.6;
+          cx.strokeStyle = ink();
+          strokeLine(cx, [22, 20, 10, 32, 22, 44]);
+          strokeLine(cx, [42, 20, 54, 32, 42, 44]);
+          cx.strokeStyle = accent();
+          strokeLine(cx, [36, 16, 28, 48]);
+        }}
+      />
+    );
+  }
   return (
     <Canvas
       style={{ pointerEvents: "none", width: size, height: size }}

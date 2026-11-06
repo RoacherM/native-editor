@@ -27,7 +27,7 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 | Bundle ID | `dev.byronwayne.nativeeditor` | `nsh.json` 与 `scripts/set_default_handlers.m` 共用；改名会导致 LaunchServices 默认打开关联失效 |
 | `Storage` 键 | `native-editor.fontFamily` | 用户字体名；未设置时回退到 Ghostty 配置或 `JetBrainsMono Nerd Font Mono` |
 | `Storage` 键 | `native-editor.fontSize` | 字号（`9`–`28` 整数字符串）；非法值回退到 Ghostty 字号或 `13` |
-| `Storage` 键 | `native-editor.theme` | 主题 ID（6 套内置主题，默认 `kanagawa-dragon`）；未知 ID 回退默认主题 |
+| `Storage` 键 | `native-editor.theme` | 主题 ID（8 套内置主题，默认 `industrial-paper`）；未知 ID 回退默认主题 |
 | `Storage` 键 | `native-editor.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`） |
 | `Storage` 键 | `native-editor.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个非 `/` 目录）；解析失败回退 `[]` |
 | 环境变量 / Host 参数 | `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置且无打开文件时返回 `""`（展示 Welcome 面板，绝不自动扫 `$HOME` 或 `/`） |
@@ -71,7 +71,7 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
 | `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender` | 隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL |
 | `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
 | `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig` | 多标签 Python `pty.fork()` 终端会话、ANSI CSI/OSC 流式剥离与回车覆盖处理、本机 Shell 与 Ghostty 配置探测 |
-| `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 6 套配色主题（Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、GitHub Dark、Rose Pine、One Light）及多语言正则语法高亮装饰器 |
+| `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 8 套配色主题（默认 Industrial Paper / Industrial Carbon，另有 Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、One Dark、Rose Pine、GitHub Light）及多语言正则语法高亮装饰器 |
 | `src/icons.tsx` | `Icon`, `FileBadge`, `AppLogo` | 内联矢量图标与按文件扩展名着色的类型徽章 |
 
 ---
@@ -111,6 +111,22 @@ Native Editor 是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量�
    - Method Swizzle `NSApplication setDelegate:`，向宿主 Delegate 动态注入 `application:openFile:`、`application:openFiles:` 与 `application:openURLs:`，将 Finder 双击或拖拽打开的文件路径写入 `/tmp/native-editor-open.queue`。
 3. **`scripts/set_default_handlers.m`**：
    - 调用 `LSSetDefaultRoleHandlerForContentType` 将 `dev.byronwayne.nativeeditor` 注册为 Markdown、Mermaid（`.mmd`）、JSON/JSONL、CSV/TSV、YAML/TOML、Diff 及主流源码文件的系统默认编辑器。
+
+---
+
+## 界面设计语言（Industrial）
+
+参照瑞士 / 包豪斯海报：纸、墨、一个信号红、石灰。默认主题 `industrial-paper`（浅）与 `industrial-carbon`（深）；其它 6 套主题沿用同一套结构规则，只换颜色。
+
+| 规则 | 做法 | 代码位置 |
+|---|---|---|
+| 色面分区，不画线 | 标题栏、标签栏、侧栏、编辑区、状态栏靠底色深浅区分；不加 `border-b` / `border-t` / 标签间竖线。浮层（下拉、命令面板）用阴影，不用描边 | `App.tsx` `WindowTitleBar` / `EditorHeader` / `StatusBar` |
+| 只有一个强调色 | `ui.accent`（信号红）只标「当前」：活动标签顶部 2px 条、未保存圆点、光标、拖拽分隔条、Recent 序号、`⌘O`。文件类型徽章一律灰色，不按扩展名上彩虹色 | `TabItem`、`src/icons.tsx` `FileBadge` |
+| 状态栏是一块实色 | `ui.statusBar` / `ui.statusBarForeground`（Industrial Paper 上为墨色底、纸色字）；未设置时回退 `sidebar` / `mutedForeground` | `StatusBar` |
+| 欢迎页是一张海报 | 3 个平面：右侧红色拱形、左下墨色块（它本身就是「Open Folder」主按钮）、两者交界处的石色 1/4 圆。标题 `Helvetica Neue` 粗体、紧字距、两行。所有尺寸由 `posterGrid()` 按面板大小算出，Recent 行数按剩余高度截断，窗口缩小时文字不压到色块上 | `App.tsx` `PosterFields` / `WelcomePanel` |
+| 颜色跟随主题重绘 | `Canvas` 只在 `draw` 内读到的 signal 变化时重绘，所以主题色必须在 `draw` 里读（`AppLogo` 的 `ink` / `accent` 传 accessor） | `src/icons.tsx` `AppLogo` |
+
+**为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.3.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
 
 ---
 

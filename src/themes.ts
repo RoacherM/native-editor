@@ -25,6 +25,9 @@ export interface ThemeUiColors {
   gutter: string;
   activeLine: string;
   selection: string;
+  /** The status bar's plane and text; without them it takes `sidebar` and `mutedForeground`. */
+  statusBar?: string;
+  statusBarForeground?: string;
 }
 
 export interface SyntaxClasses {
@@ -49,9 +52,102 @@ export interface EditorTheme {
   syntaxClasses: SyntaxClasses;
 }
 
-export const DEFAULT_THEME_ID = "kanagawa-dragon";
+/** A font family's short display name: Nerd Font patch suffixes dropped. */
+export function fontDisplayName(family: string): string {
+  const name = family.replace(/\s+Nerd Font(?:\s+(?:Mono|Propo))?$/i, "").trim();
+  return name || "Mono";
+}
+
+export const DEFAULT_THEME_ID = "industrial-paper";
 
 export const EDITOR_THEMES: readonly EditorTheme[] = [
+  // DESIGN.md「界面设计语言（Industrial）」: paper, ink, one signal red, stone.
+  {
+    id: "industrial-paper",
+    name: "Industrial Paper",
+    appearance: "light",
+    ui: {
+      background: "#efebe3",
+      sidebar: "#e5e0d5",
+      card: "#f7f4ee",
+      border: "#cfc8bb",
+      foreground: "#141414",
+      mutedForeground: "#6d685f",
+      accent: "#d7381e",
+      gutter: "#efebe3",
+      activeLine: "#e7e2d8",
+      selection: "#d7381e2e",
+      statusBar: "#141414",
+      statusBarForeground: "#d9d3c7",
+    },
+    syntax: {
+      keyword: "#c62d14",
+      string: "#4d5e2e",
+      number: "#b45309",
+      comment: "#8c8578",
+      property: "#2f4b63",
+      type: "#141414",
+      function: "#141414",
+      constant: "#c62d14",
+      operator: "#6d685f",
+      tag: "#c62d14",
+    },
+    syntaxClasses: {
+      keyword: "text-[#c62d14] font-semibold",
+      string: "text-[#4d5e2e]",
+      number: "text-[#b45309]",
+      comment: "text-[#8c8578] italic",
+      property: "text-[#2f4b63]",
+      type: "text-[#141414] font-semibold",
+      function: "text-[#141414]",
+      constant: "text-[#c62d14]",
+      operator: "text-[#6d685f]",
+      tag: "text-[#c62d14]",
+    },
+  },
+  {
+    id: "industrial-carbon",
+    name: "Industrial Carbon",
+    appearance: "dark",
+    ui: {
+      background: "#161514",
+      sidebar: "#1d1c1a",
+      card: "#232220",
+      border: "#33312d",
+      foreground: "#ede8de",
+      mutedForeground: "#8f897e",
+      accent: "#e8462b",
+      gutter: "#161514",
+      activeLine: "#1e1d1b",
+      selection: "#e8462b33",
+      statusBar: "#0e0e0d",
+      statusBarForeground: "#a39c90",
+    },
+    syntax: {
+      keyword: "#f06a4f",
+      string: "#b5c28f",
+      number: "#e0a96d",
+      comment: "#6f6a61",
+      property: "#9fb4c7",
+      type: "#ede8de",
+      function: "#ede8de",
+      constant: "#f06a4f",
+      operator: "#8f897e",
+      tag: "#f06a4f",
+    },
+    syntaxClasses: {
+      keyword: "text-[#f06a4f] font-semibold",
+      string: "text-[#b5c28f]",
+      number: "text-[#e0a96d]",
+      comment: "text-[#6f6a61] italic",
+      property: "text-[#9fb4c7]",
+      type: "text-[#ede8de] font-semibold",
+      function: "text-[#ede8de]",
+      constant: "text-[#f06a4f]",
+      operator: "text-[#8f897e]",
+      tag: "text-[#f06a4f]",
+    },
+  },
   {
     id: "kanagawa-dragon",
     name: "Kanagawa Dragon",

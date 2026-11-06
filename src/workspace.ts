@@ -139,6 +139,14 @@ export function relativePath(root: string, full: string): string {
   return full.startsWith(prefix) ? full.slice(prefix.length) : full;
 }
 
+/** `full` with the home directory written as `~`, for display only. */
+export function shortenHomePath(full: string, home: string): string {
+  if (!home) return full;
+  const cleanHome = home.replace(/\/+$/, "");
+  if (full === cleanHome) return "~";
+  return full.startsWith(`${cleanHome}/`) ? `~${full.slice(cleanHome.length)}` : full;
+}
+
 /** Look up git status for an absolute or relative path in `statusMap`. */
 export function lookupGitStatus(
   filePath: string,

@@ -1,5 +1,7 @@
+import * as os from "os";
 import path from "path";
 import {
+  Canvas,
   cleanup,
   computed,
   effect,
@@ -42,6 +44,7 @@ import {
 import {
   DEFAULT_THEME_ID,
   EDITOR_THEMES,
+  fontDisplayName,
   getThemeById,
   type EditorTheme,
 } from "./src/themes";
@@ -55,6 +58,7 @@ import {
   pickWorkspaceFolder,
   saveFileText,
   scanWorkspace,
+  shortenHomePath,
   type GitStatusCode,
   type LoadedFile,
   type WorkspaceSnapshot,
@@ -125,12 +129,15 @@ function TabItem(props: {
 
   return (
     <View
-      class={`h-[34px] px-2.5 flex-row items-center gap-1 border-r border-border shrink-0 select-none ${
+      class={`h-[34px] px-3 flex-row items-center gap-1 shrink-0 select-none ${
         isActive()
           ? "bg-background text-foreground"
-          : "bg-sidebar text-muted-foreground hover:text-foreground"
+          : "bg-transparent text-muted-foreground hover:text-foreground"
       }`}
     >
+      <If when={isActive()}>
+        <View class="absolute left-0 right-0 top-0 h-[2px] bg-primary" />
+      </If>
       <Button
         testID={`tab-select-${name()}`}
         onPress={props.onSelect}
@@ -147,7 +154,7 @@ function TabItem(props: {
           {name()}
         </Text>
         <If when={isDirty()}>
-          <Text class="text-amber-500 font-bold text-xs leading-none">•</Text>
+          <Text class="text-primary font-bold text-xs leading-none">•</Text>
         </If>
       </Button>
       <Button
@@ -212,7 +219,7 @@ function WindowTitleBar(props: {
   return (
     <View
       desktop={{ windowDrag: true }}
-      class="h-[30px] border-b border-border flex-row items-center justify-between pr-2.5 shrink-0 select-none"
+      class="h-[30px] flex-row items-center justify-between pr-2.5 shrink-0 select-none"
       style={{
         paddingLeft: props.leftPad(),
         backgroundColor: props.theme().ui.sidebar,
@@ -224,11 +231,8 @@ function WindowTitleBar(props: {
         <Button
           testID="titlebar-quick-open"
           onPress={() => (props.root() ? props.onQuickOpen() : props.onOpenFolder())}
-          style={{
-            backgroundColor: props.theme().ui.card,
-            borderColor: props.theme().ui.border,
-          }}
-          class="w-[320px] max-w-full h-[22px] px-3 rounded-md hover:opacity-90 border flex-row items-center justify-center gap-1.5 shadow-none"
+          style={{ backgroundColor: props.theme().ui.background }}
+          class="w-[320px] max-w-full h-[22px] px-3 rounded-[5px] hover:opacity-90 border-none flex-row items-center justify-center gap-1.5 shadow-none"
         >
           <Icon name="search" size={11.5} tint={props.theme().ui.mutedForeground} />
           <Text
@@ -300,11 +304,8 @@ function EditorHeader(props: {
     >
       <If when={props.tabs().length > 0}>
         <View
-          class="h-[34px] border-b flex-row items-center"
-          style={{
-            backgroundColor: props.theme().ui.sidebar,
-            borderColor: props.theme().ui.border,
-          }}
+          class="h-[34px] flex-row items-center"
+          style={{ backgroundColor: props.theme().ui.sidebar }}
         >
           <Scroll horizontal class="flex-1 shrink min-w-0">
             <View class="flex-row items-stretch h-[34px]">
@@ -420,8 +421,7 @@ function getContextAwareInfo(
 }
 
 function shortFontLabel(family: string, size: number): string {
-  const short = (family || "Mono").split(/\s+/)[0];
-  return `${short} · ${size}px`;
+  return `${fontDisplayName(family)} · ${size}px`;
 }
 
 function ThemeSelectOptionRow(props: {
@@ -530,6 +530,9 @@ function StatusBar(props: {
   const contextInfo = computed(() =>
     getContextAwareInfo(props.activeFile(), props.line(), props.col())
   );
+  const statusInk = computed(
+    () => props.theme().ui.statusBarForeground ?? props.theme().ui.mutedForeground
+  );
   const fontBadge = computed(() =>
     shortFontLabel(props.fontFamily(), props.fontSize())
   );
@@ -547,16 +550,15 @@ function StatusBar(props: {
 
   return (
     <View
-      class="h-[22px] px-3 border-t select-none flex-row items-center justify-between shrink-0"
+      class="h-[22px] px-3 select-none flex-row items-center justify-between shrink-0"
       style={{
-        backgroundColor: props.theme().ui.sidebar,
-        borderColor: props.theme().ui.border,
+        backgroundColor: props.theme().ui.statusBar ?? props.theme().ui.sidebar,
       }}
     >
       <View class="flex-row items-center gap-2">
         <View class="flex-row items-center gap-1">
           <Icon name="branch" size={11} tint="#888888" />
-          <Text class="text-[11px] text-muted-foreground font-mono">
+          <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
             {props.branch() || "main"}
             {props.changedCount() > 0 ? "*" : ""}
           </Text>
@@ -572,7 +574,7 @@ function StatusBar(props: {
 
       <View class="flex-row items-center gap-2">
         <If when={!!contextInfo()}>
-          <Text class="text-[11px] text-muted-foreground font-mono">
+          <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
             {contextInfo()}
           </Text>
         </If>
@@ -586,7 +588,7 @@ function StatusBar(props: {
           onChange={({ value }) => {
             if (value) props.onSelectTheme(value);
           }}
-          popupClass="w-56 rounded-lg border shadow-2xl p-1"
+          popupClass="w-56 rounded-md shadow-2xl p-1"
           popupStyle={{
             backgroundColor: props.theme().ui.card,
             borderColor: props.theme().ui.border,
@@ -603,13 +605,13 @@ function StatusBar(props: {
           trigger={
             <View
               testID="statusbar-theme-trigger"
-              class="h-4 px-1.5 rounded flex-row items-center gap-1 hover:bg-muted/60"
+              class="h-4 px-1.5 rounded flex-row items-center gap-1 hover:bg-white/10"
             >
               <View
                 class="w-2 h-2 rounded-full"
                 style={{ backgroundColor: props.theme().ui.accent }}
               />
-              <Text class="text-[10.5px] font-mono text-muted-foreground">
+              <Text class="text-[10.5px] font-mono" style={{ color: statusInk() }}>
                 {props.theme().name}
               </Text>
             </View>
@@ -626,7 +628,7 @@ function StatusBar(props: {
           onChange={({ value }) => {
             if (value) props.onSelectFont(value);
           }}
-          popupClass="w-64 rounded-lg border shadow-2xl p-1"
+          popupClass="w-64 rounded-md shadow-2xl p-1"
           popupStyle={{
             backgroundColor: props.theme().ui.card,
             borderColor: props.theme().ui.border,
@@ -643,9 +645,9 @@ function StatusBar(props: {
           trigger={
             <View
               testID="statusbar-font-trigger"
-              class="h-4 px-1.5 rounded flex-row items-center hover:bg-muted/60"
+              class="h-4 px-1.5 rounded flex-row items-center hover:bg-white/10"
             >
-              <Text class="text-[10.5px] font-mono text-muted-foreground">
+              <Text class="text-[10.5px] font-mono" style={{ color: statusInk() }}>
                 {fontBadge()}
               </Text>
             </View>
@@ -876,6 +878,120 @@ function FontSettingsDialog(props: {
   );
 }
 
+// DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a poster.
+// Three flat fields carry the composition: a signal-red arch (right), an ink
+// block (bottom left) that IS the primary action, and a stone quarter disc
+// where they meet. Text sits on the paper, top left, on one grid.
+const POSTER_FONT = "Helvetica Neue";
+
+interface PosterBox {
+  w: number;
+  h: number;
+}
+
+/** The poster's grid, from the panel size: column split, block height, title size. */
+function posterGrid(box: PosterBox): {
+  pad: number;
+  split: number;
+  blockTop: number;
+  title: number;
+} {
+  const pad = Math.round(Math.max(32, Math.min(64, box.w * 0.045)));
+  const split = Math.round(Math.max(box.w * 0.46, Math.min(box.w - 160, 420)));
+  const blockH = Math.round(Math.max(132, Math.min(220, box.h * 0.26)));
+  const title = Math.round(Math.max(44, Math.min(104, (split - pad * 2) / 4.6, box.h / 7.5)));
+  return { pad, split, blockTop: box.h - blockH, title };
+}
+
+function PosterFields(props: {
+  box: Accessor<PosterBox>;
+  theme: Accessor<EditorTheme>;
+}): JSX.Element {
+  return (
+    <Canvas
+      style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0, pointerEvents: "none" }}
+      draw={(cx) => {
+        const { w, h } = props.box();
+        if (w <= 0 || h <= 0) return;
+        const ui = props.theme().ui;
+        const g = posterGrid({ w, h });
+        // Signal arch: straight left edge from the block line up, one quarter
+        // circle over to the right edge.
+        const archTop = Math.round(h * 0.2);
+        const r = Math.min(w - g.split, g.blockTop - archTop);
+        cx.fillStyle = ui.accent;
+        cx.beginPath();
+        cx.moveTo(g.split, h);
+        cx.lineTo(g.split, archTop + r);
+        cx.arc(g.split + r, archTop + r, r, Math.PI, Math.PI * 1.5);
+        cx.lineTo(w, archTop);
+        cx.lineTo(w, h);
+        cx.closePath();
+        cx.fill();
+        // Ink block: the primary action's field.
+        cx.fillStyle = ui.foreground;
+        cx.fillRect(0, g.blockTop, g.split, h - g.blockTop);
+        // Stone quarter disc: centred on the block's top-right corner, it
+        // fills the arch's foot from the block line down and to the right.
+        const sr = Math.min(h - g.blockTop, (w - g.split) * 0.5);
+        cx.fillStyle = ui.border;
+        cx.beginPath();
+        cx.moveTo(g.split, g.blockTop);
+        cx.lineTo(g.split + sr, g.blockTop);
+        cx.arc(g.split, g.blockTop, sr, 0, Math.PI / 2);
+        cx.closePath();
+        cx.fill();
+      }}
+    />
+  );
+}
+
+function PosterRecent(props: {
+  items: Accessor<string[]>;
+  home: string;
+  theme: Accessor<EditorTheme>;
+  onSelect: (folderPath: string) => void;
+}): JSX.Element {
+  return (
+    <View class="gap-0.5">
+      <Text
+        class="text-[10.5px] font-semibold uppercase tracking-[0.16em] pb-2"
+        style={{ color: props.theme().ui.mutedForeground, fontFamily: POSTER_FONT }}
+      >
+        Recent
+      </Text>
+      <Each of={props.items()} key={(w) => w}>
+        {(ws, index) => (
+          <Button
+            testID={`welcome-recent-${path.basename(ws()) || ws()}`}
+            onPress={() => props.onSelect(ws())}
+            class="h-7 -mx-2 px-2 rounded-[4px] flex-row items-center gap-3 bg-transparent hover:bg-foreground/5 active:bg-foreground/10 border-none shadow-none"
+          >
+            <Text
+              class="w-5 text-[11px] font-mono shrink-0"
+              style={{ color: props.theme().ui.accent }}
+            >
+              {String(index() + 1).padStart(2, "0")}
+            </Text>
+            <Text
+              class="text-[13.5px] font-medium shrink-0"
+              style={{ color: props.theme().ui.foreground, fontFamily: POSTER_FONT }}
+            >
+              {path.basename(ws()) || ws()}
+            </Text>
+            <Text
+              class="text-[11px] font-mono flex-1 min-w-0 truncate"
+              style={{ color: props.theme().ui.mutedForeground }}
+            >
+              {shortenHomePath(path.dirname(ws()), props.home)}
+            </Text>
+          </Button>
+        )}
+      </Each>
+    </View>
+  );
+}
+
 function WelcomePanel(props: {
   root: Accessor<string>;
   recentWorkspaces: Accessor<string[]>;
@@ -884,87 +1000,109 @@ function WelcomePanel(props: {
   onSelectRecentWorkspace: (folderPath: string) => void;
   onQuickOpen: () => void;
 }): JSX.Element {
+  const home = os.homedir();
+  const box = signal<PosterBox>({ w: 0, h: 0 });
+  const grid = computed(() => posterGrid(box()));
+  // Recent rows that fit between the title and the ink block (28pt a row).
+  const recentFit = computed(() => {
+    const g = grid();
+    const top = g.pad + g.title * 1.84 + 96;
+    const rows = Math.floor((g.blockTop - 28 - top) / 28);
+    return props.recentWorkspaces().slice(0, Math.max(0, Math.min(5, rows)));
+  });
+  const ui = () => props.theme().ui;
+
   return (
     <View
       testID="welcome-panel"
-      class="flex-1 items-center justify-center p-8 gap-5 select-none"
-      style={{ backgroundColor: props.theme().ui.background }}
+      class="flex-1 overflow-hidden select-none"
+      style={{ backgroundColor: ui().background }}
+      onLayout={({ bounds }) =>
+        box.set({ w: Math.round(bounds.size.width), h: Math.round(bounds.size.height) })
+      }
     >
-      <View class="items-center gap-2">
-        <AppLogo size={54} />
-        <Text
-          style={{ color: props.theme().ui.foreground }}
-          class="text-2xl font-bold tracking-tight mt-1"
-        >
-          Native Editor
-        </Text>
-        <Text
-          style={{ color: props.theme().ui.mutedForeground }}
-          class="text-xs max-w-md text-center"
-        >
-          Lightweight native code editor and multi-format document previewer.
-        </Text>
-      </View>
+      <PosterFields box={box} theme={props.theme} />
 
-      <View class="flex-row gap-3">
-        <Button
-          testID="welcome-open-folder"
-          onPress={props.onOpenFolder}
-          class="px-4 py-2 rounded-md bg-primary hover:bg-primary/90 shadow-none"
+      <View
+        class="absolute gap-5"
+        style={{ left: grid().pad, top: grid().pad, width: grid().split - grid().pad * 2 }}
+      >
+        <Text
+          style={{
+            color: ui().foreground,
+            fontFamily: POSTER_FONT,
+            fontWeight: "bold",
+            fontSize: grid().title,
+            lineHeight: Math.round(grid().title * 0.92),
+            letterSpacing: -grid().title * 0.035,
+          }}
         >
-          <Text class="text-xs text-primary-foreground font-medium">
-            Open Folder (⌘O)
-          </Text>
-        </Button>
-        <If when={!!props.root()}>
-          <Button
-            testID="welcome-search-files"
-            onPress={props.onQuickOpen}
-            class="px-4 py-2 rounded-md bg-secondary hover:bg-secondary/80 shadow-none"
-          >
-            <Text class="text-xs text-secondary-foreground font-medium">
-              Search Files (⌘P)
-            </Text>
-          </Button>
+          {"Native\nEditor"}
+        </Text>
+        <Text
+          class="text-[13px] max-w-[340px]"
+          style={{ color: ui().mutedForeground, fontFamily: POSTER_FONT }}
+        >
+          Code, documents, data and media. One native window, nothing else.
+        </Text>
+        <If when={recentFit().length > 0}>
+          <View class="pt-4">
+            <PosterRecent
+              items={recentFit}
+              home={home}
+              theme={props.theme}
+              onSelect={props.onSelectRecentWorkspace}
+            />
+          </View>
         </If>
       </View>
 
-      <If when={props.recentWorkspaces().length > 0}>
-        <View class="w-[440px] max-w-full gap-1.5 pt-2">
+      <Button
+        testID="welcome-open-folder"
+        onPress={props.onOpenFolder}
+        class="absolute justify-end bg-transparent hover:bg-white/5 active:bg-white/10 border-none shadow-none rounded-none"
+        style={{
+          left: 0,
+          top: grid().blockTop,
+          width: grid().split,
+          bottom: 0,
+          paddingLeft: grid().pad,
+          paddingBottom: grid().pad * 0.8,
+          paddingRight: grid().pad,
+        }}
+      >
+        <View class="flex-row items-end justify-between">
           <Text
-            style={{ color: props.theme().ui.mutedForeground }}
-            class="text-[10.5px] font-semibold uppercase tracking-wider"
+            style={{
+              color: ui().background,
+              fontFamily: POSTER_FONT,
+              fontWeight: "bold",
+              fontSize: 26,
+              letterSpacing: -0.6,
+            }}
           >
-            Recent Workspaces
+            Open Folder
           </Text>
-          <View class="gap-1">
-            <Each of={props.recentWorkspaces()} key={(w) => w}>
-              {(ws) => (
-                <Button
-                  onPress={() => props.onSelectRecentWorkspace(ws())}
-                  style={{
-                    backgroundColor: props.theme().ui.card,
-                    borderColor: props.theme().ui.border,
-                  }}
-                  class="w-full h-7 px-3 rounded border flex-row items-center justify-between gap-3 overflow-hidden hover:opacity-90 shadow-none"
-                >
-                  <Text
-                    style={{ color: props.theme().ui.foreground }}
-                    class="text-xs font-medium shrink-0"
-                  >
-                    {path.basename(ws()) || ws()}
-                  </Text>
-                  <Text
-                    style={{ color: props.theme().ui.mutedForeground }}
-                    class="text-[10.5px] font-mono flex-1 min-w-0 text-right truncate"
-                  >
-                    {ws()}
-                  </Text>
-                </Button>
-              )}
-            </Each>
-          </View>
+          <Text
+            class="text-[13px] font-medium pb-1"
+            style={{ color: ui().accent, fontFamily: POSTER_FONT }}
+          >
+            ⌘O
+          </Text>
         </View>
+      </Button>
+
+      <If when={!!props.root()}>
+        <Button
+          testID="welcome-search-files"
+          onPress={props.onQuickOpen}
+          class="absolute bg-transparent hover:bg-black/5 border-none shadow-none rounded-none"
+          style={{ right: grid().pad, top: grid().pad }}
+        >
+          <Text class="text-[12px] font-mono" style={{ color: ui().foreground }}>
+            Search Files ⌘P
+          </Text>
+        </Button>
       </If>
     </View>
   );
@@ -1505,7 +1643,7 @@ function App(): JSX.Element {
           axis="horizontal"
           class="flex-1 min-h-0 overflow-hidden"
           style={{ backgroundColor: activeTheme().ui.background }}
-          handleClass="bg-border hover:bg-sky-500/60 active:bg-sky-400 transition-colors"
+          handleClass="bg-transparent hover:bg-primary/70 active:bg-primary transition-colors"
         >
           <ResizablePanel
             visible={sidebarOpen() && workspaceRoot().length > 0}
@@ -1538,7 +1676,7 @@ function App(): JSX.Element {
               axis="vertical"
               class="flex-1 min-h-0 overflow-hidden"
               style={{ backgroundColor: activeTheme().ui.background }}
-              handleClass="bg-border hover:bg-sky-500/60 active:bg-sky-400 transition-colors"
+              handleClass="bg-transparent hover:bg-primary/70 active:bg-primary transition-colors"
             >
               <ResizablePanel
                 minSize={140}

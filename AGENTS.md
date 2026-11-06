@@ -17,7 +17,8 @@ Lightweight macOS native editor, multi-format previewer (`code`, `markdown`, `me
 - 架构、模块契约、持久化标识与踩坑记录：`DESIGN.md`
   - 改 `src/classify.ts` / `src/PreviewPane.tsx` / `src/mermaid.tsx` → 读 `DESIGN.md「文件预览与 Mermaid 渲染契约」`
   - 改 `src/workspace.ts` / `scripts/` / `nsh.json` → 读 `DESIGN.md「术语与边界」` 与 `DESIGN.md「Finder 桥接与打包流水线」`
-  - 改 `src/TerminalPane.tsx` / `src/themes.ts` → 读 `DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」`
+  - 改 `src/TerminalPane.tsx` → 读 `DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」`
+  - 改界面样式、`src/themes.ts`、`src/icons.tsx`、`nsh.json` `theme` → 读 `DESIGN.md「界面设计语言（Industrial）」`
 - 待修问题与待办队列：`docs/issues/INDEX.md`
 - 历史归档：`docs/archive/`（**日常开发严禁读取**）
 
