@@ -483,6 +483,54 @@ function probeSvgDimensions(text: string): ImageDimensions | null {
   return null;
 }
 
+function readU32LE(b: Uint8Array, offset: number): number {
+  return (
+    (b[offset] |
+      (b[offset + 1] << 8) |
+      (b[offset + 2] << 16) |
+      (b[offset + 3] << 24)) >>>
+    0
+  );
+}
+
+function writeU32LE(b: Uint8Array, offset: number, value: number): void {
+  b[offset] = value & 0xff;
+  b[offset + 1] = (value >>> 8) & 0xff;
+  b[offset + 2] = (value >>> 16) & 0xff;
+  b[offset + 3] = (value >>> 24) & 0xff;
+}
+
+/** Inspect a 64-bit Mach-O header and clamp LC_BUILD_VERSION (minos/sdk) to macOS 11.0 / 14.0 so LaunchServices never fails with -10825. */
+export function normalizeMachOBuildVersion(
+  bytes: Uint8Array,
+  targetMinos = 0x000b0000,
+  targetSdk = 0x000e0000
+): { minos: number; sdk: number; patched: boolean } | null {
+  if (bytes.length < 32 || readU32LE(bytes, 0) !== 0xfeedfacf) return null;
+  const ncmds = readU32LE(bytes, 16);
+  let offset = 32;
+  for (let i = 0; i < ncmds; i += 1) {
+    if (offset + 8 > bytes.length) break;
+    const cmd = readU32LE(bytes, offset);
+    const cmdsize = readU32LE(bytes, offset + 4);
+    if (cmdsize < 8 || offset + cmdsize > bytes.length) break;
+    if (cmd === 0x32 && cmdsize >= 24) {
+      const minos = readU32LE(bytes, offset + 12);
+      const sdk = readU32LE(bytes, offset + 16);
+      const nextMinos = minos !== targetMinos ? targetMinos : minos;
+      const nextSdk = sdk > targetSdk || sdk === 0 ? targetSdk : sdk;
+      const patched = nextMinos !== minos || nextSdk !== sdk;
+      if (patched) {
+        writeU32LE(bytes, offset + 12, nextMinos);
+        writeU32LE(bytes, offset + 16, nextSdk);
+      }
+      return { minos: nextMinos, sdk: nextSdk, patched };
+    }
+    offset += cmdsize;
+  }
+  return null;
+}
+
 /** Extract pixel dimensions from PNG, GIF, or SVG headers when available. */
 export function probeImageDimensions(
   bytes: Uint8Array,

@@ -2,6 +2,7 @@ import { describe, expect, open, test } from "nsh/test";
 import {
   classifyFile,
   formatHexDump,
+  normalizeMachOBuildVersion,
   parseTableData,
   probeImageDimensions,
 } from "./src/classify";
@@ -149,6 +150,36 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
     ]);
     expect(manifest.capabilities.process.env).toContain("AED_ROOT");
     expect(manifest.capabilities.process.env).toContain("AED_OPEN_FILE");
+  });
+
+  test("normalizes Mach-O LC_BUILD_VERSION minos/sdk to macOS 11.0 / 14.0 to prevent LaunchServices -10825 error", () => {
+    // 32-byte Mach-O 64 header (magic=0xfeedfacf, ncmds=1) + 24-byte LC_BUILD_VERSION (cmd=0x32, minos=27.0.0, sdk=27.0.0)
+    const macho = new Uint8Array(56);
+    const view = new DataView(macho.buffer);
+    view.setUint32(0, 0xfeedfacf, true);
+    view.setUint32(16, 1, true);
+    view.setUint32(32, 0x32, true);
+    view.setUint32(36, 24, true);
+    view.setUint32(40, 1, true); // PLATFORM_MACOS
+    view.setUint32(44, 0x001b0000, true); // minos 27.0.0
+    view.setUint32(48, 0x001b0000, true); // sdk 27.0.0
+
+    const first = normalizeMachOBuildVersion(macho);
+    expect(first).toEqual({
+      minos: 0x000b0000,
+      sdk: 0x000e0000,
+      patched: true,
+    });
+    expect(view.getUint32(44, true)).toBe(0x000b0000);
+    expect(view.getUint32(48, true)).toBe(0x000e0000);
+
+    const second = normalizeMachOBuildVersion(macho);
+    expect(second).toEqual({
+      minos: 0x000b0000,
+      sdk: 0x000e0000,
+      patched: false,
+    });
+    expect(normalizeMachOBuildVersion(new Uint8Array([1, 2, 3]))).toBeNull();
   });
 });
 

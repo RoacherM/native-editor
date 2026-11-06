@@ -8,6 +8,7 @@ APP_BUNDLE=".nsh/out/Aed.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 PLIST_PATH="$APP_BUNDLE/Contents/Info.plist"
 SIGN_ID="1BA80B4A6DD4AA3BF2D4A3C39578ED857831F4B5"
+export MACOSX_DEPLOYMENT_TARGET="11.0"
 
 if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
   SIGN_ID="-"
@@ -19,20 +20,25 @@ nsh check
 nsh test
 nsh package --target macos
 
-echo "==> 2. Building Finder open-file bridge & CLI launcher..."
+echo "==> 2. Building Finder open-file bridge, CLI launcher & UTI handler..."
 mv "$MACOS_DIR/Aed" "$MACOS_DIR/AedCore"
-clang -dynamiclib -framework Cocoa -O2 \
+clang -mmacosx-version-min=11.0 -dynamiclib -framework Cocoa -O2 \
   -install_name "@executable_path/libFinderBridge.dylib" \
   scripts/finder_bridge.m -o "$MACOS_DIR/libFinderBridge.dylib"
-clang -O2 scripts/launcher.c -o "$MACOS_DIR/Aed"
+clang -mmacosx-version-min=11.0 -O2 scripts/launcher.c -o "$MACOS_DIR/Aed"
+clang -mmacosx-version-min=11.0 -framework Foundation -framework CoreServices -framework UniformTypeIdentifiers -O2 \
+  scripts/set_default_handlers.m -o "$MACOS_DIR/set_default_handlers"
 
 echo "==> 3. Updating Info.plist with CFBundleDocumentTypes & UTExportedTypeDeclarations..."
-python3 - "$PLIST_PATH" << 'PYEOF'
-import plistlib, sys
+python3 - "$PLIST_PATH" "$MACOS_DIR" << 'PYEOF'
+import os, plistlib, struct, sys
 
 plist_path = sys.argv[1]
+macos_dir = sys.argv[2]
 with open(plist_path, "rb") as f:
     plist = plistlib.load(f)
+
+plist["LSMinimumSystemVersion"] = "11.0"
 
 extensions = [
     "md", "markdown", "mdx", "txt", "text", "log", "rst", "adoc", "srt", "vtt", "ass",
@@ -109,11 +115,36 @@ plist["UTExportedTypeDeclarations"] = [
 
 with open(plist_path, "wb") as f:
     plistlib.dump(plist, f)
+
+for name in os.listdir(macos_dir):
+    bin_path = os.path.join(macos_dir, name)
+    if not os.path.isfile(bin_path):
+        continue
+    with open(bin_path, "rb") as f:
+        data = bytearray(f.read())
+    if len(data) < 32 or struct.unpack("<I", data[:4])[0] != 0xFEEDFACF:
+        continue
+    ncmds = struct.unpack("<I", data[16:20])[0]
+    offset = 32
+    changed = False
+    for _ in range(ncmds):
+        if offset + 8 > len(data):
+            break
+        cmd, cmdsize = struct.unpack("<II", data[offset:offset+8])
+        if cmd == 0x32 and cmdsize >= 24:
+            platform, minos, sdk, ntools = struct.unpack("<IIII", data[offset+8:offset+24])
+            struct.pack_into("<IIII", data, offset+8, platform, 0x000B0000, 0x000E0000, ntools)
+            changed = True
+        offset += cmdsize
+    if changed:
+        with open(bin_path, "wb") as f:
+            f.write(data)
 PYEOF
 
 echo "==> 4. Signing Aed.app (identity: $SIGN_ID)..."
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/libFinderBridge.dylib"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/AedCore"
+codesign --force --sign "$SIGN_ID" "$MACOS_DIR/set_default_handlers"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/Aed"
 codesign --force --deep --sign "$SIGN_ID" "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE"
@@ -126,23 +157,16 @@ fi
 rm -rf "/Applications/Native Editor.app" "/Applications/Aed.app"
 cp -R "$APP_BUNDLE" "/Applications/Aed.app"
 xattr -cr "/Applications/Aed.app"
+codesign --force --deep --sign "$SIGN_ID" "/Applications/Aed.app"
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [ -x "$LSREGISTER" ]; then
   "$LSREGISTER" -f "/Applications/Aed.app"
 fi
 
-clang -framework Foundation -framework CoreServices -framework UniformTypeIdentifiers -O2 \
-  scripts/set_default_handlers.m -o .nsh/out/set_default_handlers
-cp .nsh/out/set_default_handlers "/Applications/Aed.app/Contents/MacOS/set_default_handlers"
-cp .nsh/out/set_default_handlers "$MACOS_DIR/set_default_handlers"
-codesign --force --sign "$SIGN_ID" "$MACOS_DIR/set_default_handlers"
-codesign --force --deep --sign "$SIGN_ID" "$APP_BUNDLE"
-codesign --force --deep --sign "$SIGN_ID" "/Applications/Aed.app"
 if [ "$FIRST_INSTALL" = "1" ] || [ "${1:-}" = "--set-default" ]; then
-  .nsh/out/set_default_handlers
+  "/Applications/Aed.app/Contents/MacOS/set_default_handlers"
 fi
-rm -f .nsh/out/set_default_handlers
 
 echo "==> 6. Building DMG and ZIP release archives..."
 rm -rf .nsh/dmg-stage .nsh/out/*.dmg .nsh/out/*.zip
@@ -154,6 +178,7 @@ cat << 'EOF' > ".nsh/dmg-stage/Install & Set Default.command"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 rm -rf "/Applications/Native Editor.app" "/Applications/Aed.app"
 cp -R "$DIR/Aed.app" "/Applications/Aed.app"
+codesign --force --deep --sign - "/Applications/Aed.app" 2>/dev/null || true
 xattr -cr "/Applications/Aed.app"
 "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "/Applications/Aed.app" 2>/dev/null || true
 "/Applications/Aed.app/Contents/MacOS/set_default_handlers" 2>/dev/null || true
@@ -161,7 +186,7 @@ open "/Applications/Aed.app"
 EOF
 chmod +x ".nsh/dmg-stage/Install & Set Default.command"
 
-ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" .nsh/out/Aed-0.0.1-macos-arm64.zip
+ditto -c -k --norsrc --noextattr --keepParent "$APP_BUNDLE" .nsh/out/Aed-0.0.1-macos-arm64.zip
 hdiutil create -volname "Aed 0.0.1" -srcfolder .nsh/dmg-stage -ov -format UDZO .nsh/out/Aed-0.0.1-macos-arm64.dmg
 rm -rf .nsh/dmg-stage
 ls -lh .nsh/out/
