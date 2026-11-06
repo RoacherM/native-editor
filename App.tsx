@@ -1148,12 +1148,10 @@ function PosterRecent(props: {
 }
 
 function WelcomePanel(props: {
-  root: Accessor<string>;
   recentWorkspaces: Accessor<string[]>;
   theme: Accessor<EditorTheme>;
   onOpenFolder: () => void;
   onSelectRecentWorkspace: (folderPath: string) => void;
-  onQuickOpen: () => void;
 }): JSX.Element {
   const home = os.homedir();
   const box = signal<PosterBox>({ w: 0, h: 0 });
@@ -1243,19 +1241,74 @@ function WelcomePanel(props: {
           Open Folder
         </Text>
       </Button>
+    </View>
+  );
+}
 
-      <If when={!!props.root()}>
-        <Button
-          testID="welcome-search-files"
+function EmptyEditorShortcutRow(props: {
+  id: string;
+  label: string;
+  shortcut: string;
+  theme: Accessor<EditorTheme>;
+  onPress: () => void;
+}): JSX.Element {
+  return (
+    <Button
+      testID={props.id}
+      onPress={props.onPress}
+      class="h-7 px-2.5 rounded flex-row items-center justify-between gap-8 bg-transparent hover:bg-white/5 border-none shadow-none"
+    >
+      <Text
+        style={{ color: props.theme().ui.mutedForeground }}
+        class="text-xs"
+      >
+        {props.label}
+      </Text>
+      <Text
+        style={{ color: props.theme().ui.mutedForeground, opacity: 0.65 }}
+        class="text-[11px] font-mono"
+      >
+        {props.shortcut}
+      </Text>
+    </Button>
+  );
+}
+
+function EmptyEditorPanel(props: {
+  theme: Accessor<EditorTheme>;
+  onQuickOpen: () => void;
+  onOpenFolder: () => void;
+  onToggleTerminal: () => void;
+}): JSX.Element {
+  return (
+    <View
+      testID="empty-editor-panel"
+      class="flex-1 items-center justify-center select-none"
+      style={{ backgroundColor: props.theme().ui.background }}
+    >
+      <View class="w-[220px] flex-col gap-1 opacity-75">
+        <EmptyEditorShortcutRow
+          id="empty-editor-quick-open"
+          label="Search Files"
+          shortcut="⌘P"
+          theme={props.theme}
           onPress={props.onQuickOpen}
-          class="absolute bg-transparent hover:bg-black/5 border-none shadow-none rounded-none"
-          style={{ right: grid().pad, top: grid().pad }}
-        >
-          <Text class="text-[12px] font-mono" style={{ color: ui().foreground }}>
-            Search Files ⌘P
-          </Text>
-        </Button>
-      </If>
+        />
+        <EmptyEditorShortcutRow
+          id="empty-editor-open-folder"
+          label="Open Folder"
+          shortcut="⌘O"
+          theme={props.theme}
+          onPress={props.onOpenFolder}
+        />
+        <EmptyEditorShortcutRow
+          id="empty-editor-toggle-terminal"
+          label="Toggle Terminal"
+          shortcut="⌘J"
+          theme={props.theme}
+          onPress={props.onToggleTerminal}
+        />
+      </View>
     </View>
   );
 }
@@ -1556,13 +1609,34 @@ async function getStorageWithFallback(name: string): Promise<string | null> {
   return Storage.getItem(`native-editor.${name}`);
 }
 
+function applySavedThemeAndFont(
+  fontFamily: Signal<string>,
+  fontSize: Signal<number>,
+  themeId: Signal<string>,
+  savedFamily: string | null,
+  savedSize: string | null,
+  savedTheme: string | null,
+  ghostty: { fontFamily?: string; fontSize?: number; theme?: string }
+): void {
+  const family = savedFamily || ghostty.fontFamily;
+  if (family) fontFamily.set(family);
+
+  const size = resolveSavedFontSize(savedSize, ghostty.fontSize);
+  if (size) fontSize.set(size);
+
+  const resolvedTheme = getThemeById(savedTheme || ghostty.theme || DEFAULT_THEME_ID);
+  themeId.set(resolvedTheme.id);
+  setColorScheme(resolvedTheme.appearance);
+}
+
 async function initUserPreferences(
   fontFamily: Signal<string>,
   fontSize: Signal<number>,
   themeId: Signal<string>,
   defaultShell: Signal<string>,
   availableShells: Signal<ShellProfile[]>,
-  recentWorkspaces: Signal<string[]>
+  recentWorkspaces: Signal<string[]>,
+  onRestoreRecentWorkspace?: (folderPath: string) => Promise<void>
 ): Promise<void> {
   const [savedFamily, savedSize, savedTheme, savedShell, savedRecent, env] =
     await Promise.all([
@@ -1573,21 +1647,25 @@ async function initUserPreferences(
       getStorageWithFallback("recentWorkspaces"),
       discoverTerminalEnvironment(),
     ]);
-  const family = savedFamily || env.ghostty.fontFamily;
-  if (family) fontFamily.set(family);
-
-  const size = resolveSavedFontSize(savedSize, env.ghostty.fontSize);
-  if (size) fontSize.set(size);
-
-  const resolvedTheme = getThemeById(savedTheme || env.ghostty.theme || DEFAULT_THEME_ID);
-  themeId.set(resolvedTheme.id);
-  setColorScheme(resolvedTheme.appearance);
+  applySavedThemeAndFont(
+    fontFamily,
+    fontSize,
+    themeId,
+    savedFamily,
+    savedSize,
+    savedTheme,
+    env.ghostty
+  );
 
   if (env.shells.length > 0) availableShells.set(env.shells);
   const shell = savedShell || env.shells[0]?.path;
   if (shell) defaultShell.set(shell);
 
-  recentWorkspaces.set(parseRecentWorkspaces(savedRecent));
+  const recent = parseRecentWorkspaces(savedRecent);
+  recentWorkspaces.set(recent);
+  if (recent.length > 0 && onRestoreRecentWorkspace) {
+    await onRestoreRecentWorkspace(recent[0]);
+  }
 }
 
 function App(): JSX.Element {
@@ -1706,7 +1784,16 @@ function App(): JSX.Element {
       themeId,
       defaultShell,
       availableShells,
-      recentWorkspaces
+      recentWorkspaces,
+      async (lastFolder) => {
+        if (!workspaceRoot() && !getInitialOpenFile()) {
+          const scanned = await scanWorkspace(lastFolder);
+          if (scanned.entries.length > 0) {
+            workspaceRoot.set(lastFolder);
+            snapshot.set(scanned);
+          }
+        }
+      }
     );
     const timer = setInterval(async () => {
       const queued = await consumeFinderOpenQueue();
@@ -1909,14 +1996,20 @@ function App(): JSX.Element {
                       }}
                     />
                   </If>
-                  <If when={activeFile() === undefined}>
+                  <If when={activeFile() === undefined && workspaceRoot().length === 0}>
                     <WelcomePanel
-                      root={workspaceRoot}
                       recentWorkspaces={recentWorkspaces}
                       theme={activeTheme}
                       onOpenFolder={handleOpenFolder}
                       onSelectRecentWorkspace={switchToWorkspace}
+                    />
+                  </If>
+                  <If when={activeFile() === undefined && workspaceRoot().length > 0}>
+                    <EmptyEditorPanel
+                      theme={activeTheme}
                       onQuickOpen={actions.openQuickOpen}
+                      onOpenFolder={handleOpenFolder}
+                      onToggleTerminal={actions.toggleTerminal}
                     />
                   </If>
                 </View>

@@ -174,6 +174,19 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     // Shrinking viewport below minimum window dimensions must not crush the poster grid
     await cleanApp.setViewport(280, 450);
     expect(cleanApp.spanStyle("text:Aed").fontSize).toBeGreaterThanOrEqual(56);
+
+    // Subsequent launches with saved recentWorkspaces auto-restore workspace without showing poster
+    const returningApp = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      storage: {
+        "aed.recentWorkspaces": JSON.stringify([FIXTURE_ROOT]),
+      },
+    });
+    await returningApp.waitFor("id:empty-editor-panel");
+    expect(returningApp.shows("id:welcome-panel")).toBe(false);
+    expect(returningApp.shows("id:workspace-tree")).toBe(true);
   });
 
   test("renders multi-format & multimedia previews, switches modes, searches files, and runs PTY commands", async () => {
@@ -191,6 +204,8 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.waitFor("text:README.md");
     expect(app.shows("id:main-dock")).toBe(true);
     expect(app.shows("id:workspace-tree")).toBe(true);
+    expect(app.shows("id:welcome-panel")).toBe(false);
+    expect(app.shows("id:empty-editor-panel")).toBe(true);
     expect(app.shows("text:FIXTURES")).toBe(false);
 
     // 1. Markdown preview + Markdown raw source switch

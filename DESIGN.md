@@ -139,8 +139,8 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
    - 未配置宿主 `dataDir` 时省略 `cwd` 会直接抛错；且 `cwd` 必须落在 `nsh.json` 的 `capabilities.fs.write` 授权目录内（`${homeDir}` 或 `/tmp`）。`nsh.json` 中绝不能写 `~` 或 `$HOME`，必须写 `${homeDir}`。
 3. **JSX 标签与内置控制流（`nsh 0.3.0`）**：
    - 所有组件标签必须大写开头（`<View>`、`<Text>`）；小写 HTML 标签编译失败。`<If when={...}>` 与 `<Each of={...}>` 是编译器注入的全局宏，**严禁从 `"nsh"` 导入**。
-4. **冷启动绝不自动扫描 `$HOME` 或 `/`**：
-   - 早期版本在未传工作区时回退 `os.homedir()`，导致应用一启动就递归扫描用户主目录并卡顿。现 `getInitialWorkspaceRoot()` 在无显式工作区时返回 `""`，隐藏左侧文件树并渲染干净的 `WelcomePanel`。
+4. **冷启动绝不自动扫描 `$HOME` 或 `/`，且海报开屏页仅在首次无工作区时显示**：
+   - 早期版本在未传工作区时回退 `os.homedir()`，导致应用一启动就递归扫描用户主目录并卡顿。现 `getInitialWorkspaceRoot()` 在无显式工作区时返回 `""`：若 `Storage` 尚无历史工作区记录（首次启动），隐藏左侧文件树并渲染瑞士网格开屏页 `WelcomePanel`（`id:welcome-panel`）；若 `aed.recentWorkspaces` 已有存在的工作区目录，启动时自动恢复最近一次工作区 `recentWorkspaces[0]`。一旦工作区已打开（`workspaceRoot().length > 0`）且当前无打开的 Tab（`activeFile() === undefined`），编辑区渲染安静的低对比度快捷键提示页 `EmptyEditorPanel`（`id:empty-editor-panel`），不再重复弹出大幅色块海报。
 5. **`DYLD_INSERT_LIBRARIES` 泄漏坑**：
    - 若不在 `finder_bridge.m` 的构造函数里立即 `unsetenv("DYLD_INSERT_LIBRARIES")`，内置 PTY 终端里启动的所有 macOS 系统命令都会尝试加载 `libFinderBridge.dylib`。
 6. **`nsh/base` 无样式原语（`Select` / `Command` / `Tree`）必须传完整浮层与行渲染**：
