@@ -308,7 +308,7 @@ export function FileBadge(props: {
   );
 }
 
-/** The app mark: a flat line mark in the theme's `ink` and `accent` colors, read inside `draw` so a theme change redraws it. */
+/** The app mark: a fountain pen nib and cursive flourish in the theme's `ink` and `accent` colors. */
 export function AppLogo(props: {
   size?: number;
   ink?: Accessor<string>;
@@ -324,12 +324,14 @@ export function AppLogo(props: {
         cx.scale(width / 64, width / 64);
         cx.lineCap = "round";
         cx.lineJoin = "round";
-        cx.lineWidth = 4.6;
+        cx.lineWidth = 3.6;
         cx.strokeStyle = ink();
-        strokeLine(cx, [22, 20, 10, 32, 22, 44]);
-        strokeLine(cx, [42, 20, 54, 32, 42, 44]);
+        // Fountain pen nib body + slit
+        strokeLine(cx, [44, 12, 52, 20, 36, 36, 18, 44, 26, 26, 44, 12]);
+        strokeLine(cx, [18, 44, 30, 32]);
+        // Ink flourish
         cx.strokeStyle = accent();
-        strokeLine(cx, [36, 16, 28, 48]);
+        strokeLine(cx, [18, 48, 28, 54, 42, 50, 50, 44]);
       }}
     />
   );

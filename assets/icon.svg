@@ -1,45 +1,42 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
   <defs>
     <linearGradient id="bgGrad" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#20232E" />
-      <stop offset="50%" stop-color="#12141B" />
-      <stop offset="100%" stop-color="#0A0B0F" />
+      <stop offset="0%" stop-color="#22211E" />
+      <stop offset="55%" stop-color="#161614" />
+      <stop offset="100%" stop-color="#0E0E0C" />
     </linearGradient>
-    <radialGradient id="ambientGlow" cx="50%" cy="22%" r="60%">
-      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.16" />
-      <stop offset="50%" stop-color="#6366F1" stop-opacity="0.06" />
-      <stop offset="100%" stop-color="#0A0B0F" stop-opacity="0" />
-    </radialGradient>
-    <linearGradient id="rimGrad" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.28" />
-      <stop offset="40%" stop-color="#FFFFFF" stop-opacity="0.08" />
-      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.03" />
+    <linearGradient id="goldNib" x1="310" y1="240" x2="540" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F7E3A6" />
+      <stop offset="50%" stop-color="#D4A44C" />
+      <stop offset="100%" stop-color="#8C6220" />
     </linearGradient>
-    <linearGradient id="leftChevron" x1="256" y1="376" x2="392" y2="648" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FFFFFF" />
-      <stop offset="100%" stop-color="#CBD5E1" />
+    <linearGradient id="platNib" x1="350" y1="260" x2="490" y2="410" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F5F3EE" />
+      <stop offset="100%" stop-color="#A8A49B" />
     </linearGradient>
-    <linearGradient id="rightChevron" x1="632" y1="376" x2="768" y2="648" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#E0F2FE" />
-      <stop offset="100%" stop-color="#7DD3FC" />
-    </linearGradient>
-    <linearGradient id="centerBeam" x1="556" y1="316" x2="468" y2="708" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#38BDF8" />
-      <stop offset="52%" stop-color="#60A5FA" />
-      <stop offset="100%" stop-color="#818CF8" />
+    <linearGradient id="flourish" x1="620" y1="620" x2="800" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F4F1EA" />
+      <stop offset="45%" stop-color="#E03C1F" />
+      <stop offset="100%" stop-color="#C82812" />
     </linearGradient>
     <filter id="dropShadow" x="50" y="60" width="924" height="924" filterUnits="userSpaceOnUse">
-      <feDropShadow dx="0" dy="20" stdDeviation="21" flood-color="#000000" flood-opacity="0.52" />
+      <feDropShadow dx="0" dy="20" stdDeviation="21" flood-color="#000000" flood-opacity="0.55" />
     </filter>
   </defs>
 
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bgGrad)" filter="url(#dropShadow)" />
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#ambientGlow)" />
-  <rect x="184" y="188" width="656" height="648" rx="118" fill="#FFFFFF" fill-opacity="0.03" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3" />
-  <line x1="512" y1="190" x2="512" y2="834" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="2" />
-  <rect x="102" y="102" width="820" height="820" rx="183" stroke="url(#rimGrad)" stroke-width="4" />
+  <rect x="102" y="102" width="820" height="820" rx="183" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="4" />
 
-  <path d="M 392 376 L 256 512 L 392 648" stroke="url(#leftChevron)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round" />
-  <path d="M 632 376 L 768 512 L 632 648" stroke="url(#rightChevron)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round" />
-  <line x1="556" y1="316" x2="468" y2="708" stroke="url(#centerBeam)" stroke-width="52" stroke-linecap="round" />
+  <!-- Fountain Pen Nib (45 deg from top-center to nib tip at 280,475) -->
+  <path d="M 520 140 L 620 220 L 495 375 L 405 295 Z" fill="url(#goldNib)" stroke="#2A2215" stroke-width="6" />
+  <path d="M 405 295 L 495 375 L 430 415 L 280 475 L 345 340 Z" fill="url(#goldNib)" stroke="#2A2215" stroke-width="6" stroke-linejoin="round" />
+  <path d="M 412 308 L 480 366 L 420 402 L 315 446 L 362 348 Z" fill="url(#platNib)" />
+  <line x1="280" y1="475" x2="386" y2="364" stroke="#161614" stroke-width="7" stroke-linecap="round" />
+  <circle cx="392" cy="358" r="13" fill="#161614" />
+
+  <!-- Cursive "Aed" Script & Vermilion Flourish -->
+  <path d="M 278 485 C 296 540, 290 595, 250 612 C 190 630, 175 695, 228 708 C 292 720, 395 570, 528 408 C 460 545, 422 688, 468 748 C 512 798, 608 776, 622 726" stroke="#F4F1EA" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+  <path d="M 276 548 C 350 538, 435 575, 495 548" stroke="#F4F1EA" stroke-width="20" stroke-linecap="round" fill="none" />
+  <path d="M 505 612 C 562 608, 595 566, 575 544 C 552 524, 498 568, 498 625 C 498 668, 558 672, 602 622" stroke="#F4F1EA" stroke-width="24" stroke-linecap="round" fill="none" />
+  <path d="M 685 562 C 642 536, 588 592, 595 642 C 602 682, 652 652, 692 572 L 775 408 C 728 505, 655 642, 668 688 C 682 732, 765 735, 792 668 C 812 618, 772 568, 735 588 C 708 605, 718 642, 748 632" stroke="url(#flourish)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" fill="none" />
 </svg>
