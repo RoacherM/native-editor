@@ -31,5 +31,5 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 
 | ID | 子系统 | 标题 | Commit | 回归测试 | 日期 |
 |---|---|---|---|---|---|
-| I-001 | `DESIGN.md` | `nsh.json` 进程白名单收紧到 `git`/`python3`/`sips`/`osascript` | SHA_PLACEHOLDER | `App.test.tsx` › enforces least-privilege process.execute allowlist | 2026-11-06 |
+| I-001 | `DESIGN.md` | `nsh.json` 进程白名单收紧到 `git`/`python3`/`sips`/`osascript` | `254ef6b` | `App.test.tsx` › enforces least-privilege process.execute allowlist | 2026-11-06 |
 | I-000 | `DESIGN.md` | 修复 `DYLD_INSERT_LIBRARIES` 泄漏并移除冗余 `qlmanage`/`open` 操作栏 | `e1cf916` | `App.test.tsx` | 2026-04-12 |
