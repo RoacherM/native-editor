@@ -43,4 +43,5 @@ nsh check                           # TypeScript 7 native typecheck
 nsh test --trace                    # Headless end-to-end test suite
 nsh run --target macos              # Development host with hot reload
 nsh package --target macos          # Build standalone macOS .app bundle
+sh scripts/package-macos.sh         # Build, sign, install to /Applications, set default handlers
 ```
