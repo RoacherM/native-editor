@@ -16,7 +16,7 @@ static int isDigitsOnly(const char *s) {
 
 static void stripLineColSuffix(char *buf) {
   char *hashL = strstr(buf, "#L");
-  if (hashL && hashL != buf && isDigitsOnly(hashL + 2)) {
+  if (hashL && hashL != buf && hashL[2] >= '0' && hashL[2] <= '9') {
     *hashL = '\0';
   }
   char *lastColon = strrchr(buf, ':');
@@ -47,12 +47,9 @@ static void recordArgPath(const char *arg) {
   if (S_ISDIR(st.st_mode)) {
     setenv("AED_ROOT", resolved, 1);
   } else if (S_ISREG(st.st_mode)) {
+    unsetenv("AED_ROOT");
+    unsetenv("NATIVE_EDITOR_ROOT");
     setenv("AED_OPEN_FILE", resolved, 1);
-    FILE *fp = fopen("/tmp/aed-open.queue", "a");
-    if (fp) {
-      fprintf(fp, "%s\n", resolved);
-      fclose(fp);
-    }
   }
 }
 

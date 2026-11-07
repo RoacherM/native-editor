@@ -53,6 +53,9 @@ static void enforceAllWindowsMinSize(void) {
   }
 }
 
+static CFAbsoluteTime gLaunchTime = 0.0;
+static BOOL gHasClaimedInitialTarget = NO;
+
 static void bringAppToFront(NSApplication *app) {
   [app activateIgnoringOtherApps:YES];
   for (NSWindow *win in [app windows]) {
@@ -73,6 +76,8 @@ static void recordOpenedFilePath(NSString *path) {
   if ([[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir] && isDir) {
     setenv("AED_ROOT", cpath, 1);
   } else {
+    unsetenv("AED_ROOT");
+    unsetenv("NATIVE_EDITOR_ROOT");
     setenv("AED_OPEN_FILE", cpath, 1);
   }
   FILE *fp = fopen("/tmp/aed-open.queue", "a");
@@ -82,27 +87,63 @@ static void recordOpenedFilePath(NSString *path) {
   }
 }
 
+static void spawnStandaloneWindow(NSString *path) {
+  if (!path || [path length] == 0) return;
+  NSBundle *bundle = [NSBundle mainBundle];
+  NSString *bundlePath = [bundle bundlePath];
+  if (bundlePath && [bundlePath hasSuffix:@".app"]) {
+    NSTask *task = [[[NSTask alloc] init] autorelease];
+    [task setLaunchPath:@"/usr/bin/open"];
+    [task setArguments:@[@"-n", bundlePath, @"--args", path]];
+    @try {
+      [task launch];
+      return;
+    } @catch (NSException *exception) {
+    }
+  }
+  NSString *exeDir = [[bundle executablePath] stringByDeletingLastPathComponent];
+  NSString *launcherPath = [exeDir stringByAppendingPathComponent:@"Aed"];
+  if (launcherPath && [[NSFileManager defaultManager] isExecutableFileAtPath:launcherPath]) {
+    NSTask *task = [[[NSTask alloc] init] autorelease];
+    [task setLaunchPath:launcherPath];
+    [task setArguments:@[path]];
+    @try {
+      [task launch];
+    } @catch (NSException *exception) {
+    }
+  }
+}
+
+static void handleExternalOpenPath(NSApplication *app, NSString *path) {
+  if (!path || [path length] == 0) return;
+  BOOL isColdInitialOpen = (!gHasClaimedInitialTarget && (CFAbsoluteTimeGetCurrent() - gLaunchTime) < 1.2);
+  if (isColdInitialOpen) {
+    gHasClaimedInitialTarget = YES;
+    recordOpenedFilePath(path);
+    bringAppToFront(app);
+    return;
+  }
+  spawnStandaloneWindow(path);
+}
+
 static BOOL ne_application_openFile(id self, SEL _cmd, NSApplication *app, NSString *filename) {
-  recordOpenedFilePath(filename);
-  bringAppToFront(app);
+  handleExternalOpenPath(app, filename);
   return YES;
 }
 
 static void ne_application_openFiles(id self, SEL _cmd, NSApplication *app, NSArray<NSString *> *filenames) {
   for (NSString *filename in filenames) {
-    recordOpenedFilePath(filename);
+    handleExternalOpenPath(app, filename);
   }
-  bringAppToFront(app);
   [app replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 
 static void ne_application_openURLs(id self, SEL _cmd, NSApplication *app, NSArray<NSURL *> *urls) {
   for (NSURL *url in urls) {
     if ([url isFileURL]) {
-      recordOpenedFilePath([url path]);
+      handleExternalOpenPath(app, [url path]);
     }
   }
-  bringAppToFront(app);
 }
 
 static void attachOpenHandlersToDelegate(id delegate) {
@@ -126,6 +167,12 @@ static void swizzled_setDelegate(id self, SEL _cmd, id delegate) {
 __attribute__((constructor))
 static void initFinderBridge(void) {
   unsetenv("DYLD_INSERT_LIBRARIES");
+  gLaunchTime = CFAbsoluteTimeGetCurrent();
+  const char *initFile = getenv("AED_OPEN_FILE");
+  const char *initRoot = getenv("AED_ROOT");
+  if ((initFile && initFile[0] != '\0') || (initRoot && initRoot[0] != '\0')) {
+    gHasClaimedInitialTarget = YES;
+  }
   Method m = class_getInstanceMethod([NSApplication class], @selector(setDelegate:));
   if (m) {
     orig_setDelegate = (void (*)(id, SEL, id))method_getImplementation(m);
@@ -143,7 +190,9 @@ static void initFinderBridge(void) {
                   object:nil
                    queue:nil
               usingBlock:^(NSNotification *note) {
+                attachOpenHandlersToDelegate([NSApp delegate]);
                 enforceAllWindowsMinSize();
+                bringAppToFront(NSApp);
               }];
   [nc addObserverForName:NSWindowDidBecomeKeyNotification
                   object:nil

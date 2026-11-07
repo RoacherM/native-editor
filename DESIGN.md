@@ -31,8 +31,8 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `Storage` 键 | `aed.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`）；未设置时回退旧键 `native-editor.shell` |
 | `Storage` 键 | `aed.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个显式打开的非 `/` 工作区目录，单独打开外部文件不写入）；未设置时回退旧键 `native-editor.recentWorkspaces`，解析失败回退 `[]` |
 | 环境变量 / Host 参数 | `AED_ROOT` / `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置时返回 `""`（展示 Welcome 面板或恢复最近工作区，绝不自动扫 `$HOME`、`/` 或单文件父目录） |
-| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以独立 Tab 打开的初始文件绝对路径（不覆盖当前工作区，不写入 `aed.recentWorkspaces`） |
-| Finder 队列文件 | `/tmp/aed-open.queue` | `finder_bridge.m`、`launcher.c` 与宿主事件 `enqueueFinderOpen` 追加写入待打开文件路径（每行一个，支持 `file://` URI、`#L<line>` 与 `:line(:col)` 后缀归一化），`App.tsx` 在独立无信号依赖的定时器（每 200ms）中通过 `consumeFinderOpenQueue()` 读取并清空，确保工作区切换或恢复绝不销毁轮询定时器 |
+| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以无文件树（`workspaceRoot = ""`）独立窗口打开的初始文件绝对路径（不恢复 `aed.recentWorkspaces`，不写入历史工作区） |
+| Finder 队列文件 | `/tmp/aed-open.queue` | 仅用于冷启动阶段（进程启动 `< 1.2s` 且尚无初始目标）接收首个 AppleEvent 打开路径及宿主事件 `enqueueFinderOpen`（支持 `file://` URI、`#L<line>` 与 `:line(:col)` 后缀归一化）；当 Aed 已有运行中窗口时，再次点击外部文件由 `finder_bridge.m` 直接通过 `/usr/bin/open -n <Aed.app> --args <path>` 拉起全新的无文件树独立窗口 |
 | 临时缓存目录 | `/tmp/aed-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
 | 临时缓存目录 | `/tmp/aed-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
 
@@ -108,10 +108,12 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 
 1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/Aed`）**：
    - 原 `Aed` 二进制被重命名为 `AedCore`。
-   - `launcher` 解析命令行参数（剥离 `file://` 前缀与可选 `:line(:col)` 行列后缀）：目录参数写入 `AED_ROOT`，文件参数写入 `AED_OPEN_FILE` 并追加到 `/tmp/aed-open.queue`，随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
+   - `launcher` 解析命令行参数（剥离 `file://` 前缀、`#L<line>` 锚点与可选 `:line(:col)` 行列后缀）：目录参数写入 `AED_ROOT`；普通文件参数清除 `AED_ROOT` / `NATIVE_EDITOR_ROOT` 并仅写入本进程环境变量 `AED_OPEN_FILE`（不写入全局 `/tmp/aed-open.queue`，避免被其它已运行窗口抢读），随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
 2. **`scripts/finder_bridge.m`（`libFinderBridge.dylib`）**：
    - 在 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警）。
-   - Method Swizzle `NSApplication setDelegate:` 并通过 `setOrReplaceMethod` 向宿主 Delegate 注入或覆盖 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`；仅当打开路径为目录时写入 `AED_ROOT`，普通文件写入 `AED_OPEN_FILE` 并追加到 `/tmp/aed-open.queue`，同时唤醒并置顶主窗口（`makeKeyAndOrderFront:`），并在 AppKit 层锁定主窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
+   - Method Swizzle `NSApplication setDelegate:` 并通过 `setOrReplaceMethod` 向宿主 Delegate 注入或覆盖 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`：
+     - **冷启动首个外部目标**（进程启动 `< 1.2s` 且未通过 `--args` 指定初始目标）：写入 `/tmp/aed-open.queue` 并唤醒当前窗口，由 `App.tsx` 以无文件树独立模式（清空自动恢复的 `workspaceRoot`）直接展示该文件；
+     - **运行中再次点击外部文件**：调用 `/usr/bin/open -n <Aed.app> --args <path>` 拉起全新的独立 Aed 窗口进程（不带左侧文件树），并在 AppKit 层锁定窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
 3. **`scripts/set_default_handlers.m`**：
    - 先通过 `LSCopyDefaultRoleHandlerForContentType` 查询当前默认打开程序，已绑定 `dev.byronwayne.aed` 的 UTI 直接跳过（避免重复触发 macOS `CoreServicesUIAgent` 确认弹窗），并对 UTI 去重、过滤未声明的 `dyn.*` 动态 UTI。
    - 默认仅注册 8 个核心文档与数据 UTI（Markdown、Mermaid、JSONL、JSON、CSV、TSV、Plain Text、Diff/Patch）；传入 `--all` 时额外注册常用源码 UTI，也可直接传入指定扩展名（如 `set_default_handlers yaml toml`）。
@@ -149,7 +151,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
    - 早期版本在未传工作区时回退 `os.homedir()`，导致应用一启动就递归扫描用户主目录并卡顿。现 `getInitialWorkspaceRoot()` 在无显式工作区时返回 `""`：若 `Storage` 尚无历史工作区记录（首次启动），隐藏左侧文件树并渲染瑞士网格开屏页 `WelcomePanel`（`id:welcome-panel`）；若 `aed.recentWorkspaces` 已有存在的工作区目录，冷启动时自动恢复最近一次工作区 `recentWorkspaces[0]`。
    - 一旦工作区已打开（`workspaceRoot().length > 0`）且当前无打开的 Tab（`activeFile() === undefined`），编辑区渲染安静的低对比度快捷键提示页 `EmptyEditorPanel`（`id:empty-editor-panel`）；用户可随时通过 `Close Folder`（`⌘⇧W`、菜单栏 `File ▸ Close Folder`、命令面板、侧栏顶部关闭按钮 `id:sidebar-close-folder` 或空态页 `id:empty-editor-close-folder`）将 `workspaceRoot` 置空并重置工作区状态，随时返回 `WelcomePanel` 开屏页。
    - 左侧文件树顶部目录名（`id:sidebar-workspace-title`）为纯静态标题展示，绝不绑定 `osascript` 选目录弹窗，避免误触文件树顶部时弹出系统模态窗；切换/打开目录仅通过菜单栏、`⌘O` 或侧栏右侧独立小图标（`id:sidebar-open-folder`）触发。
-   - 单独打开外部文件（Finder 双击、拖拽文件或 `AED_OPEN_FILE`）仅以独立 Tab 打开，不篡改当前 `workspaceRoot`，也不将文件父目录写入 `aed.recentWorkspaces`；关闭或切换含未保存修改（`dirty`）的 Tab/工作区时弹出确认框（`id:unsaved-changes-dialog`）。状态栏仅在当前工作区确属 Git 仓库（`branch` 非空）时展示分支名，绝不在非 Git 目录伪造 `main`。
+   - 外部点击打开单文件（Finder / Herdr / 终端链接点击或 `AED_OPEN_FILE`）一律以**不带左侧文件树的独立窗口**（`workspaceRoot = ""`）打开：若当前窗口已处于运行态，`finder_bridge.m` 通过 `open -n <Aed.app> --args <path>` 新开一个不带文件树的独立 Aed 窗口；若为冷启动首次拉起，即使 `aed.recentWorkspaces` 刚刚自动恢复了上次工作区，`openExternalFile` 也会立即清空未显式交互的自动恢复工作区（`workspaceRoot.set("")`）并隐藏左侧文件树，绝不把外部单文件塞进旧工作区目录树里。关闭或切换含未保存修改（`dirty`）的 Tab/工作区时弹出确认框（`id:unsaved-changes-dialog`）。状态栏仅在当前工作区确属 Git 仓库（`branch` 非空）时展示分支名，绝不在非 Git 目录伪造 `main`。
 5. **`DYLD_INSERT_LIBRARIES` 泄漏坑**：
    - 若不在 `finder_bridge.m` 的构造函数里立即 `unsetenv("DYLD_INSERT_LIBRARIES")`，内置 PTY 终端里启动的所有 macOS 系统命令都会尝试加载 `libFinderBridge.dylib`。
 6. **`nsh/base` 无样式原语（`Select` / `Command` / `Tree`）必须传完整浮层与行渲染**：

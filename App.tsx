@@ -1774,6 +1774,22 @@ function App(): JSX.Element {
     });
   };
 
+  const clearWorkspaceTree = () => {
+    if (workspaceRoot().length === 0) return;
+    workspaceRoot.set("");
+    snapshot.set({
+      root: "",
+      branch: "",
+      entries: [],
+      flatFiles: [],
+      gitStatusMap: {},
+      treeItemsAll: [],
+      treeItemsChanged: [],
+      commandItems: [],
+    });
+    expandedIds.set([]);
+  };
+
   const openExternalFile = async (rawPath: string) => {
     const filePath = normalizeExternalFilePath(rawPath);
     if (!filePath) return;
@@ -1784,6 +1800,7 @@ function App(): JSX.Element {
         if (desktopAvailable) Window.orderFront();
         return;
       }
+      clearWorkspaceTree();
       await openFileInTab(filePath);
       if (desktopAvailable) Window.orderFront();
     } catch {

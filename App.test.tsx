@@ -484,6 +484,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.waitFor("id:preview-markdown", { timeout: 1500 });
     expect(app.shows("id:preview-markdown")).toBe(true);
     expect(app.shows("id:empty-editor-panel")).toBe(false);
+    expect(app.shows("id:workspace-tree")).toBe(false);
 
     // Loose external file launch does not hijack workspaceRoot or prevent returning to welcome
     const looseApp = await open("./App.tsx", {
