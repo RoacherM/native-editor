@@ -51,6 +51,7 @@ import {
   getFileDiffPatch,
   getInitialOpenFile,
   getInitialWorkspaceRoot,
+  getPreloadedFile,
   isDirectoryPath,
   loadFile,
   lookupGitStatus,
@@ -58,6 +59,7 @@ import {
   saveFileText,
   scanWorkspace,
   shortenHomePath,
+  warmWorkspaceFiles,
   type GitStatusCode,
   type LoadedFile,
   type WorkspaceSnapshot,
@@ -1357,6 +1359,29 @@ function decodeDroppedUri(uri: string | undefined): string | null {
   return uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
 }
 
+function tryReuseLoadedFileSync(
+  current: Record<string, LoadedFile>,
+  filePath: string,
+  root: string,
+  statusMap: Record<string, GitStatusCode>,
+  openInDiff?: boolean
+): LoadedFile | null {
+  const gitStatus = lookupGitStatus(filePath, root, statusMap);
+  const existing = current[filePath];
+  if (!existing) {
+    return getPreloadedFile(filePath, root, gitStatus, openInDiff);
+  }
+  if (openInDiff && existing.mode !== "diff") {
+    if (!existing.diffPatch) return null;
+    return { ...existing, mode: "diff", gitStatus };
+  }
+  if (!openInDiff && existing.mode === "diff" && existing.classification.kind !== "diff") {
+    return { ...existing, mode: existing.classification.defaultMode, gitStatus };
+  }
+  if (existing.gitStatus === gitStatus) return existing;
+  return { ...existing, gitStatus };
+}
+
 async function fetchOrReuseLoadedFile(
   current: Record<string, LoadedFile>,
   filePath: string,
@@ -1364,18 +1389,14 @@ async function fetchOrReuseLoadedFile(
   statusMap: Record<string, GitStatusCode>,
   openInDiff?: boolean
 ): Promise<LoadedFile> {
+  const syncHit = tryReuseLoadedFileSync(current, filePath, root, statusMap, openInDiff);
+  if (syncHit) return syncHit;
   const gitStatus = lookupGitStatus(filePath, root, statusMap);
   const existing = current[filePath];
   if (!existing) {
     return loadFile(filePath, root, openInDiff ? "diff" : undefined, gitStatus);
   }
-  if (openInDiff && existing.mode !== "diff") {
-    return resolveModeFile({ ...existing, gitStatus }, "diff", root);
-  }
-  if (!openInDiff && existing.mode === "diff" && existing.classification.kind !== "diff") {
-    return { ...existing, mode: existing.classification.defaultMode, gitStatus };
-  }
-  return { ...existing, gitStatus };
+  return resolveModeFile({ ...existing, gitStatus }, "diff", root);
 }
 
 async function resolveModeFile(
@@ -1685,7 +1706,9 @@ function App(): JSX.Element {
   };
 
   const refresh = async () => {
-    snapshot.set(await scanWorkspace(workspaceRoot()));
+    const scanned = await scanWorkspace(workspaceRoot());
+    snapshot.set(scanned);
+    void warmWorkspaceFiles(scanned);
   };
 
   const resetWorkspaceState = (nextRoot: string) => {
@@ -1754,18 +1777,58 @@ function App(): JSX.Element {
     if (desktopAvailable) Window.orderFront();
   };
 
+  const activateLoadedTab = (filePath: string, file: LoadedFile) => {
+    const current = loadedFiles();
+    if (current[filePath] !== file) {
+      loadedFiles.set({ ...current, [filePath]: file });
+    }
+    if (!openTabs().includes(filePath)) {
+      openTabs.update((tabs) => [...tabs, filePath]);
+    }
+    activeFilePath.set(filePath);
+    selectedPath.set(filePath);
+  };
+
+  const openFileInTab = async (filePath: string, openInDiff?: boolean) => {
+    workspaceTouched = true;
+    const syncHit = tryReuseLoadedFileSync(
+      loadedFiles(),
+      filePath,
+      workspaceRoot(),
+      snapshot().gitStatusMap,
+      openInDiff
+    );
+    if (syncHit) {
+      activateLoadedTab(filePath, syncHit);
+      return;
+    }
+    const file = await fetchOrReuseLoadedFile(
+      loadedFiles(),
+      filePath,
+      workspaceRoot(),
+      snapshot().gitStatusMap,
+      openInDiff
+    );
+    activateLoadedTab(filePath, file);
+  };
+
+  let appInitialized = false;
   effect(() => {
-    refresh().then(async () => {
-      if (workspaceRoot()) {
-        recordRecentWorkspace(recentWorkspaces, workspaceRoot());
-      }
+    if (appInitialized) return;
+    appInitialized = true;
+    const initRoot = workspaceRoot();
+    if (initRoot) {
+      recordRecentWorkspace(recentWorkspaces, initRoot);
+    }
+    void refresh();
+    void (async () => {
       const initFile = getInitialOpenFile();
       if (initFile) await openExternalFile(initFile);
       const queued = await consumeFinderOpenQueue();
       for (const f of queued) {
         await openExternalFile(f);
       }
-    });
+    })();
     initUserPreferences(
       fontFamily,
       fontSize,
@@ -1779,6 +1842,7 @@ function App(): JSX.Element {
           if (!workspaceTouched && scanned.entries.length > 0) {
             workspaceRoot.set(lastFolder);
             snapshot.set(scanned);
+            void warmWorkspaceFiles(scanned);
           }
         }
       }
@@ -1791,24 +1855,6 @@ function App(): JSX.Element {
     }, 450);
     cleanup(() => clearInterval(timer));
   });
-
-  const openFileInTab = async (filePath: string, openInDiff?: boolean) => {
-    workspaceTouched = true;
-    const current = loadedFiles();
-    const file = await fetchOrReuseLoadedFile(
-      current,
-      filePath,
-      workspaceRoot(),
-      snapshot().gitStatusMap,
-      openInDiff
-    );
-    loadedFiles.set({ ...current, [filePath]: file });
-    if (!openTabs().includes(filePath)) {
-      openTabs.update((tabs) => [...tabs, filePath]);
-    }
-    activeFilePath.set(filePath);
-    selectedPath.set(filePath);
-  };
 
   const performCloseTab = (filePath: string) => {
     const nextTabs = openTabs().filter((p) => p !== filePath);

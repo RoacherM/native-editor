@@ -302,7 +302,12 @@ export function classifyFile(filePath: string, sampleBytes?: Uint8Array): FileCl
 
 /** Split text into lines, dropping the single trailing newline. */
 function splitLines(text: string): string[] {
-  return text.split(/\r?\n/).filter((line, index, all) => line.length > 0 || index < all.length - 1);
+  if (!text) return [];
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
 }
 
 /** One column, keyed by its index so an array row lines up with it. */
@@ -328,6 +333,7 @@ function toCellValue(value: unknown): string | number {
 
 /** Split one delimited line, honouring double-quoted cells with "" escapes. */
 function parseDelimitedLine(line: string, delimiter: string): string[] {
+  if (!line.includes('"')) return line.split(delimiter);
   const cells: string[] = [];
   let cell = "";
   let quoted = false;
@@ -543,18 +549,30 @@ export function probeImageDimensions(
   return text ? probeSvgDimensions(text) : null;
 }
 
+const quickLookCache = new Map<string, string>();
+
 /** Generate a macOS 2x Retina preview PNG for a PDF document via CoreGraphics `sips` and return a blob: URL, or null on failure. */
 export async function generateQuickLookUrl(filePath: string, cwd: string): Promise<string | null> {
   try {
+    const stat = await fs.stat(filePath);
+    const cacheKey = `${filePath}:${stat.mtimeMs}:${stat.size}`;
+    const cachedUrl = quickLookCache.get(cacheKey);
+    if (cachedUrl) return cachedUrl;
+
     await fs.mkdir(QUICK_LOOK_DIR, { recursive: true });
-    const pngPath = path.join(QUICK_LOOK_DIR, `${path.basename(filePath)}.png`);
+    const pngPath = path.join(
+      QUICK_LOOK_DIR,
+      `${path.basename(filePath)}-${stat.size}-${Math.trunc(stat.mtimeMs)}.png`
+    );
     await process.run(
       "sips",
       ["-Z", "1800", "-s", "format", "png", filePath, "--out", pngPath],
       { cwd }
     );
     const bytes = await fs.readFile(pngPath);
-    return createBlobUrl(bytes, "image/png");
+    const url = createBlobUrl(bytes, "image/png");
+    quickLookCache.set(cacheKey, url);
+    return url;
   } catch {
     return null;
   }

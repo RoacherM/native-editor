@@ -69,12 +69,15 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
   });
 
   test("parses CSV, TSV, and JSONL into DataTable columns and rows", () => {
-    const csv = parseTableData("name,score\nAlice,95\nBob,88\n", "scores.csv");
-    expect(csv.columns).toHaveLength(2);
+    const csv = parseTableData(
+      'name,score,note\nAlice,95,"fast, ""clean"" path"\nBob,88,plain\n',
+      "scores.csv"
+    );
+    expect(csv.columns).toHaveLength(3);
     expect(csv.columns[0].title).toBe("name");
     expect(csv.rows).toEqual([
-      ["Alice", 95],
-      ["Bob", 88],
+      ["Alice", 95, 'fast, "clean" path'],
+      ["Bob", 88, "plain"],
     ]);
 
     const jsonl = parseTableData(
@@ -107,12 +110,17 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
     );
     expect(jsonDecos.length).toBeGreaterThanOrEqual(4);
 
+    const tsSource =
+      'export function greet(name: string): string {\n  // hello\n  return "hi";\n}';
     const tsDecos = computeSyntaxDecorations(
-      'export function greet(name: string): string {\n  // hello\n  return "hi";\n}',
+      tsSource,
       "typescript",
       tokyo.syntax
     );
     expect(tsDecos.length).toBeGreaterThanOrEqual(5);
+    expect(
+      computeSyntaxDecorations(tsSource, "typescript", tokyo.syntax)
+    ).toBe(tsDecos);
   });
 
   test("shortens home paths and names fonts without Nerd Font suffixes", () => {

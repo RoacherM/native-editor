@@ -521,15 +521,35 @@ function pushRegexMatches(
   }
 }
 
+const JSON_STRING_REGEX = /("(?:[^"\\]|\\.)*")(\s*:)?/g;
+const JSON_NUMBER_REGEX = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+const JSON_CONST_REGEX = /\b(?:true|false|null)\b/g;
+const CONFIG_KEY_REGEX = /^(\s*[\w.-]+)\s*[:=]/g;
+const CONFIG_STRING_REGEX = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
+const CONFIG_NUMBER_REGEX = /\b-?\d+(?:\.\d+)?\b/g;
+const CONFIG_CONST_REGEX = /\b(?:true|false|null|yes|no|on|off)\b/gi;
+const MD_HEADING_REGEX = /^\s*#{1,6}\s/;
+const MD_FENCE_REGEX = /^\s*```/;
+const MD_INLINE_CODE_REGEX = /`[^`]+`/g;
+const MD_LINK_REGEX = /\[([^\]]+)\]\(([^)]+)\)/g;
+const MD_BOLD_REGEX = /\*\*[^*]+\*\*/g;
+const SUBTITLE_INDEX_REGEX = /^\d+\s*$/;
+const CODE_PASCAL_REGEX = /^[A-Z][A-Za-z0-9_]*$/;
+const CODE_TOKEN_HASH_REGEX = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\/\/.*|#.*)/g;
+const CODE_TOKEN_SLASH_REGEX = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\/\/.*)/g;
+const CODE_TAG_REGEX = /<\/?[A-Za-z][A-Za-z0-9._-]*/g;
+const CODE_NUMBER_REGEX = /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi;
+const CODE_WORD_REGEX = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g;
+
 function decorateJsonLine(
   out: EditorDecoration[],
   lineIdx: number,
   lineText: string,
   palette: SyntaxPalette
 ): void {
-  const strRegex = /("(?:[^"\\]|\\.)*")(\s*:)?/g;
+  JSON_STRING_REGEX.lastIndex = 0;
   const maskedLine = lineText.replace(
-    strRegex,
+    JSON_STRING_REGEX,
     (full, quoted: string, colon: string | undefined, offset: number) => {
       if (out.length < MAX_DECORATIONS) {
         const isKey = Boolean(colon);
@@ -550,7 +570,7 @@ function decorateJsonLine(
     out,
     lineIdx,
     maskedLine,
-    /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+    JSON_NUMBER_REGEX,
     palette.number,
     "number"
   );
@@ -558,7 +578,7 @@ function decorateJsonLine(
     out,
     lineIdx,
     maskedLine,
-    /\b(?:true|false|null)\b/g,
+    JSON_CONST_REGEX,
     palette.constant,
     "built",
     { bold: true }
@@ -581,12 +601,12 @@ function decorateConfigLine(
     out.push(makeDeco(lineIdx, indent, lineText.length, palette.tag, "title", { bold: true }));
     return;
   }
-  pushRegexMatches(out, lineIdx, lineText, /^(\s*[\w.-]+)\s*[:=]/g, palette.property, "attr", {
+  pushRegexMatches(out, lineIdx, lineText, CONFIG_KEY_REGEX, palette.property, "attr", {
     group: 1,
   });
-  pushRegexMatches(out, lineIdx, lineText, /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, palette.string, "string");
-  pushRegexMatches(out, lineIdx, lineText, /\b-?\d+(?:\.\d+)?\b/g, palette.number, "number");
-  pushRegexMatches(out, lineIdx, lineText, /\b(?:true|false|null|yes|no|on|off)\b/gi, palette.constant, "built");
+  pushRegexMatches(out, lineIdx, lineText, CONFIG_STRING_REGEX, palette.string, "string");
+  pushRegexMatches(out, lineIdx, lineText, CONFIG_NUMBER_REGEX, palette.number, "number");
+  pushRegexMatches(out, lineIdx, lineText, CONFIG_CONST_REGEX, palette.constant, "built");
 }
 
 function decorateMarkdownLine(
@@ -595,17 +615,17 @@ function decorateMarkdownLine(
   lineText: string,
   palette: SyntaxPalette
 ): void {
-  if (/^\s*#{1,6}\s/.test(lineText)) {
+  if (MD_HEADING_REGEX.test(lineText)) {
     out.push(makeDeco(lineIdx, 0, lineText.length, palette.keyword, "title", { bold: true }));
     return;
   }
-  if (/^\s*```/.test(lineText)) {
+  if (MD_FENCE_REGEX.test(lineText)) {
     out.push(makeDeco(lineIdx, 0, lineText.length, palette.property, "keyword"));
     return;
   }
-  pushRegexMatches(out, lineIdx, lineText, /`[^`]+`/g, palette.string, "string");
-  pushRegexMatches(out, lineIdx, lineText, /\[([^\]]+)\]\(([^)]+)\)/g, palette.function, "attr");
-  pushRegexMatches(out, lineIdx, lineText, /\*\*[^*]+\*\*/g, palette.type, "title", { bold: true });
+  pushRegexMatches(out, lineIdx, lineText, MD_INLINE_CODE_REGEX, palette.string, "string");
+  pushRegexMatches(out, lineIdx, lineText, MD_LINK_REGEX, palette.function, "attr");
+  pushRegexMatches(out, lineIdx, lineText, MD_BOLD_REGEX, palette.type, "title", { bold: true });
 }
 
 function decorateSubtitleLine(
@@ -614,7 +634,7 @@ function decorateSubtitleLine(
   lineText: string,
   palette: SyntaxPalette
 ): void {
-  if (/^\d+\s*$/.test(lineText)) {
+  if (SUBTITLE_INDEX_REGEX.test(lineText)) {
     out.push(makeDeco(lineIdx, 0, lineText.length, palette.number, "number", { bold: true }));
     return;
   }
@@ -639,7 +659,7 @@ function classifyCodeIdentifier(
   if (CODE_CONSTANTS.has(word)) {
     return { color: palette.constant, token: "built" };
   }
-  if (CODE_TYPES.has(word) || /^[A-Z][A-Za-z0-9_]*$/.test(word)) {
+  if (CODE_TYPES.has(word) || CODE_PASCAL_REGEX.test(word)) {
     return { color: palette.type, token: "built" };
   }
   if (lineText[endCol] === "(") {
@@ -666,8 +686,9 @@ function extractStringsAndComments(
   palette: SyntaxPalette
 ): string {
   const tokenRegex = HASH_COMMENT_LANGS.has(language)
-    ? /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\/\/.*|#.*)/g
-    : /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\/\/.*)/g;
+    ? CODE_TOKEN_HASH_REGEX
+    : CODE_TOKEN_SLASH_REGEX;
+  tokenRegex.lastIndex = 0;
 
   return lineText.replace(
     tokenRegex,
@@ -702,7 +723,7 @@ function decorateCodeLine(
     out,
     lineIdx,
     maskedCode,
-    /<\/?[A-Za-z][A-Za-z0-9._-]*/g,
+    CODE_TAG_REGEX,
     palette.tag,
     "keyword"
   );
@@ -712,14 +733,14 @@ function decorateCodeLine(
     out,
     lineIdx,
     maskedCode,
-    /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi,
+    CODE_NUMBER_REGEX,
     palette.number,
     "number"
   );
 
   // Identifiers (properties, keywords, types, constants, functions)
-  const wordRegex = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g;
-  let match: RegExpExecArray | null = wordRegex.exec(maskedCode);
+  CODE_WORD_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null = CODE_WORD_REGEX.exec(maskedCode);
   while (match !== null && out.length < MAX_DECORATIONS) {
     const word = match[0];
     const endCol = match.index + word.length;
@@ -727,7 +748,7 @@ function decorateCodeLine(
     if (hit) {
       out.push(makeDeco(lineIdx, match.index, endCol, hit.color, hit.token, { bold: hit.bold }));
     }
-    match = wordRegex.exec(maskedCode);
+    match = CODE_WORD_REGEX.exec(maskedCode);
   }
 }
 
@@ -751,6 +772,52 @@ const SPECIAL_LINE_DECORATORS: Record<string, LineDecorator> = {
   vtt: decorateSubtitleLine,
 };
 
+const MAX_DECORATION_CACHE_ENTRIES = 48;
+const MAX_CACHEABLE_TEXT_LEN = 200_000;
+const SYNTAX_DECORATION_CACHE = new Map<string, EditorDecoration[]>();
+
+function getCachedSyntaxDecorations(key: string): EditorDecoration[] | undefined {
+  const hit = SYNTAX_DECORATION_CACHE.get(key);
+  if (!hit) return undefined;
+  SYNTAX_DECORATION_CACHE.delete(key);
+  SYNTAX_DECORATION_CACHE.set(key, hit);
+  return hit;
+}
+
+function setCachedSyntaxDecorations(key: string, value: EditorDecoration[]): void {
+  if (SYNTAX_DECORATION_CACHE.size >= MAX_DECORATION_CACHE_ENTRIES) {
+    const oldestKey = SYNTAX_DECORATION_CACHE.keys().next().value;
+    if (oldestKey !== undefined) SYNTAX_DECORATION_CACHE.delete(oldestKey);
+  }
+  SYNTAX_DECORATION_CACHE.set(key, value);
+}
+
+function decorateBoundedLines(
+  text: string,
+  lang: string,
+  palette: SyntaxPalette
+): EditorDecoration[] {
+  const special = SPECIAL_LINE_DECORATORS[lang];
+  const decorateLine: LineDecorator =
+    special ?? ((acc, idx, line, pal) => decorateCodeLine(acc, idx, line, lang, pal));
+  const out: EditorDecoration[] = [];
+  let pos = 0;
+  let lineIdx = 0;
+
+  while (lineIdx < MAX_DECORATED_LINES && out.length < MAX_DECORATIONS) {
+    const nl = text.indexOf("\n", pos);
+    const end = nl < 0 ? text.length : nl;
+    const rawLine = text.slice(pos, end).replace(/\r$/, "");
+    if (rawLine.length > 0 && rawLine.length <= 1000) {
+      decorateLine(out, lineIdx, rawLine, palette);
+    }
+    if (nl < 0) break;
+    pos = nl + 1;
+    lineIdx += 1;
+  }
+  return out;
+}
+
 export function computeSyntaxDecorations(
   text: string,
   language: string,
@@ -758,17 +825,14 @@ export function computeSyntaxDecorations(
 ): EditorDecoration[] {
   if (!text || language === "plaintext") return [];
   const lang = language.toLowerCase();
-  const special = SPECIAL_LINE_DECORATORS[lang];
-  const lines = text.split(/\r?\n/);
-  const limit = Math.min(lines.length, MAX_DECORATED_LINES);
-  const out: EditorDecoration[] = [];
-
-  for (let i = 0; i < limit && out.length < MAX_DECORATIONS; i += 1) {
-    const line = lines[i];
-    if (line && line.length <= 1000) {
-      if (special) special(out, i, line, palette);
-      else decorateCodeLine(out, i, line, lang, palette);
-    }
+  if (text.length > MAX_CACHEABLE_TEXT_LEN) {
+    return decorateBoundedLines(text, lang, palette);
   }
+  const cacheKey = `${lang}\0${palette.keyword}\0${palette.string}\0${text}`;
+  const cached = getCachedSyntaxDecorations(cacheKey);
+  if (cached) return cached;
+
+  const out = decorateBoundedLines(text, lang, palette);
+  setCachedSyntaxDecorations(cacheKey, out);
   return out;
 }

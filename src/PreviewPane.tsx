@@ -205,6 +205,37 @@ function DiffBody(props: {
   );
 }
 
+function bindEditorDecorationEffect(
+  file: Accessor<LoadedFile>,
+  theme: Accessor<EditorTheme>,
+  decorations: Signal<ReturnType<typeof computeSyntaxDecorations>>
+): void {
+  let lastPath = file().path;
+  let lastTheme = theme().id;
+  let lastText = file().text;
+
+  effect(() => {
+    const curFile = file();
+    const curTheme = theme();
+    const text = curFile.text;
+    const lang = curFile.classification.language;
+    const isSameContext = curFile.path === lastPath && curTheme.id === lastTheme;
+    if (isSameContext && text === lastText) return;
+    if (!isSameContext) {
+      lastPath = curFile.path;
+      lastTheme = curTheme.id;
+      lastText = text;
+      decorations.set(computeSyntaxDecorations(text, lang, curTheme.syntaxClasses));
+      return;
+    }
+    const timer = setTimeout(() => {
+      lastText = text;
+      decorations.set(computeSyntaxDecorations(text, lang, curTheme.syntaxClasses));
+    }, 16);
+    return () => clearTimeout(timer);
+  });
+}
+
 function EditorBody(props: {
   file: Accessor<LoadedFile>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
@@ -223,16 +254,7 @@ function EditorBody(props: {
       props.theme().syntaxClasses
     )
   );
-
-  effect(() => {
-    const text = f().text;
-    const lang = f().classification.language;
-    const palette = props.theme().syntaxClasses;
-    const timer = setTimeout(() => {
-      decorations.set(computeSyntaxDecorations(text, lang, palette));
-    }, 10);
-    return () => clearTimeout(timer);
-  });
+  bindEditorDecorationEffect(f, props.theme, decorations);
 
   effect(() => {
     void f().path;

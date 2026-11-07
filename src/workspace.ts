@@ -117,6 +117,7 @@ export function getInitialOpenFile(): string | null {
 export async function consumeFinderOpenQueue(): Promise<string[]> {
   try {
     const bytes = await fs.readFile(FINDER_OPEN_QUEUE_PATH);
+    if (bytes.length === 0) return [];
     await fs.writeFile(FINDER_OPEN_QUEUE_PATH, "");
     const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
     return raw
@@ -192,11 +193,10 @@ function sortEntries(entries: WorkspaceEntry[]): WorkspaceEntry[] {
   });
 }
 
-/** Recursively list a directory, propagating git status to every entry. */
+/** Recursively list a directory in parallel across subdirectories. */
 async function scanDirectory(
   root: string,
   dir: string,
-  gitStatusMap: Record<string, GitStatusCode>,
   depth = 0,
 ): Promise<WorkspaceEntry[]> {
   if (depth > MAX_SCAN_DEPTH) return [];
@@ -206,31 +206,42 @@ async function scanDirectory(
   } catch {
     return [];
   }
-  const entries: WorkspaceEntry[] = [];
-  for (const dirent of dirents.slice(0, MAX_DIR_ENTRIES)) {
-    const isDirectory = dirent.isDirectory();
-    if (isIgnored(dirent.name, isDirectory)) continue;
-    const full = path.join(dir, dirent.name);
-    const relPath = relativePath(root, full);
-    const entry: WorkspaceEntry = {
-      path: full,
-      relPath,
-      name: dirent.name,
-      isDirectory,
-      gitStatus: gitStatusMap[relPath],
-    };
-    if (isDirectory) entry.children = await scanDirectory(root, full, gitStatusMap, depth + 1);
-    entries.push(entry);
-  }
+  const visible = dirents
+    .slice(0, MAX_DIR_ENTRIES)
+    .filter((dirent) => !isIgnored(dirent.name, dirent.isDirectory()));
+  const entries = await Promise.all(
+    visible.map(async (dirent): Promise<WorkspaceEntry> => {
+      const isDirectory = dirent.isDirectory();
+      const full = path.join(dir, dirent.name);
+      const relPath = relativePath(root, full);
+      const children = isDirectory
+        ? await scanDirectory(root, full, depth + 1)
+        : undefined;
+      return {
+        path: full,
+        relPath,
+        name: dirent.name,
+        isDirectory,
+        children,
+      };
+    })
+  );
   return sortEntries(entries);
 }
 
-/** Every file in the tree, depth first, in display order. */
-function collectFiles(entries: WorkspaceEntry[]): WorkspaceEntry[] {
+/** Attach gitStatus to each entry and collect every file in display order. */
+function collectFiles(
+  entries: WorkspaceEntry[],
+  gitStatusMap: Record<string, GitStatusCode>
+): WorkspaceEntry[] {
   const files: WorkspaceEntry[] = [];
   for (const entry of entries) {
-    if (entry.isDirectory) files.push(...collectFiles(entry.children ?? []));
-    else files.push(entry);
+    entry.gitStatus = gitStatusMap[entry.relPath];
+    if (entry.isDirectory) {
+      files.push(...collectFiles(entry.children ?? [], gitStatusMap));
+    } else {
+      files.push(entry);
+    }
   }
   return files;
 }
@@ -317,10 +328,12 @@ export async function scanWorkspace(root: string): Promise<WorkspaceSnapshot> {
       commandItems: [],
     };
   }
-  const gitStatusMap = await readGitStatus(root);
-  const branch = await readGitBranch(root);
-  const entries = await scanDirectory(root, root, gitStatusMap);
-  const flatFiles = collectFiles(entries);
+  const [gitStatusMap, branch, entries] = await Promise.all([
+    readGitStatus(root),
+    readGitBranch(root),
+    scanDirectory(root, root),
+  ]);
+  const flatFiles = collectFiles(entries, gitStatusMap);
   return {
     root,
     branch,
@@ -386,6 +399,71 @@ async function readFileBytesAndSize(
   return { bytes, size: bytes.length };
 }
 
+const MAX_PRELOAD_FILES = 12;
+const MAX_PRELOAD_BYTES = 262_144;
+const preloadedFiles = new Map<string, LoadedFile>();
+
+/** Return a preloaded clean LoadedFile synchronously if available in the warm cache. */
+export function getPreloadedFile(
+  filePath: string,
+  root: string,
+  gitStatus?: GitStatusCode,
+  openInDiff?: boolean,
+): LoadedFile | null {
+  const hit = preloadedFiles.get(filePath);
+  if (!hit) return null;
+  if (openInDiff && hit.classification.kind !== "diff" && !hit.diffPatch) {
+    return null;
+  }
+  const mode = openInDiff ? "diff" : hit.classification.defaultMode;
+  return {
+    ...hit,
+    relPath: relativePath(root, filePath),
+    mode,
+    gitStatus: gitStatus ?? hit.gitStatus,
+  };
+}
+
+/** Preload small workspace files in the background so clicking them in the tree renders in 0ms. */
+export async function warmWorkspaceFiles(snapshot: WorkspaceSnapshot): Promise<void> {
+  if (!snapshot.root) {
+    preloadedFiles.clear();
+    return;
+  }
+  const candidates = snapshot.flatFiles
+    .filter((entry) => {
+      const k = classifyFile(entry.path).kind;
+      return k !== "video" && k !== "audio" && k !== "quicklook";
+    })
+    .slice(0, MAX_PRELOAD_FILES);
+
+  await Promise.all(
+    candidates.map(async (entry) => {
+      if (preloadedFiles.has(entry.path)) return;
+      try {
+        const stat = await fs.stat(entry.path);
+        if (stat.size > MAX_PRELOAD_BYTES) return;
+        const loaded = await loadFile(entry.path, snapshot.root, undefined, entry.gitStatus);
+        preloadedFiles.set(entry.path, loaded);
+      } catch {
+        // Ignore background preload errors.
+      }
+    })
+  );
+}
+
+async function resolveInitialDiffPatch(
+  filePath: string,
+  root: string,
+  kind: FileClassification["kind"],
+  mode: PreviewMode,
+  text: string,
+): Promise<string> {
+  if (kind === "diff") return text;
+  if (mode === "diff") return getFileDiffPatch(filePath, root);
+  return "";
+}
+
 /** Load a file for preview/editing (reads bytes, classifies, parses table/hex/diff/blob as needed). */
 export async function loadFile(
   filePath: string,
@@ -393,6 +471,10 @@ export async function loadFile(
   preferredMode?: PreviewMode,
   gitStatus?: GitStatusCode,
 ): Promise<LoadedFile> {
+  const preloaded = getPreloadedFile(filePath, root, gitStatus, preferredMode === "diff");
+  if (preloaded) {
+    return preferredMode ? { ...preloaded, mode: preferredMode } : preloaded;
+  }
   const { bytes, size } = await readFileBytesAndSize(filePath);
   const classification = classifyFile(filePath, bytes.slice(0, 4096));
   const mode = preferredMode ?? classification.defaultMode;
@@ -405,13 +487,14 @@ export async function loadFile(
     classification.kind === "quicklook"
       ? await generateQuickLookUrl(filePath, execCwd(root || path.dirname(filePath)))
       : null;
-  const diffPatch =
-    classification.kind === "diff"
-      ? text
-      : mode === "diff"
-        ? await getFileDiffPatch(filePath, root)
-        : "";
-  return {
+  const diffPatch = await resolveInitialDiffPatch(
+    filePath,
+    root,
+    classification.kind,
+    mode,
+    text
+  );
+  const loaded: LoadedFile = {
     path: filePath,
     relPath: relativePath(root, filePath),
     name: path.basename(filePath),
@@ -429,6 +512,10 @@ export async function loadFile(
     hexDump,
     diffPatch,
   };
+  if (size <= MAX_PRELOAD_BYTES && preloadedFiles.size < 32) {
+    preloadedFiles.set(filePath, loaded);
+  }
+  return loaded;
 }
 
 /** Save text content to disk and return updated LoadedFile state. */
@@ -440,7 +527,16 @@ export async function saveFileText(
   await fs.writeFile(file.path, newText);
   const tableData =
     file.classification.kind === "table" ? parseTableData(newText, file.path) : file.tableData;
-  return { ...file, text: newText, savedText: newText, dirty: false, tableData, relPath: relativePath(root, file.path) };
+  const updated: LoadedFile = {
+    ...file,
+    text: newText,
+    savedText: newText,
+    dirty: false,
+    tableData,
+    relPath: relativePath(root, file.path),
+  };
+  preloadedFiles.set(file.path, updated);
+  return updated;
 }
 
 /** Open macOS folder picker dialog via osascript and return selected folder path or null. */

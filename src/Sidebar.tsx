@@ -58,12 +58,14 @@ function getGitStatusColor(
   return theme.ui.mutedForeground;
 }
 
-function isFolderItem(items: TreeItem[], id: string): boolean {
+function collectFolderIds(items: TreeItem[], out = new Set<string>()): Set<string> {
   for (const item of items) {
-    if (item.id === id) return item.children !== undefined;
-    if (item.children && isFolderItem(item.children, id)) return true;
+    if (item.children !== undefined) {
+      out.add(item.id);
+      collectFolderIds(item.children, out);
+    }
   }
-  return false;
+  return out;
 }
 
 function renderTreeRow(
@@ -74,8 +76,12 @@ function renderTreeRow(
   root: Accessor<string>,
   theme: Accessor<EditorTheme>
 ): JSX.Element {
-  const status = computed(() => lookupGitStatus(entry.id, root(), statusMap()));
-  const isExpanded = computed(() => expandedIds().includes(entry.id));
+  const status = computed(() =>
+    entry.folder ? undefined : lookupGitStatus(entry.id, root(), statusMap())
+  );
+  const isExpanded = computed(() =>
+    entry.folder ? expandedIds().includes(entry.id) : false
+  );
   const isSelected = computed(() => selectedPath() === entry.id);
   return (
     <View
@@ -142,6 +148,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
   });
   const isAll = computed(() => props.filterMode() === "all");
   const isChanged = computed(() => props.filterMode() === "changed");
+  const folderIds = computed(() => collectFolderIds(props.treeItems()));
 
   return (
     <View
@@ -236,7 +243,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         onExpandedChange={({ expanded }) => props.expandedIds.set(expanded)}
         onSelectedChange={({ selected }) => {
           props.selectedPath.set(selected);
-          if (!isFolderItem(props.treeItems(), selected)) {
+          if (!folderIds().has(selected)) {
             props.onSelectFile(selected, props.filterMode() === "changed");
           }
         }}

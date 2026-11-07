@@ -516,12 +516,8 @@ export function requestMermaidRender(
   return promise;
 }
 
-/** Hidden offscreen WebView host that executes Mermaid layout and PNG rasterization. */
+/** Hidden offscreen WebView host that executes Mermaid layout and PNG rasterization on demand. */
 export function MermaidRendererHost(): JSX.Element {
-  effect(() => {
-    ensureWorkerInitialized();
-  });
-
   return (
     <If when={workerHtmlSignal().length > 0}>
       <View
