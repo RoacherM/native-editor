@@ -92,13 +92,25 @@ function isOpaqueFile(classification: FileClassification): boolean {
 // DESIGN.md「术语与边界」
 const FINDER_OPEN_QUEUE_PATH = "/tmp/aed-open.queue";
 
+function readHostOrEnvParam(
+  paramKey: string,
+  primaryEnv: string,
+  legacyEnv: string
+): string {
+  const fromHost = host?.params?.[paramKey];
+  if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
+  const fromEnv = process.env[primaryEnv] || process.env[legacyEnv];
+  return fromEnv && fromEnv.length > 0 ? fromEnv : "";
+}
+
 /** Resolve initial file opened from Finder or environment. */
 export function getInitialOpenFile(): string | null {
-  const fromHost = host?.params?.openFile;
-  if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
-  const fromEnv = process.env.AED_OPEN_FILE || process.env.NATIVE_EDITOR_OPEN_FILE;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  return null;
+  const resolved = readHostOrEnvParam(
+    "openFile",
+    "AED_OPEN_FILE",
+    "NATIVE_EDITOR_OPEN_FILE"
+  );
+  return resolved.length > 0 ? resolved : null;
 }
 
 /** Read and clear any file paths queued by the macOS Finder open-file bridge. */
@@ -116,15 +128,23 @@ export async function consumeFinderOpenQueue(): Promise<string[]> {
   }
 }
 
-/** Resolve initial workspace root from host.params.workspaceRoot, process.env.AED_ROOT (or legacy NATIVE_EDITOR_ROOT), or initial openFile; returns "" on clean launch so $HOME or / is never auto-scanned. */
+/** Resolve initial workspace root from host.params.workspaceRoot or process.env.AED_ROOT (or legacy NATIVE_EDITOR_ROOT); returns "" on clean launch or loose file launch so $HOME, /, or parent folders are never auto-scanned. */
 export function getInitialWorkspaceRoot(): string {
-  const fromHost = host?.params?.workspaceRoot;
-  if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
-  const fromEnv = process.env.AED_ROOT || process.env.NATIVE_EDITOR_ROOT;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  const initialFile = getInitialOpenFile();
-  if (initialFile) return path.dirname(initialFile);
-  return "";
+  return readHostOrEnvParam(
+    "workspaceRoot",
+    "AED_ROOT",
+    "NATIVE_EDITOR_ROOT"
+  );
+}
+
+/** Check whether a path on disk is a directory. */
+export async function isDirectoryPath(targetPath: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(targetPath);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function execCwd(cwd?: string): string {

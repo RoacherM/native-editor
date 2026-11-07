@@ -27,7 +27,7 @@ import {
   type EditorRef,
 } from "nsh/base";
 import type { PreviewMode } from "./classify";
-import { AppLogo, Icon } from "./icons";
+import { Icon } from "./icons";
 import { MermaidDiagramBlock, MermaidRendererHost } from "./mermaid";
 import {
   buildEditorThemeStyles,
@@ -720,7 +720,12 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
 
   cleanup(
     keymap.bind({
-      "mod+f": () => findOpen.update((v) => !v),
+      "mod+f": () => {
+        const cur = props.file();
+        if (cur && getActiveView(cur) === "editor") {
+          findOpen.update((v) => !v);
+        }
+      },
     })
   );
 
@@ -756,27 +761,6 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
             />
           </View>
         )}
-      </If>
-      <If when={!props.file()}>
-        <View class="flex-1 items-center justify-center p-6 gap-3 select-none">
-          <AppLogo
-            size={48}
-            ink={() => activeTheme().ui.foreground}
-            accent={() => activeTheme().ui.accent}
-          />
-          <Text
-            style={{ color: activeTheme().ui.foreground }}
-            class="text-sm font-medium"
-          >
-            Aed
-          </Text>
-          <Text
-            style={{ color: activeTheme().ui.mutedForeground }}
-            class="text-xs"
-          >
-            Select a file or press ⌘P to quick open
-          </Text>
-        </View>
       </If>
     </View>
   );

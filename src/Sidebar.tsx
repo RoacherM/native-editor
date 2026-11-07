@@ -33,6 +33,7 @@ export interface SidebarProps {
   theme?: Accessor<EditorTheme>;
   onSelectFile: (filePath: string, openInDiff?: boolean) => void;
   onOpenFolder: () => void;
+  onCloseFolder: () => void;
 }
 
 export interface CommandPaletteProps {
@@ -148,23 +149,17 @@ export function Sidebar(props: SidebarProps): JSX.Element {
       class="flex-1 select-none overflow-hidden"
     >
       <View class="h-8 px-3 flex-row items-center justify-between shrink-0">
-        <Button
-          testID="sidebar-open-folder"
-          onPress={props.onOpenFolder}
-          class="flex-1 min-w-0 flex-row items-center gap-1.5 bg-transparent hover:opacity-80 p-0 border-none shadow-none"
+        <View
+          testID="sidebar-workspace-title"
+          class="flex-1 min-w-0 flex-row items-center pr-2"
         >
-          <Icon
-            name="chevron-down"
-            size={12}
-            tint={() => theme().ui.mutedForeground}
-          />
           <Text
             style={{ color: theme().ui.foreground }}
             class="text-xs font-medium truncate"
           >
             {folderName()}
           </Text>
-        </Button>
+        </View>
 
         <View class="flex-row items-center gap-1 shrink-0">
           <Button
@@ -202,6 +197,30 @@ export function Sidebar(props: SidebarProps): JSX.Element {
               tint={() =>
                 isChanged() ? theme().ui.foreground : theme().ui.mutedForeground
               }
+            />
+          </Button>
+
+          <Button
+            testID="sidebar-open-folder"
+            onPress={props.onOpenFolder}
+            class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
+          >
+            <Icon
+              name="folder-open"
+              size={14}
+              tint={() => theme().ui.mutedForeground}
+            />
+          </Button>
+
+          <Button
+            testID="sidebar-close-folder"
+            onPress={props.onCloseFolder}
+            class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
+          >
+            <Icon
+              name="close"
+              size={12}
+              tint={() => theme().ui.mutedForeground}
             />
           </Button>
         </View>
@@ -253,22 +272,45 @@ function CommandGroupHeading(props: {
 
 function CommandItemRow(props: {
   entry: CommandEntry;
+  showFileBadge: Accessor<boolean>;
   theme: Accessor<EditorTheme>;
 }): JSX.Element {
   return (
-    <View class="h-8 px-3 flex-row items-center gap-2 select-none">
-      <FileBadge
-        name={props.entry.label}
-        color={() => props.theme().ui.mutedForeground}
-      />
-      <Text
-        style={{ color: props.theme().ui.foreground }}
-        class="text-xs truncate flex-1"
-      >
-        {props.entry.label}
-      </Text>
+    <View class="h-8 px-3 flex-row items-center justify-between gap-2 select-none">
+      <View class="flex-row items-center gap-2 flex-1 min-w-0">
+        <If when={props.showFileBadge()}>
+          <FileBadge
+            name={props.entry.label}
+            color={() => props.theme().ui.mutedForeground}
+          />
+        </If>
+        <Text
+          style={{ color: props.theme().ui.foreground }}
+          class="text-xs truncate flex-1"
+        >
+          {props.entry.label}
+        </Text>
+      </View>
+      <If when={!!props.entry.shortcutLabel}>
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-[11px] font-mono shrink-0"
+        >
+          {props.entry.shortcutLabel}
+        </Text>
+      </If>
     </View>
   );
+}
+
+function resolveCommandPlaceholder(
+  isFiles: boolean,
+  root: string
+): string {
+  if (!isFiles) return "Run a command";
+  if (!root) return "Switch recent workspace";
+  const parts = root.split("/").filter(Boolean);
+  return `Search ${parts[parts.length - 1] || "workspace"}`;
 }
 
 export function CommandPalette(props: CommandPaletteProps): JSX.Element {
@@ -282,16 +324,12 @@ export function CommandPalette(props: CommandPaletteProps): JSX.Element {
   });
 
   const isFiles = computed(() => props.mode() === "files");
+  const showFileBadge = computed(() => isFiles() && props.root().length > 0);
   const items = computed(() =>
     isFiles() ? props.fileItems() : props.commandItems()
   );
-  const folderName = computed(() => {
-    const raw = props.root();
-    const parts = raw.split("/").filter(Boolean);
-    return parts[parts.length - 1] || "workspace";
-  });
   const placeholder = computed(() =>
-    isFiles() ? `Search ${folderName()}` : "Run a command"
+    resolveCommandPlaceholder(isFiles(), props.root())
   );
 
   return (
@@ -344,7 +382,13 @@ export function CommandPalette(props: CommandPaletteProps): JSX.Element {
         renderGroup={(group) => (
           <CommandGroupHeading group={group} theme={theme} />
         )}
-        renderItem={(entry) => <CommandItemRow entry={entry} theme={theme} />}
+        renderItem={(entry) => (
+          <CommandItemRow
+            entry={entry}
+            showFileBadge={showFileBadge}
+            theme={theme}
+          />
+        )}
         empty={
           <View class="py-6 items-center">
             <Text

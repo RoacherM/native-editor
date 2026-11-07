@@ -635,7 +635,6 @@ function ShellSelectOptionRow(props: {
   value: string;
   title: string;
   selected: boolean;
-  highlighted: boolean;
   theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const shellName = props.value.split("/").pop() || props.title;
@@ -643,10 +642,9 @@ function ShellSelectOptionRow(props: {
     <View
       testID={`shell-option-${shellName}`}
       style={{
-        backgroundColor:
-          props.highlighted || props.selected
-            ? props.theme().ui.selection
-            : "transparent",
+        backgroundColor: props.selected
+          ? props.theme().ui.selection
+          : "transparent",
       }}
       class="h-7 px-3 rounded flex-row items-center justify-between gap-2 select-none"
     >
@@ -901,8 +899,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
               <ShellSelectOptionRow
                 value={item.value}
                 title={item.title}
-                selected={item.selected}
-                highlighted={item.highlighted}
+                selected={item.value === activeTab().shell().path}
                 theme={activeTheme}
               />
             )}

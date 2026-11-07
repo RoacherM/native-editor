@@ -287,6 +287,8 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("text:poster.png");
     await app.waitFor("id:preview-image");
     expect(app.shows("id:preview-image")).toBe(true);
+    await app.keyboard.press("mod+f");
+    expect(app.shows("id:editor-find-input")).toBe(false);
     await app.press("id:image-zoom-in");
     expect(app.shows("text:125%")).toBe(true);
     await app.press("id:image-zoom-reset");
@@ -401,5 +403,87 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
       { timeout: 8000 }
     );
     await app.press("id:terminal-add-btn");
+  });
+
+  test("supports returning to welcome page, static sidebar title, dirty-tab guard, and loose external file without hijacking workspace", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: {
+        params: {
+          workspaceRoot: FIXTURE_ROOT,
+        },
+      },
+    });
+
+    await app.waitFor("id:sidebar-workspace-title");
+    expect(app.shows("id:sidebar-workspace-title")).toBe(true);
+    expect(app.shows("id:sidebar-close-folder")).toBe(true);
+    expect(app.shows("id:empty-editor-close-folder")).toBe(true);
+
+    // Dirty file protection when closing a modified tab
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    await app.type("id:preview-editor", "// unsaved edit\n");
+    await app.press("id:tab-close-main.ts");
+    await app.waitFor("id:unsaved-changes-dialog");
+    expect(app.shows("id:unsaved-changes-dialog")).toBe(true);
+
+    // Cancel keeps dirty tab open
+    await app.press("id:unsaved-cancel-btn");
+    expect(app.shows("id:unsaved-changes-dialog")).toBe(false);
+    expect(app.shows("id:tab-select-main.ts")).toBe(true);
+
+    // Discard closes tab and evicts dirty state from memory; re-clicking the same tree item reopens clean file
+    await app.press("id:tab-close-main.ts");
+    await app.waitFor("id:unsaved-discard-btn");
+    await app.press("id:unsaved-discard-btn");
+    expect(app.shows("id:tab-select-main.ts")).toBe(false);
+
+    await app.press("text:main.ts");
+    await app.waitFor("id:tab-select-main.ts");
+    expect(app.shows("id:tab-select-main.ts")).toBe(true);
+    expect(app.shows("text:•")).toBe(false);
+
+    // Dropping the already-open workspace directory refreshes without wiping open tabs
+    await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
+    expect(app.shows("id:tab-select-main.ts")).toBe(true);
+
+    // Close Folder returns to WelcomePanel poster and hides file tree
+    await app.press("id:sidebar-close-folder");
+    await app.waitFor("id:welcome-panel");
+    expect(app.shows("id:welcome-panel")).toBe(true);
+    expect(app.shows("id:workspace-tree")).toBe(false);
+
+    // Pressing mod+b on welcome screen must not hide sidebar when reopening recent workspace
+    await app.keyboard.press("mod+b");
+    await app.press("id:titlebar-quick-open");
+    await app.waitFor("id:command-palette");
+    await app.keyboard.press("escape");
+
+    await app.press("id:welcome-recent-fixtures");
+    await app.waitFor("id:workspace-tree");
+    expect(app.shows("id:workspace-tree")).toBe(true);
+
+    // Loose external file launch does not hijack workspaceRoot or prevent returning to welcome
+    const looseApp = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      storage: {
+        "aed.recentWorkspaces": "[]",
+      },
+      host: {
+        params: {
+          openFile: `${FIXTURE_ROOT}/README.md`,
+        },
+      },
+    });
+    await looseApp.waitFor("id:preview-markdown");
+    expect(looseApp.shows("id:workspace-tree")).toBe(false);
+    await looseApp.press("id:tab-close-README.md");
+    await looseApp.waitFor("id:welcome-panel");
+    expect(looseApp.shows("id:welcome-panel")).toBe(true);
   });
 });

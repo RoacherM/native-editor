@@ -33,7 +33,7 @@ import {
   Window,
 } from "nsh/desktop";
 import type { PreviewMode } from "./src/classify";
-import { AppLogo, FileBadge, Icon } from "./src/icons";
+import { FileBadge, Icon } from "./src/icons";
 import { formatMediaMeta, PreviewPane } from "./src/PreviewPane";
 import { CommandPalette, Sidebar } from "./src/Sidebar";
 import {
@@ -53,6 +53,7 @@ import {
   getFileDiffPatch,
   getInitialOpenFile,
   getInitialWorkspaceRoot,
+  isDirectoryPath,
   loadFile,
   lookupGitStatus,
   pickWorkspaceFolder,
@@ -86,6 +87,7 @@ const builtInCommands: CommandItem[] = [
   { id: "toggle-sidebar", label: "View: Toggle Sidebar", shortcut: "mod+b", keywords: ["sidebar", "explorer"] },
   { id: "toggle-terminal", label: "View: Toggle Terminal", shortcut: "mod+j", keywords: ["terminal", "pty", "console"] },
   { id: "open-folder", label: "File: Open Folder...", shortcut: "mod+o", keywords: ["open", "folder", "workspace"] },
+  { id: "close-folder", label: "File: Close Folder", shortcut: "mod+shift+w", keywords: ["close", "folder", "workspace", "welcome", "home"] },
   { id: "save-file", label: "File: Save Current File", shortcut: "mod+s", keywords: ["save", "write"] },
   { id: "close-tab", label: "View: Close Current Tab", shortcut: "mod+w", keywords: ["close", "tab"] },
   { id: "toggle-theme", label: "Preferences: Cycle Color Theme", keywords: ["theme", "light", "dark", "color"] },
@@ -228,13 +230,12 @@ function WindowTitleBar(props: {
   sidebarOpen: Accessor<boolean>;
   terminalOpen: Accessor<boolean>;
   onQuickOpen: () => void;
-  onOpenFolder: () => void;
   onToggleSidebar: () => void;
   onToggleTerminal: () => void;
 }): JSX.Element {
   const folderName = computed(() => {
     const raw = props.root();
-    if (!raw) return "Open Folder";
+    if (!raw) return "Quick Open";
     const parts = raw.split("/").filter(Boolean);
     return parts[parts.length - 1] || "workspace";
   });
@@ -251,7 +252,7 @@ function WindowTitleBar(props: {
       <View class="flex-1 flex-row items-center justify-center min-w-0 px-3">
         <Button
           testID="titlebar-quick-open"
-          onPress={() => (props.root() ? props.onQuickOpen() : props.onOpenFolder())}
+          onPress={props.onQuickOpen}
           style={{ backgroundColor: props.theme().ui.background }}
           class="flex-1 max-w-[320px] min-w-0 h-6 px-3 rounded hover:opacity-90 border-none flex-row items-center justify-center gap-2 shadow-none overflow-hidden"
         >
@@ -494,7 +495,6 @@ function shortFontLabel(family: string, size: number): string {
 function ThemeSelectOptionRow(props: {
   optionId: string;
   selected: boolean;
-  highlighted: boolean;
   activeTheme: Accessor<EditorTheme>;
 }): JSX.Element {
   const opt = getThemeById(props.optionId);
@@ -503,10 +503,7 @@ function ThemeSelectOptionRow(props: {
     <View
       testID={`theme-option-${opt.id}`}
       style={{
-        backgroundColor:
-          props.highlighted || props.selected
-            ? current.ui.selection
-            : "transparent",
+        backgroundColor: props.selected ? current.ui.selection : "transparent",
       }}
       class="h-7 px-2.5 rounded flex-row items-center justify-between gap-2.5 select-none"
     >
@@ -552,7 +549,6 @@ function ThemeSelectOptionRow(props: {
 function FontSelectOptionRow(props: {
   family: string;
   selected: boolean;
-  highlighted: boolean;
   activeTheme: Accessor<EditorTheme>;
 }): JSX.Element {
   const ui = props.activeTheme().ui;
@@ -560,8 +556,7 @@ function FontSelectOptionRow(props: {
     <View
       testID={`font-option-${props.family.split(/\s+/)[0]}`}
       style={{
-        backgroundColor:
-          props.highlighted || props.selected ? ui.selection : "transparent",
+        backgroundColor: props.selected ? ui.selection : "transparent",
       }}
       class="h-7 px-2.5 rounded flex-row items-center justify-between gap-2.5 select-none"
     >
@@ -625,13 +620,15 @@ function StatusBar(props: {
     >
       <View class="flex-row items-center gap-2">
         <If when={!!props.root()}>
-          <View class="flex-row items-center gap-1">
-            <Icon name="branch" size={12} tint={statusInk} />
-            <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
-              {props.branch() || "main"}
-              {props.changedCount() > 0 ? "*" : ""}
-            </Text>
-          </View>
+          <If when={!!props.branch()}>
+            <View class="flex-row items-center gap-1">
+              <Icon name="branch" size={12} tint={statusInk} />
+              <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
+                {props.branch()}
+                {props.changedCount() > 0 ? "*" : ""}
+              </Text>
+            </View>
+          </If>
           <Button
             testID="sidebar-refresh"
             onPress={props.onRefresh}
@@ -666,8 +663,7 @@ function StatusBar(props: {
           renderItem={(item) => (
             <ThemeSelectOptionRow
               optionId={item.value}
-              selected={item.selected}
-              highlighted={item.highlighted}
+              selected={item.value === props.theme().id}
               activeTheme={props.theme}
             />
           )}
@@ -705,8 +701,7 @@ function StatusBar(props: {
           renderItem={(item) => (
             <FontSelectOptionRow
               family={item.value}
-              selected={item.selected}
-              highlighted={item.highlighted}
+              selected={item.value === props.fontFamily()}
               activeTheme={props.theme}
             />
           )}
@@ -1274,10 +1269,103 @@ function EmptyEditorShortcutRow(props: {
   );
 }
 
+interface PendingUnsavedGuard {
+  dirtyPaths: string[];
+  onProceed: () => void;
+}
+
+function UnsavedChangesDialog(props: {
+  pending: Signal<PendingUnsavedGuard | null>;
+  theme: Accessor<EditorTheme>;
+  onSaveAndProceed: (guard: PendingUnsavedGuard) => void;
+  onDiscardAndProceed: (guard: PendingUnsavedGuard) => void;
+}): JSX.Element {
+  return (
+    <If when={props.pending()}>
+      {(guard) => {
+        const names = () =>
+          guard()
+            .dirtyPaths.map((p) => path.basename(p) || p)
+            .join(", ");
+        return (
+          <Dialog
+            open={true}
+            onCancel={() => props.pending.set(null)}
+            closeOnEscape
+            closeOnBackdropPress
+            backdropClass="bg-black/45"
+            class="items-center justify-start pt-24"
+          >
+            <View
+              testID="unsaved-changes-dialog"
+              style={{ backgroundColor: props.theme().ui.card }}
+              class="w-[400px] max-w-[92%] p-5 rounded-lg shadow-2xl gap-4 select-none"
+            >
+              <View class="gap-1.5">
+                <Text
+                  style={{ color: props.theme().ui.foreground }}
+                  class="text-sm font-medium"
+                >
+                  Unsaved changes
+                </Text>
+                <Text
+                  style={{ color: props.theme().ui.mutedForeground }}
+                  class="text-xs"
+                >
+                  {`Save changes to ${names()} before closing?`}
+                </Text>
+              </View>
+              <View class="flex-row items-center justify-end gap-2 pt-1">
+                <Button
+                  testID="unsaved-cancel-btn"
+                  onPress={() => props.pending.set(null)}
+                  style={{ backgroundColor: props.theme().ui.sidebar }}
+                  class="h-7 px-3 rounded border-none shadow-none"
+                >
+                  <Text
+                    style={{ color: props.theme().ui.foreground }}
+                    class="text-xs"
+                  >
+                    Cancel
+                  </Text>
+                </Button>
+                <Button
+                  testID="unsaved-discard-btn"
+                  onPress={() => props.onDiscardAndProceed(guard())}
+                  style={{ backgroundColor: props.theme().ui.sidebar }}
+                  class="h-7 px-3 rounded border-none shadow-none"
+                >
+                  <Text
+                    style={{ color: props.theme().ui.foreground }}
+                    class="text-xs"
+                  >
+                    Don't Save
+                  </Text>
+                </Button>
+                <Button
+                  testID="unsaved-save-btn"
+                  onPress={() => props.onSaveAndProceed(guard())}
+                  style={{ backgroundColor: props.theme().ui.accent }}
+                  class="h-7 px-3 rounded border-none shadow-none"
+                >
+                  <Text style={{ color: "#ffffff" }} class="text-xs font-medium">
+                    Save
+                  </Text>
+                </Button>
+              </View>
+            </View>
+          </Dialog>
+        );
+      }}
+    </If>
+  );
+}
+
 function EmptyEditorPanel(props: {
   theme: Accessor<EditorTheme>;
   onQuickOpen: () => void;
   onOpenFolder: () => void;
+  onCloseFolder: () => void;
   onToggleTerminal: () => void;
 }): JSX.Element {
   return (
@@ -1300,6 +1388,13 @@ function EmptyEditorPanel(props: {
           shortcut="⌘O"
           theme={props.theme}
           onPress={props.onOpenFolder}
+        />
+        <EmptyEditorShortcutRow
+          id="empty-editor-close-folder"
+          label="Close Folder"
+          shortcut="⌘⇧W"
+          theme={props.theme}
+          onPress={props.onCloseFolder}
         />
         <EmptyEditorShortcutRow
           id="empty-editor-toggle-terminal"
@@ -1331,6 +1426,7 @@ interface AppActions {
   toggleSidebar: () => void;
   toggleTerminal: () => void;
   openFolder: () => void;
+  closeFolder: () => void;
   openQuickOpen: () => void;
   openCommandPalette: () => void;
   openFontSettings: () => void;
@@ -1350,6 +1446,7 @@ const COMMAND_HANDLERS: Record<string, (actions: AppActions) => void> = {
   "toggle-sidebar": (a) => a.toggleSidebar(),
   "toggle-terminal": (a) => a.toggleTerminal(),
   "open-folder": (a) => a.openFolder(),
+  "close-folder": (a) => a.closeFolder(),
   "save-file": (a) => a.saveCurrent(),
   "close-tab": (a) => a.closeCurrent(),
   "toggle-theme": (a) => a.toggleTheme(),
@@ -1380,60 +1477,74 @@ function enforceMinWindowSize(width: number, height: number): void {
   });
 }
 
-function setupDesktopChrome(actions: AppActions): void {
+function setupDesktopChrome(
+  actions: AppActions,
+  recentWorkspaces: Accessor<string[]>,
+  onSelectRecent: (folderPath: string) => void
+): void {
   if (!desktopAvailable) return;
   Window.setTitleBar({ style: "hidden" });
   Window.setTitle("Aed");
   Window.setFrame({ size: { width: 1280, height: 800 } });
-  DesktopMenu.setApplicationMenu([
-    {
-      label: "Aed",
-      submenu: [
-        { role: "about" },
-        { type: "separator" },
-        { label: "Font Settings...", shortcut: "mod+,", onSelect: () => actions.openFontSettings() },
-        { type: "separator" },
-        { role: "hide", shortcut: "mod+h" },
-        { role: "hideOthers", shortcut: "mod+alt+h" },
-        { role: "showAll" },
-        { type: "separator" },
-        { role: "quit", shortcut: "mod+q" },
-      ],
-    },
-    {
-      label: "File",
-      submenu: [
-        { label: "Open Folder...", shortcut: "mod+o", onSelect: () => actions.openFolder() },
-        { label: "Quick Open...", shortcut: "mod+p", onSelect: () => actions.openQuickOpen() },
-        { type: "separator" },
-        { label: "Save", shortcut: "mod+s", onSelect: () => actions.saveCurrent() },
-        { label: "Close Tab", shortcut: "mod+w", onSelect: () => actions.closeCurrent() },
-      ],
-    },
-    {
-      label: "Edit",
-      submenu: [
-        { role: "undo", shortcut: "mod+z" },
-        { role: "redo", shortcut: "mod+shift+z" },
-        { type: "separator" },
-        { role: "cut", shortcut: "mod+x" },
-        { role: "copy", shortcut: "mod+c" },
-        { role: "paste", shortcut: "mod+v" },
-        { role: "selectAll", shortcut: "mod+a" },
-      ],
-    },
-    {
-      label: "View",
-      submenu: [
-        { label: "Command Palette...", shortcut: "mod+shift+p", onSelect: () => actions.openCommandPalette() },
-        { type: "separator" },
-        { label: "Toggle Sidebar", shortcut: "mod+b", onSelect: () => actions.toggleSidebar() },
-        { label: "Toggle Terminal", shortcut: "mod+j", onSelect: () => actions.toggleTerminal() },
-        { type: "separator" },
-        { role: "toggleFullScreen", shortcut: "ctrl+mod+f" },
-      ],
-    },
-  ]);
+  effect(() => {
+    const recentItems = recentWorkspaces().map((ws) => ({
+      label: path.basename(ws) || ws,
+      onSelect: () => onSelectRecent(ws),
+    }));
+    DesktopMenu.setApplicationMenu([
+      {
+        label: "Aed",
+        submenu: [
+          { role: "about" },
+          { type: "separator" },
+          { label: "Font Settings...", shortcut: "mod+,", onSelect: () => actions.openFontSettings() },
+          { type: "separator" },
+          { role: "hide", shortcut: "mod+h" },
+          { role: "hideOthers", shortcut: "mod+alt+h" },
+          { role: "showAll" },
+          { type: "separator" },
+          { role: "quit", shortcut: "mod+q" },
+        ],
+      },
+      {
+        label: "File",
+        submenu: [
+          { label: "Open Folder...", shortcut: "mod+o", onSelect: () => actions.openFolder() },
+          ...(recentItems.length > 0
+            ? [{ label: "Open Recent", submenu: recentItems }]
+            : []),
+          { label: "Quick Open...", shortcut: "mod+p", onSelect: () => actions.openQuickOpen() },
+          { type: "separator" },
+          { label: "Save", shortcut: "mod+s", onSelect: () => actions.saveCurrent() },
+          { label: "Close Tab", shortcut: "mod+w", onSelect: () => actions.closeCurrent() },
+          { label: "Close Folder", shortcut: "mod+shift+w", onSelect: () => actions.closeFolder() },
+        ],
+      },
+      {
+        label: "Edit",
+        submenu: [
+          { role: "undo", shortcut: "mod+z" },
+          { role: "redo", shortcut: "mod+shift+z" },
+          { type: "separator" },
+          { role: "cut", shortcut: "mod+x" },
+          { role: "copy", shortcut: "mod+c" },
+          { role: "paste", shortcut: "mod+v" },
+          { role: "selectAll", shortcut: "mod+a" },
+        ],
+      },
+      {
+        label: "View",
+        submenu: [
+          { label: "Command Palette...", shortcut: "mod+shift+p", onSelect: () => actions.openCommandPalette() },
+          { type: "separator" },
+          { label: "Toggle Sidebar", shortcut: "mod+b", onSelect: () => actions.toggleSidebar() },
+          { label: "Toggle Terminal", shortcut: "mod+j", onSelect: () => actions.toggleTerminal() },
+          { type: "separator" },
+          { role: "toggleFullScreen", shortcut: "ctrl+mod+f" },
+        ],
+      },
+    ]);
+  });
 }
 
 function decodeDroppedUri(uri: string | undefined): string | null {
@@ -1455,6 +1566,9 @@ async function fetchOrReuseLoadedFile(
   }
   if (openInDiff && existing.mode !== "diff") {
     return resolveModeFile({ ...existing, gitStatus }, "diff", root);
+  }
+  if (!openInDiff && existing.mode === "diff" && existing.classification.kind !== "diff") {
+    return { ...existing, mode: existing.classification.defaultMode, gitStatus };
   }
   return { ...existing, gitStatus };
 }
@@ -1482,6 +1596,7 @@ function bindAppShortcuts(actions: AppActions): () => void {
     "ctrl+`": () => actions.toggleTerminal(),
     "mod+s": () => actions.saveCurrent(),
     "mod+w": () => actions.closeCurrent(),
+    "mod+shift+w": () => actions.closeFolder(),
     "mod+o": () => actions.openFolder(),
     "mod+=": () => actions.adjustFontSize(1),
     "mod+-": () => actions.adjustFontSize(-1),
@@ -1528,9 +1643,11 @@ async function saveFileInMap(
 }
 
 function createAppActions(opts: {
+  workspaceRoot: () => string;
   sidebarOpen: Signal<boolean>;
   terminalOpen: Signal<boolean>;
   openFolder: () => void;
+  closeFolder: () => void;
   commandMode: Signal<"files" | "commands">;
   commandOpen: Signal<boolean>;
   fontDialogOpen: Signal<boolean>;
@@ -1548,9 +1665,14 @@ function createAppActions(opts: {
     if (cur) fn(cur);
   };
   return {
-    toggleSidebar: () => opts.sidebarOpen.update((v) => !v),
+    toggleSidebar: () => {
+      if (opts.workspaceRoot().length > 0) {
+        opts.sidebarOpen.update((v) => !v);
+      }
+    },
     toggleTerminal: () => opts.terminalOpen.update((v) => !v),
     openFolder: opts.openFolder,
+    closeFolder: opts.closeFolder,
     openQuickOpen: () => {
       opts.commandMode.set("files");
       opts.commandOpen.set(true);
@@ -1638,15 +1760,34 @@ async function initUserPreferences(
   recentWorkspaces: Signal<string[]>,
   onRestoreRecentWorkspace?: (folderPath: string) => Promise<void>
 ): Promise<void> {
-  const [savedFamily, savedSize, savedTheme, savedShell, savedRecent, env] =
+  const [savedFamily, savedSize, savedTheme, savedShell, savedRecent] =
     await Promise.all([
       getStorageWithFallback("fontFamily"),
       getStorageWithFallback("fontSize"),
       getStorageWithFallback("theme"),
       getStorageWithFallback("shell"),
       getStorageWithFallback("recentWorkspaces"),
-      discoverTerminalEnvironment(),
     ]);
+  applySavedThemeAndFont(
+    fontFamily,
+    fontSize,
+    themeId,
+    savedFamily,
+    savedSize,
+    savedTheme,
+    {}
+  );
+  if (savedShell) defaultShell.set(savedShell);
+
+  const recent = parseRecentWorkspaces(savedRecent);
+  recentWorkspaces.set(recent);
+
+  const [, env] = await Promise.all([
+    recent.length > 0 && onRestoreRecentWorkspace
+      ? onRestoreRecentWorkspace(recent[0])
+      : Promise.resolve(),
+    discoverTerminalEnvironment(),
+  ]);
   applySavedThemeAndFont(
     fontFamily,
     fontSize,
@@ -1656,20 +1797,15 @@ async function initUserPreferences(
     savedTheme,
     env.ghostty
   );
-
   if (env.shells.length > 0) availableShells.set(env.shells);
   const shell = savedShell || env.shells[0]?.path;
   if (shell) defaultShell.set(shell);
-
-  const recent = parseRecentWorkspaces(savedRecent);
-  recentWorkspaces.set(recent);
-  if (recent.length > 0 && onRestoreRecentWorkspace) {
-    await onRestoreRecentWorkspace(recent[0]);
-  }
 }
 
 function App(): JSX.Element {
-  const workspaceRoot = signal<string>(getInitialWorkspaceRoot());
+  const initialRoot = getInitialWorkspaceRoot();
+  let workspaceTouched = initialRoot.length > 0 || !!getInitialOpenFile();
+  const workspaceRoot = signal<string>(initialRoot);
   const recentWorkspaces = signal<string[]>([]);
   const snapshot = signal<WorkspaceSnapshot>({
     root: "",
@@ -1710,6 +1846,7 @@ function App(): JSX.Element {
     { name: "sh", path: "/bin/sh" },
   ]);
   const fontDialogOpen = signal<boolean>(false);
+  const pendingUnsaved = signal<PendingUnsavedGuard | null>(null);
 
   const setFontFamily = (next: string) => {
     fontFamily.set(next);
@@ -1745,22 +1882,67 @@ function App(): JSX.Element {
     snapshot.set(await scanWorkspace(workspaceRoot()));
   };
 
-  const switchToWorkspace = async (folderPath: string) => {
-    if (!folderPath) return;
-    workspaceRoot.set(folderPath);
-    recordRecentWorkspace(recentWorkspaces, folderPath);
+  const resetWorkspaceState = (nextRoot: string) => {
+    workspaceTouched = true;
+    workspaceRoot.set(nextRoot);
     openTabs.set([]);
     activeFilePath.set(null);
+    loadedFiles.set({});
+    expandedIds.set([]);
+    selectedPath.set(null);
+    filterMode.set("all");
+    if (nextRoot.length > 0) {
+      sidebarOpen.set(true);
+    }
+  };
+
+  const getDirtyTabPaths = (): string[] =>
+    openTabs().filter((p) => !!loadedFiles()[p]?.dirty);
+
+  const withUnsavedGuard = (dirtyPaths: string[], onProceed: () => void) => {
+    if (dirtyPaths.length === 0) {
+      onProceed();
+      return;
+    }
+    pendingUnsaved.set({ dirtyPaths, onProceed });
+  };
+
+  const performSwitchToWorkspace = async (folderPath: string) => {
+    if (!folderPath) return;
+    resetWorkspaceState(folderPath);
+    recordRecentWorkspace(recentWorkspaces, folderPath);
     await refresh();
   };
 
+  const switchToWorkspace = (folderPath: string) => {
+    const next = folderPath.replace(/\/+$/, "");
+    if (!next) return;
+    if (next === workspaceRoot().replace(/\/+$/, "")) {
+      void refresh();
+      return;
+    }
+    withUnsavedGuard(getDirtyTabPaths(), () => {
+      void performSwitchToWorkspace(next);
+    });
+  };
+
+  const performCloseWorkspace = async () => {
+    resetWorkspaceState("");
+    await refresh();
+  };
+
+  const closeWorkspace = () => {
+    if (!workspaceRoot() && openTabs().length === 0) return;
+    withUnsavedGuard(getDirtyTabPaths(), () => {
+      void performCloseWorkspace();
+    });
+  };
+
   const openExternalFile = async (filePath: string) => {
-    const cleanRoot = workspaceRoot().replace(/\/+$/, "");
-    if (!cleanRoot || !filePath.startsWith(`${cleanRoot}/`)) {
-      const parentDir = path.dirname(filePath);
-      workspaceRoot.set(parentDir);
-      recordRecentWorkspace(recentWorkspaces, parentDir);
-      await refresh();
+    if (await isDirectoryPath(filePath)) {
+      switchToWorkspace(filePath);
+      if (desktopAvailable) Window.orderFront();
+      return;
     }
     await openFileInTab(filePath);
     if (desktopAvailable) Window.orderFront();
@@ -1786,9 +1968,9 @@ function App(): JSX.Element {
       availableShells,
       recentWorkspaces,
       async (lastFolder) => {
-        if (!workspaceRoot() && !getInitialOpenFile()) {
+        if (!workspaceTouched && !workspaceRoot() && !getInitialOpenFile()) {
           const scanned = await scanWorkspace(lastFolder);
-          if (scanned.entries.length > 0) {
+          if (!workspaceTouched && scanned.entries.length > 0) {
             workspaceRoot.set(lastFolder);
             snapshot.set(scanned);
           }
@@ -1805,6 +1987,7 @@ function App(): JSX.Element {
   });
 
   const openFileInTab = async (filePath: string, openInDiff?: boolean) => {
+    workspaceTouched = true;
     const current = loadedFiles();
     const file = await fetchOrReuseLoadedFile(
       current,
@@ -1821,18 +2004,33 @@ function App(): JSX.Element {
     selectedPath.set(filePath);
   };
 
-  const closeTab = (filePath: string) => {
+  const performCloseTab = (filePath: string) => {
     const nextTabs = openTabs().filter((p) => p !== filePath);
     openTabs.set(nextTabs);
-    if (activeFilePath() === filePath) {
-      activeFilePath.set(nextTabs.length > 0 ? nextTabs[nextTabs.length - 1] : null);
+    const nextLoaded = { ...loadedFiles() };
+    delete nextLoaded[filePath];
+    loadedFiles.set(nextLoaded);
+    const nextActive =
+      activeFilePath() === filePath
+        ? nextTabs.length > 0
+          ? nextTabs[nextTabs.length - 1]
+          : null
+        : activeFilePath();
+    activeFilePath.set(nextActive);
+    if (selectedPath() === filePath) {
+      selectedPath.set(nextActive);
     }
+  };
+
+  const closeTab = (filePath: string) => {
+    const isDirty = !!loadedFiles()[filePath]?.dirty;
+    withUnsavedGuard(isDirty ? [filePath] : [], () => performCloseTab(filePath));
   };
 
   const handleOpenFolder = async () => {
     const chosen = await pickWorkspaceFolder(workspaceRoot());
     if (!chosen) return;
-    await switchToWorkspace(chosen);
+    switchToWorkspace(chosen);
   };
 
   const handleSave = (filePath: string) =>
@@ -1846,10 +2044,29 @@ function App(): JSX.Element {
     if (resolved) openFileInTab(resolved);
   };
 
+  const handleSaveAndProceed = async (guard: PendingUnsavedGuard) => {
+    try {
+      for (const p of guard.dirtyPaths) {
+        await handleSave(p);
+      }
+      pendingUnsaved.set(null);
+      guard.onProceed();
+    } catch {
+      // Keep dialog open if saving fails
+    }
+  };
+
+  const handleDiscardAndProceed = (guard: PendingUnsavedGuard) => {
+    pendingUnsaved.set(null);
+    guard.onProceed();
+  };
+
   const actions = createAppActions({
+    workspaceRoot: () => workspaceRoot(),
     sidebarOpen,
     terminalOpen,
     openFolder: handleOpenFolder,
+    closeFolder: closeWorkspace,
     commandMode,
     commandOpen,
     fontDialogOpen,
@@ -1863,7 +2080,7 @@ function App(): JSX.Element {
     setFileMode: handleModeChange,
   });
 
-  setupDesktopChrome(actions);
+  setupDesktopChrome(actions, recentWorkspaces, switchToWorkspace);
   cleanup(bindAppShortcuts(actions));
 
   const leftPad = computed(() =>
@@ -1878,6 +2095,15 @@ function App(): JSX.Element {
   const treeItems = computed(() =>
     filterMode() === "all" ? snapshot().treeItemsAll : snapshot().treeItemsChanged
   );
+  const paletteFileItems = computed<CommandItem[]>(() => {
+    if (workspaceRoot().length > 0) return snapshot().commandItems;
+    return recentWorkspaces().map((ws) => ({
+      id: `recent:${ws}`,
+      label: `${path.basename(ws) || ws} — ${ws}`,
+      keywords: [path.basename(ws) || ws, ws],
+      group: "Recent Workspaces",
+    }));
+  });
 
   return (
     <View
@@ -1903,7 +2129,6 @@ function App(): JSX.Element {
         sidebarOpen={sidebarOpen}
         terminalOpen={terminalOpen}
         onQuickOpen={actions.openQuickOpen}
-        onOpenFolder={handleOpenFolder}
         onToggleSidebar={actions.toggleSidebar}
         onToggleTerminal={actions.toggleTerminal}
       />
@@ -1939,6 +2164,7 @@ function App(): JSX.Element {
               theme={activeTheme}
               onSelectFile={openFileInTab}
               onOpenFolder={handleOpenFolder}
+              onCloseFolder={closeWorkspace}
             />
           </ResizablePanel>
 
@@ -2009,6 +2235,7 @@ function App(): JSX.Element {
                       theme={activeTheme}
                       onQuickOpen={actions.openQuickOpen}
                       onOpenFolder={handleOpenFolder}
+                      onCloseFolder={closeWorkspace}
                       onToggleTerminal={actions.toggleTerminal}
                     />
                   </If>
@@ -2071,14 +2298,27 @@ function App(): JSX.Element {
         onReset={resetFont}
       />
 
+      <UnsavedChangesDialog
+        pending={pendingUnsaved}
+        theme={activeTheme}
+        onSaveAndProceed={handleSaveAndProceed}
+        onDiscardAndProceed={handleDiscardAndProceed}
+      />
+
       <CommandPalette
         open={commandOpen}
         mode={commandMode}
         root={workspaceRoot}
-        fileItems={() => snapshot().commandItems}
+        fileItems={paletteFileItems}
         commandItems={() => builtInCommands}
         theme={activeTheme}
-        onSelectFile={(p) => openFileInTab(p)}
+        onSelectFile={(p) => {
+          if (p.startsWith("recent:")) {
+            switchToWorkspace(p.slice(7));
+          } else {
+            openFileInTab(p);
+          }
+        }}
         onRunCommand={(cmdId) => COMMAND_HANDLERS[cmdId]?.(actions)}
       />
     </View>
