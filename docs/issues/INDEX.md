@@ -31,7 +31,8 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 
 | ID | 子系统 | 标题 | Commit | 回归测试 | 日期 |
 |---|---|---|---|---|---|
-| I-006 | `DESIGN.md` | 文件打开与渲染速度优化：并发目录/Git 扫描、工作区小文件预热与 0ms 同步 Tab 复用、Mermaid WebView 按需懒加载、语法高亮 LRU 缓存与预编译正则、CSV 无引号快路径及 PDF QuickLook 缓存 | `66c8b80` | `App.test.tsx` › formats binary bytes as hex + ASCII dump and computes syntax decorations across themes | 2026-11-07 |
+| I-007 | `DESIGN.md` | 修复外部文件点击跳转失效：分离独立无信号依赖的 Finder 队列轮询定时器防止恢复工作区时误销毁、`withQueueLock` 串行化队列读写、支持 `file://`/`#L<line>`/`:line:col` 路径归一化及原生桥接唤醒置顶 | `3389f20` | `App.test.tsx` › supports returning to welcome page, static sidebar title, dirty-tab guard, and loose external file without hijacking workspace | 2026-11-07 |
+| I-006 | `DESIGN.md` | 文件打开与渲染速度优化：并发目录/Git 扫描、工作区小文件预热与 0ms 同步 Tab 复用、Mermaid WebView 按需懒加载、语法高亮 LRU 缓存与预编译正则、CSV 无引号快路径及 PDF QuickLook 缓存 | `61b6a29` | `App.test.tsx` › formats binary bytes as hex + ASCII dump and computes syntax decorations across themes | 2026-11-07 |
 | I-005 | `DESIGN.md` | 工作区与文件交互逻辑重构：静态侧栏标题防误触弹窗、`Close Folder` 返回开屏页、纯只读底部状态栏防误触、脏文件拦截确认框及外部单文件独立打开 | `ba99199` | `App.test.tsx` › supports returning to welcome page, static sidebar title, dirty-tab guard, and loose external file without hijacking workspace | 2026-11-07 |
 | I-004 | `DESIGN.md` | 锁定 `LSMinimumSystemVersion` 与 Mach-O `LC_BUILD_VERSION` 至 macOS 11.0，修复低版本 macOS 启动报错 `-10825` | `d01f3fe` | `App.test.tsx` › normalizes Mach-O LC_BUILD_VERSION minos/sdk to macOS 11.0 / 14.0 to prevent LaunchServices -10825 error | 2026-11-06 |
 | I-003 | `DESIGN.md` | 开屏海报仅在首次无工作区时显示，工作区内空 Tab 使用安静提示页并自动恢复最近工作区 | `9c00cb9` | `App.test.tsx` › clean launch without workspace hides file tree, shows Aed welcome panel, and migrates legacy storage | 2026-11-06 |

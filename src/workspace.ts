@@ -91,6 +91,63 @@ function isOpaqueFile(classification: FileClassification): boolean {
 
 // DESIGN.md「术语与边界」
 const FINDER_OPEN_QUEUE_PATH = "/tmp/aed-open.queue";
+let queueLock: Promise<void> = Promise.resolve();
+
+function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = queueLock.then(fn, fn);
+  queueLock = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
+/** Normalize an external file reference (strips `file://`, URL encoding, `#L<line>`, and `:line(:col)` suffixes). */
+export function normalizeExternalFilePath(raw: string): string {
+  let clean = raw.trim();
+  if (!clean) return "";
+  const isFileUri = clean.startsWith("file://");
+  if (isFileUri) {
+    const hashIdx = clean.indexOf("#");
+    if (hashIdx > 7) {
+      clean = clean.slice(0, hashIdx);
+    }
+    try {
+      clean = decodeURIComponent(clean.slice(7));
+    } catch {
+      clean = clean.slice(7);
+    }
+  } else {
+    clean = clean.replace(/#L\d+(?:C\d+|-L?\d+)?$/i, "");
+  }
+  const lineColMatch = clean.match(/^(.+?):(\d+)(?::(\d+))?$/);
+  if (lineColMatch) {
+    clean = lineColMatch[1];
+  }
+  return clean;
+}
+
+/** Append a file path to the Finder open queue (used by host bridge and E2E tests). */
+export async function enqueueFinderOpenPath(filePath: string): Promise<void> {
+  const normalized = normalizeExternalFilePath(filePath);
+  if (!normalized) return;
+  await withQueueLock(async () => {
+    try {
+      let existing = "";
+      try {
+        const bytes = await fs.readFile(FINDER_OPEN_QUEUE_PATH);
+        existing = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      } catch {
+        // Queue file may not exist yet.
+      }
+      const prefix =
+        existing.length > 0 && !existing.endsWith("\n") ? `${existing}\n` : existing;
+      await fs.writeFile(FINDER_OPEN_QUEUE_PATH, `${prefix}${normalized}\n`);
+    } catch {
+      // Ignore queue write errors in restricted environments.
+    }
+  });
+}
 
 function readHostOrEnvParam(
   paramKey: string,
@@ -105,28 +162,36 @@ function readHostOrEnvParam(
 
 /** Resolve initial file opened from Finder or environment. */
 export function getInitialOpenFile(): string | null {
-  const resolved = readHostOrEnvParam(
-    "openFile",
-    "AED_OPEN_FILE",
-    "NATIVE_EDITOR_OPEN_FILE"
+  const resolved = normalizeExternalFilePath(
+    readHostOrEnvParam(
+      "openFile",
+      "AED_OPEN_FILE",
+      "NATIVE_EDITOR_OPEN_FILE"
+    )
   );
   return resolved.length > 0 ? resolved : null;
 }
 
 /** Read and clear any file paths queued by the macOS Finder open-file bridge. */
 export async function consumeFinderOpenQueue(): Promise<string[]> {
-  try {
-    const bytes = await fs.readFile(FINDER_OPEN_QUEUE_PATH);
-    if (bytes.length === 0) return [];
-    await fs.writeFile(FINDER_OPEN_QUEUE_PATH, "");
-    const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-    return raw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  } catch {
-    return [];
-  }
+  return withQueueLock(async () => {
+    try {
+      const bytes = await fs.readFile(FINDER_OPEN_QUEUE_PATH);
+      if (bytes.length === 0) return [];
+      try {
+        await fs.writeFile(FINDER_OPEN_QUEUE_PATH, "");
+      } catch {
+        // Continue even if truncating queue fails.
+      }
+      const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      return raw
+        .split(/\r?\n/)
+        .map((line) => normalizeExternalFilePath(line))
+        .filter((line) => line.length > 0);
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** Resolve initial workspace root from host.params.workspaceRoot or process.env.AED_ROOT (or legacy NATIVE_EDITOR_ROOT); returns "" on clean launch or loose file launch so $HOME, /, or parent folders are never auto-scanned. */

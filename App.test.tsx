@@ -16,7 +16,7 @@ import {
   fontDisplayName,
   getThemeById,
 } from "./src/themes";
-import { shortenHomePath } from "./src/workspace";
+import { normalizeExternalFilePath, shortenHomePath } from "./src/workspace";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -467,6 +467,23 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("id:welcome-recent-fixtures");
     await app.waitFor("id:workspace-tree");
     expect(app.shows("id:workspace-tree")).toBe(true);
+    expect(app.shows("id:empty-editor-panel")).toBe(true);
+
+    // Clicking an external file (queued via /tmp/aed-open.queue) after workspace transitions
+    // must open the file tab instead of staying stuck on EmptyEditorPanel.
+    expect(
+      normalizeExternalFilePath("file:///Users/byronwayne/Projects/sides/native-editor/CLAUDE.md:12:4")
+    ).toBe("/Users/byronwayne/Projects/sides/native-editor/CLAUDE.md");
+    expect(
+      normalizeExternalFilePath("/Users/byronwayne/Projects/sides/native-editor/CLAUDE.md#L10-L20")
+    ).toBe("/Users/byronwayne/Projects/sides/native-editor/CLAUDE.md");
+    expect(
+      normalizeExternalFilePath("/Users/byronwayne/Projects/C#_notes.md:10")
+    ).toBe("/Users/byronwayne/Projects/C#_notes.md");
+    await app.host.send("enqueueFinderOpen", `${FIXTURE_ROOT}/README.md:1:1`);
+    await app.waitFor("id:preview-markdown", { timeout: 1500 });
+    expect(app.shows("id:preview-markdown")).toBe(true);
+    expect(app.shows("id:empty-editor-panel")).toBe(false);
 
     // Loose external file launch does not hijack workspaceRoot or prevent returning to welcome
     const looseApp = await open("./App.tsx", {

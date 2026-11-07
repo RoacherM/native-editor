@@ -11,6 +11,16 @@ static NSSize ne_window_willResize_toSize(id self, SEL _cmd, NSWindow *sender, N
   return NSMakeSize(w, h);
 }
 
+static void setOrReplaceMethod(Class cls, SEL sel, IMP imp, const char *types) {
+  if (!cls) return;
+  if (!class_addMethod(cls, sel, imp, types)) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m) {
+      method_setImplementation(m, imp);
+    }
+  }
+}
+
 static void enforceWindowMinSize(NSWindow *win) {
   static BOOL inEnforce = NO;
   if (inEnforce) return;
@@ -20,7 +30,7 @@ static void enforceWindowMinSize(NSWindow *win) {
   inEnforce = YES;
   id winDelegate = [win delegate];
   if (winDelegate) {
-    class_addMethod([winDelegate class], @selector(windowWillResize:toSize:), (IMP)ne_window_willResize_toSize, "{CGSize=dd}@:@{CGSize=dd}");
+    setOrReplaceMethod([winDelegate class], @selector(windowWillResize:toSize:), (IMP)ne_window_willResize_toSize, "{CGSize=dd}@:@{CGSize=dd}");
   }
   NSSize minSize = NSMakeSize(NE_MIN_WINDOW_WIDTH, NE_MIN_WINDOW_HEIGHT);
   [win setContentMinSize:minSize];
@@ -43,14 +53,27 @@ static void enforceAllWindowsMinSize(void) {
   }
 }
 
+static void bringAppToFront(NSApplication *app) {
+  [app activateIgnoringOtherApps:YES];
+  for (NSWindow *win in [app windows]) {
+    if ([win isMiniaturized]) {
+      [win deminiaturize:nil];
+    }
+    if ([win canBecomeKeyWindow]) {
+      [win makeKeyAndOrderFront:nil];
+    }
+  }
+}
+
 static void recordOpenedFilePath(NSString *path) {
   if (!path || [path length] == 0) return;
   const char *cpath = [path fileSystemRepresentation];
   if (!cpath) return;
-  setenv("AED_OPEN_FILE", cpath, 1);
-  NSString *dir = [path stringByDeletingLastPathComponent];
-  if (dir && [dir length] > 0) {
-    setenv("AED_ROOT", [dir fileSystemRepresentation], 1);
+  BOOL isDir = NO;
+  if ([[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir] && isDir) {
+    setenv("AED_ROOT", cpath, 1);
+  } else {
+    setenv("AED_OPEN_FILE", cpath, 1);
   }
   FILE *fp = fopen("/tmp/aed-open.queue", "a");
   if (fp) {
@@ -61,7 +84,7 @@ static void recordOpenedFilePath(NSString *path) {
 
 static BOOL ne_application_openFile(id self, SEL _cmd, NSApplication *app, NSString *filename) {
   recordOpenedFilePath(filename);
-  [app activateIgnoringOtherApps:YES];
+  bringAppToFront(app);
   return YES;
 }
 
@@ -69,7 +92,7 @@ static void ne_application_openFiles(id self, SEL _cmd, NSApplication *app, NSAr
   for (NSString *filename in filenames) {
     recordOpenedFilePath(filename);
   }
-  [app activateIgnoringOtherApps:YES];
+  bringAppToFront(app);
   [app replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 
@@ -79,16 +102,16 @@ static void ne_application_openURLs(id self, SEL _cmd, NSApplication *app, NSArr
       recordOpenedFilePath([url path]);
     }
   }
-  [app activateIgnoringOtherApps:YES];
+  bringAppToFront(app);
 }
 
 static void attachOpenHandlersToDelegate(id delegate) {
   if (!delegate) return;
   Class cls = [delegate class];
-  class_addMethod(cls, @selector(application:openFile:), (IMP)ne_application_openFile, "c@:@@");
-  class_addMethod(cls, @selector(application:openFiles:), (IMP)ne_application_openFiles, "v@:@@");
-  class_addMethod(cls, @selector(application:openURLs:), (IMP)ne_application_openURLs, "v@:@@");
-  class_addMethod(cls, @selector(windowWillResize:toSize:), (IMP)ne_window_willResize_toSize, "{CGSize=dd}@:@{CGSize=dd}");
+  setOrReplaceMethod(cls, @selector(application:openFile:), (IMP)ne_application_openFile, "c@:@@");
+  setOrReplaceMethod(cls, @selector(application:openFiles:), (IMP)ne_application_openFiles, "v@:@@");
+  setOrReplaceMethod(cls, @selector(application:openURLs:), (IMP)ne_application_openURLs, "v@:@@");
+  setOrReplaceMethod(cls, @selector(windowWillResize:toSize:), (IMP)ne_window_willResize_toSize, "{CGSize=dd}@:@{CGSize=dd}");
 }
 
 static void (*orig_setDelegate)(id, SEL, id) = NULL;

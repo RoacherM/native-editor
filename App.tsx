@@ -5,6 +5,7 @@ import {
   cleanup,
   computed,
   effect,
+  host,
   keymap,
   mount,
   Scroll,
@@ -48,6 +49,7 @@ import {
 } from "./src/themes";
 import {
   consumeFinderOpenQueue,
+  enqueueFinderOpenPath,
   getFileDiffPatch,
   getInitialOpenFile,
   getInitialWorkspaceRoot,
@@ -55,6 +57,7 @@ import {
   isDirectoryPath,
   loadFile,
   lookupGitStatus,
+  normalizeExternalFilePath,
   pickWorkspaceFolder,
   saveFileText,
   scanWorkspace,
@@ -1224,8 +1227,11 @@ function isExternalOrHashUrl(url: string): boolean {
 
 function resolveRelativeLink(relUrl: string, baseFilePath: string): string | null {
   if (isExternalOrHashUrl(relUrl)) return null;
-  if (relUrl.startsWith("/")) return path.normalize(relUrl);
-  return path.resolve(path.dirname(baseFilePath), relUrl);
+  const withoutAnchor = relUrl.split("#")[0] || "";
+  const cleaned = normalizeExternalFilePath(withoutAnchor);
+  if (!cleaned) return null;
+  if (cleaned.startsWith("/")) return path.normalize(cleaned);
+  return path.resolve(path.dirname(baseFilePath), cleaned);
 }
 
 interface AppActions {
@@ -1356,7 +1362,8 @@ function setupDesktopChrome(
 
 function decodeDroppedUri(uri: string | undefined): string | null {
   if (!uri) return null;
-  return uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
+  const normalized = normalizeExternalFilePath(uri);
+  return normalized.length > 0 ? normalized : null;
 }
 
 function tryReuseLoadedFileSync(
@@ -1767,14 +1774,21 @@ function App(): JSX.Element {
     });
   };
 
-  const openExternalFile = async (filePath: string) => {
-    if (await isDirectoryPath(filePath)) {
-      switchToWorkspace(filePath);
+  const openExternalFile = async (rawPath: string) => {
+    const filePath = normalizeExternalFilePath(rawPath);
+    if (!filePath) return;
+    workspaceTouched = true;
+    try {
+      if (await isDirectoryPath(filePath)) {
+        switchToWorkspace(filePath);
+        if (desktopAvailable) Window.orderFront();
+        return;
+      }
+      await openFileInTab(filePath);
       if (desktopAvailable) Window.orderFront();
-      return;
+    } catch {
+      // Ignore unreadable or deleted external paths so queued opens continue.
     }
-    await openFileInTab(filePath);
-    if (desktopAvailable) Window.orderFront();
   };
 
   const activateLoadedTab = (filePath: string, file: LoadedFile) => {
@@ -1812,48 +1826,78 @@ function App(): JSX.Element {
     activateLoadedTab(filePath, file);
   };
 
+  let pollingFinderQueue = false;
+  const drainFinderOpenQueue = async (): Promise<boolean> => {
+    if (pollingFinderQueue) return false;
+    pollingFinderQueue = true;
+    try {
+      const queued = await consumeFinderOpenQueue();
+      if (queued.length === 0) return false;
+      workspaceTouched = true;
+      for (const f of queued) {
+        await openExternalFile(f);
+      }
+      return true;
+    } finally {
+      pollingFinderQueue = false;
+    }
+  };
+
   let appInitialized = false;
   effect(() => {
     if (appInitialized) return;
     appInitialized = true;
-    const initRoot = workspaceRoot();
-    if (initRoot) {
-      recordRecentWorkspace(recentWorkspaces, initRoot);
+    if (initialRoot) {
+      recordRecentWorkspace(recentWorkspaces, initialRoot);
     }
-    void refresh();
+    void (async () => {
+      const scannedInitial = await scanWorkspace(initialRoot);
+      snapshot.set(scannedInitial);
+      void warmWorkspaceFiles(scannedInitial);
+    })();
     void (async () => {
       const initFile = getInitialOpenFile();
-      if (initFile) await openExternalFile(initFile);
-      const queued = await consumeFinderOpenQueue();
-      for (const f of queued) {
-        await openExternalFile(f);
+      if (initFile) {
+        workspaceTouched = true;
+        await openExternalFile(initFile);
       }
-    })();
-    initUserPreferences(
-      fontFamily,
-      fontSize,
-      themeId,
-      defaultShell,
-      availableShells,
-      recentWorkspaces,
-      async (lastFolder) => {
-        if (!workspaceTouched && !workspaceRoot() && !getInitialOpenFile()) {
-          const scanned = await scanWorkspace(lastFolder);
-          if (!workspaceTouched && scanned.entries.length > 0) {
-            workspaceRoot.set(lastFolder);
-            snapshot.set(scanned);
-            void warmWorkspaceFiles(scanned);
+      await drainFinderOpenQueue();
+      await initUserPreferences(
+        fontFamily,
+        fontSize,
+        themeId,
+        defaultShell,
+        availableShells,
+        recentWorkspaces,
+        async (lastFolder) => {
+          if (await drainFinderOpenQueue()) return;
+          if (!workspaceTouched && !workspaceRoot() && !getInitialOpenFile()) {
+            const scanned = await scanWorkspace(lastFolder);
+            if (await drainFinderOpenQueue()) return;
+            if (!workspaceTouched && scanned.entries.length > 0) {
+              workspaceRoot.set(lastFolder);
+              snapshot.set(scanned);
+              void warmWorkspaceFiles(scanned);
+            }
           }
         }
+      );
+    })();
+  });
+
+  effect(() => {
+    const stopHostQueue = host.on("enqueueFinderOpen", (payload) => {
+      if (typeof payload === "string" && payload.length > 0) {
+        void enqueueFinderOpenPath(payload);
       }
-    );
-    const timer = setInterval(async () => {
-      const queued = await consumeFinderOpenQueue();
-      for (const f of queued) {
-        await openExternalFile(f);
-      }
-    }, 450);
-    cleanup(() => clearInterval(timer));
+    });
+    const timer = setInterval(() => {
+      void drainFinderOpenQueue();
+    }, 200);
+    cleanup(() => {
+      stopHostQueue();
+      clearInterval(timer);
+    });
   });
 
   const performCloseTab = (filePath: string) => {

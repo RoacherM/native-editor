@@ -32,7 +32,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `Storage` 键 | `aed.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个显式打开的非 `/` 工作区目录，单独打开外部文件不写入）；未设置时回退旧键 `native-editor.recentWorkspaces`，解析失败回退 `[]` |
 | 环境变量 / Host 参数 | `AED_ROOT` / `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置时返回 `""`（展示 Welcome 面板或恢复最近工作区，绝不自动扫 `$HOME`、`/` 或单文件父目录） |
 | 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以独立 Tab 打开的初始文件绝对路径（不覆盖当前工作区，不写入 `aed.recentWorkspaces`） |
-| Finder 队列文件 | `/tmp/aed-open.queue` | `finder_bridge.m` 与 `launcher.c` 追加写入待打开文件路径（每行一个），`App.tsx` 每 450ms 通过 `consumeFinderOpenQueue()` 读取并清空 |
+| Finder 队列文件 | `/tmp/aed-open.queue` | `finder_bridge.m`、`launcher.c` 与宿主事件 `enqueueFinderOpen` 追加写入待打开文件路径（每行一个，支持 `file://` URI、`#L<line>` 与 `:line(:col)` 后缀归一化），`App.tsx` 在独立无信号依赖的定时器（每 200ms）中通过 `consumeFinderOpenQueue()` 读取并清空，确保工作区切换或恢复绝不销毁轮询定时器 |
 | 临时缓存目录 | `/tmp/aed-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
 | 临时缓存目录 | `/tmp/aed-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
 
@@ -66,7 +66,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 |---|---|---|
 | `App.tsx` | `App` (mount root) | 顶层信号状态、可拖拽分栏（水平 `Sidebar` + 垂直 `PreviewPane`/`TerminalPane`）、快捷键、Finder 队列轮询、Preferences 弹窗 |
 | `src/classify.ts` | `classifyFile`, `parseTableData`, `formatHexDump`, `probeImageDimensions`, `normalizeMachOBuildVersion`, `generateQuickLookUrl`, `createBlobUrl` | 纯文件类型判定（扩展名 + 前 4 KB `\0` 探测）、CSV/TSV/JSONL 解析、4 KB 十六进制格式化、PNG/GIF/SVG 尺寸探测、Mach-O `LC_BUILD_VERSION` 最低系统版本归一化、PDF `sips` 缩略图生成 |
-| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
+| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `enqueueFinderOpenPath`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件路径与 `file://`/`:line:col` 归一化、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
 | `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
 | `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL |
 | `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
@@ -108,10 +108,10 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 
 1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/Aed`）**：
    - 原 `Aed` 二进制被重命名为 `AedCore`。
-   - `launcher` 解析命令行参数：目录参数写入 `AED_ROOT`，文件参数写入 `AED_OPEN_FILE` 并追加到 `/tmp/aed-open.queue`，随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
+   - `launcher` 解析命令行参数（剥离 `file://` 前缀与可选 `:line(:col)` 行列后缀）：目录参数写入 `AED_ROOT`，文件参数写入 `AED_OPEN_FILE` 并追加到 `/tmp/aed-open.queue`，随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
 2. **`scripts/finder_bridge.m`（`libFinderBridge.dylib`）**：
    - 在 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警）。
-   - Method Swizzle `NSApplication setDelegate:`，向宿主 Delegate 动态注入 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`，将 Finder 双击或拖拽打开的文件路径写入 `/tmp/aed-open.queue`，并在 AppKit 层锁定主窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
+   - Method Swizzle `NSApplication setDelegate:` 并通过 `setOrReplaceMethod` 向宿主 Delegate 注入或覆盖 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`；仅当打开路径为目录时写入 `AED_ROOT`，普通文件写入 `AED_OPEN_FILE` 并追加到 `/tmp/aed-open.queue`，同时唤醒并置顶主窗口（`makeKeyAndOrderFront:`），并在 AppKit 层锁定主窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
 3. **`scripts/set_default_handlers.m`**：
    - 先通过 `LSCopyDefaultRoleHandlerForContentType` 查询当前默认打开程序，已绑定 `dev.byronwayne.aed` 的 UTI 直接跳过（避免重复触发 macOS `CoreServicesUIAgent` 确认弹窗），并对 UTI 去重、过滤未声明的 `dyn.*` 动态 UTI。
    - 默认仅注册 8 个核心文档与数据 UTI（Markdown、Mermaid、JSONL、JSON、CSV、TSV、Plain Text、Diff/Patch）；传入 `--all` 时额外注册常用源码 UTI，也可直接传入指定扩展名（如 `set_default_handlers yaml toml`）。
