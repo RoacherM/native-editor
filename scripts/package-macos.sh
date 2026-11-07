@@ -31,12 +31,20 @@ clang -mmacosx-version-min=11.0 -framework Foundation -framework CoreServices -f
 
 echo "==> 3. Updating Info.plist with CFBundleDocumentTypes & UTExportedTypeDeclarations..."
 python3 - "$PLIST_PATH" "$MACOS_DIR" << 'PYEOF'
-import os, plistlib, struct, sys
+import json, os, struct, subprocess, sys
 
 plist_path = sys.argv[1]
 macos_dir = sys.argv[2]
-with open(plist_path, "rb") as f:
-    plist = plistlib.load(f)
+try:
+    import plistlib
+    with open(plist_path, "rb") as f:
+        plist = plistlib.load(f)
+    use_plistlib = True
+except Exception:
+    use_plistlib = False
+    subprocess.run(["/usr/bin/plutil", "-convert", "json", plist_path], check=True)
+    with open(plist_path, "r", encoding="utf-8") as f:
+        plist = json.load(f)
 
 plist["LSMinimumSystemVersion"] = "11.0"
 
@@ -113,8 +121,13 @@ plist["UTExportedTypeDeclarations"] = [
     },
 ]
 
-with open(plist_path, "wb") as f:
-    plistlib.dump(plist, f)
+if use_plistlib:
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f)
+else:
+    with open(plist_path, "w", encoding="utf-8") as f:
+        json.dump(plist, f)
+    subprocess.run(["/usr/bin/plutil", "-convert", "xml1", plist_path], check=True)
 
 for name in os.listdir(macos_dir):
     bin_path = os.path.join(macos_dir, name)

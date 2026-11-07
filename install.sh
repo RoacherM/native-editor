@@ -32,9 +32,16 @@ else
   hdiutil detach "$TMP_DIR/mnt" -force -quiet 2>/dev/null || true
 fi
 
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$INSTALL_DIR/$APP_NAME" << 'PYEOF' || true
-import hashlib, os, plistlib, struct, sys
+/usr/bin/plutil -replace LSMinimumSystemVersion -string "11.0" "$INSTALL_DIR/$APP_NAME/Contents/Info.plist" 2>/dev/null || true
+
+PYTHON_BIN="python3"
+if [ -x "/usr/bin/python3" ]; then
+  PYTHON_BIN="/usr/bin/python3"
+fi
+
+if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  "$PYTHON_BIN" - "$INSTALL_DIR/$APP_NAME" << 'PYEOF' || true
+import base64, hashlib, os, re, struct, sys
 
 app_dir = sys.argv[1]
 plist_path = os.path.join(app_dir, "Contents", "Info.plist")
@@ -43,11 +50,15 @@ macos_dir = os.path.join(app_dir, "Contents", "MacOS")
 
 if os.path.isfile(plist_path):
     with open(plist_path, "rb") as f:
-        info_plist = plistlib.load(f)
-    info_plist["LSMinimumSystemVersion"] = "11.0"
+        raw_plist = f.read()
+    raw_plist = re.sub(
+        rb"(<key>LSMinimumSystemVersion</key>\s*<string>)[^<]*(</string>)",
+        rb"\g<1>11.0\g<2>",
+        raw_plist,
+    )
     with open(plist_path, "wb") as f:
-        plistlib.dump(info_plist, f)
-    info_plist_sha256 = hashlib.sha256(open(plist_path, "rb").read()).digest()
+        f.write(raw_plist)
+    info_plist_sha256 = hashlib.sha256(raw_plist).digest()
 else:
     info_plist_sha256 = b"\x00" * 32
 
@@ -125,13 +136,20 @@ for fname, ident in [("AedCore", "AedCore"), ("libFinderBridge.dylib", "libFinde
 
 if os.path.isfile(code_res_path):
     with open(code_res_path, "rb") as f:
-        cr_plist = plistlib.load(f)
+        raw_cr = f.read()
     for rel_key, cdhash in cdhashes.items():
-        if rel_key in cr_plist.get("files2", {}):
-            cr_plist["files2"][rel_key] = {"cdhash": cdhash}
+        b64 = base64.b64encode(cdhash)
+        pattern = (
+            rb"(<key>" + re.escape(rel_key.encode("utf-8")) + rb"</key>\s*<dict>\s*)"
+            rb"<key>cdhash</key>\s*<data>\s*[^<]*</data>"
+            rb"(?:\s*<key>requirement</key>\s*<string>[^<]*</string>)?"
+            rb"(\s*</dict>)"
+        )
+        replacement = rb"\g<1><key>cdhash</key>\n\t\t\t<data>\n\t\t\t" + b64 + rb"\n\t\t\t</data>\g<2>"
+        raw_cr = re.sub(pattern, replacement, raw_cr)
     with open(code_res_path, "wb") as f:
-        plistlib.dump(cr_plist, f)
-    cr_sha256 = hashlib.sha256(open(code_res_path, "rb").read()).digest()
+        f.write(raw_cr)
+    cr_sha256 = hashlib.sha256(raw_cr).digest()
 else:
     cr_sha256 = b"\x00" * 32
 
@@ -146,7 +164,8 @@ for bin in libFinderBridge.dylib AedCore set_default_handlers Aed; do
 done
 codesign --force --deep --sign - "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
 xattr -cr "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
-"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
+touch "$INSTALL_DIR/$APP_NAME/Contents/Info.plist" "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
+"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f -R -trusted "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
 "$INSTALL_DIR/$APP_NAME/Contents/MacOS/set_default_handlers" 2>/dev/null || true
 
 echo "==> Installed successfully and set as default document editor: $INSTALL_DIR/$APP_NAME"
