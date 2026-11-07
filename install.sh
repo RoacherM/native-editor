@@ -5,19 +5,32 @@ REPO="RoacherM/native-editor"
 APP_NAME="Aed.app"
 INSTALL_DIR="/Applications"
 TMP_DIR="$(mktemp -d)"
-cleanup() { rm -rf "$TMP_DIR"; }
+cleanup() {
+  if [ -d "$TMP_DIR/mnt" ]; then
+    hdiutil detach "$TMP_DIR/mnt" -force -quiet 2>/dev/null || true
+  fi
+  rm -rf "$TMP_DIR"
+}
 trap cleanup EXIT
 
 echo "==> Downloading latest Aed release from $REPO..."
 ZIP_URL="https://github.com/$REPO/releases/latest/download/Aed-0.0.1-macos-arm64.zip"
-curl -fsSL "$ZIP_URL" -o "$TMP_DIR/Aed.zip"
+DMG_URL="https://github.com/$REPO/releases/latest/download/Aed-0.0.1-macos-arm64.dmg"
 
 echo "==> Extracting $APP_NAME..."
-ditto -x -k --norsrc "$TMP_DIR/Aed.zip" "$TMP_DIR"
-
-echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
 rm -rf "$INSTALL_DIR/Native Editor.app" "$INSTALL_DIR/$APP_NAME"
-mv "$TMP_DIR/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
+if curl -fsSL "$ZIP_URL" -o "$TMP_DIR/Aed.zip" 2>/dev/null; then
+  ditto -x -k --norsrc "$TMP_DIR/Aed.zip" "$TMP_DIR"
+  echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
+  mv "$TMP_DIR/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
+else
+  curl -fsSL "$DMG_URL" -o "$TMP_DIR/Aed.dmg"
+  mkdir -p "$TMP_DIR/mnt"
+  hdiutil attach -nobrowse -readonly -noverify -noautoopen -mountpoint "$TMP_DIR/mnt" "$TMP_DIR/Aed.dmg" >/dev/null
+  echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
+  ditto --norsrc "$TMP_DIR/mnt/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
+  hdiutil detach "$TMP_DIR/mnt" -force -quiet 2>/dev/null || true
+fi
 
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$INSTALL_DIR/$APP_NAME" << 'PYEOF' || true
