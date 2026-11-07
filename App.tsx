@@ -23,7 +23,6 @@ import {
   Input,
   ResizablePanel,
   ResizablePanelGroup,
-  Select,
   type CommandItem,
 } from "nsh/base";
 import {
@@ -44,7 +43,6 @@ import {
 import {
   DEFAULT_THEME_ID,
   EDITOR_THEMES,
-  fontDisplayName,
   getThemeById,
   type EditorTheme,
 } from "./src/themes";
@@ -81,7 +79,7 @@ const FONT_FAMILY_PRESETS = [
 ];
 
 const builtInCommands: CommandItem[] = [
-  { id: "configure-font", label: "Preferences: Theme, Font & Terminal...", keywords: ["font", "size", "family", "theme", "color", "shell"] },
+  { id: "configure-font", label: "Preferences: Theme, Font & Terminal...", shortcut: "mod+,", keywords: ["font", "size", "family", "theme", "color", "shell", "preferences", "settings"] },
   { id: "font-size-inc", label: "View: Increase Font Size", shortcut: "mod+=", keywords: ["font", "zoom", "larger"] },
   { id: "font-size-dec", label: "View: Decrease Font Size", shortcut: "mod+-", keywords: ["font", "zoom", "smaller"] },
   { id: "toggle-sidebar", label: "View: Toggle Sidebar", shortcut: "mod+b", keywords: ["sidebar", "explorer"] },
@@ -91,7 +89,7 @@ const builtInCommands: CommandItem[] = [
   { id: "save-file", label: "File: Save Current File", shortcut: "mod+s", keywords: ["save", "write"] },
   { id: "close-tab", label: "View: Close Current Tab", shortcut: "mod+w", keywords: ["close", "tab"] },
   { id: "toggle-theme", label: "Preferences: Cycle Color Theme", keywords: ["theme", "light", "dark", "color"] },
-  { id: "refresh-workspace", label: "Explorer: Refresh Workspace", keywords: ["refresh", "reload"] },
+  { id: "refresh-workspace", label: "Explorer: Refresh Workspace", shortcut: "mod+r", keywords: ["refresh", "reload"] },
   { id: "mode-preview", label: "View: Switch to Preview Mode", keywords: ["preview"] },
   { id: "mode-source", label: "View: Switch to Source Mode", keywords: ["source", "code"] },
   { id: "mode-diff", label: "View: Switch to Diff Mode", keywords: ["diff", "git"] },
@@ -488,93 +486,6 @@ function getContextAwareInfo(
   return `${file.relPath} · ${size}`;
 }
 
-function shortFontLabel(family: string, size: number): string {
-  return `${fontDisplayName(family)} · ${size}px`;
-}
-
-function ThemeSelectOptionRow(props: {
-  optionId: string;
-  selected: boolean;
-  activeTheme: Accessor<EditorTheme>;
-}): JSX.Element {
-  const opt = getThemeById(props.optionId);
-  const current = props.activeTheme();
-  return (
-    <View
-      testID={`theme-option-${opt.id}`}
-      style={{
-        backgroundColor: props.selected ? current.ui.selection : "transparent",
-      }}
-      class="h-7 px-2.5 rounded flex-row items-center justify-between gap-2.5 select-none"
-    >
-      <View class="flex-row items-center gap-2 min-w-0">
-        <View
-          style={{
-            backgroundColor: opt.ui.background,
-            borderColor: opt.ui.border,
-          }}
-          class="px-1.5 py-0.5 rounded border flex-row items-center gap-1 shrink-0"
-        >
-          <View
-            class="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: opt.syntax.keyword }}
-          />
-          <View
-            class="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: opt.syntax.string }}
-          />
-          <View
-            class="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: opt.syntax.function }}
-          />
-        </View>
-        <Text
-          style={{ color: current.ui.foreground }}
-          class={`text-xs font-mono truncate ${
-            props.selected ? "font-semibold" : "font-normal"
-          }`}
-        >
-          {opt.name}
-        </Text>
-      </View>
-      <View class="w-3.5 items-center justify-center shrink-0">
-        <If when={props.selected}>
-          <Icon name="check" size={11.5} tint={current.ui.accent} />
-        </If>
-      </View>
-    </View>
-  );
-}
-
-function FontSelectOptionRow(props: {
-  family: string;
-  selected: boolean;
-  activeTheme: Accessor<EditorTheme>;
-}): JSX.Element {
-  const ui = props.activeTheme().ui;
-  return (
-    <View
-      testID={`font-option-${props.family.split(/\s+/)[0]}`}
-      style={{
-        backgroundColor: props.selected ? ui.selection : "transparent",
-      }}
-      class="h-7 px-2.5 rounded flex-row items-center justify-between gap-2.5 select-none"
-    >
-      <Text
-        style={{ color: ui.foreground, fontFamily: props.family }}
-        class="text-xs truncate"
-      >
-        {props.family}
-      </Text>
-      <View class="w-3.5 items-center justify-center shrink-0">
-        <If when={props.selected}>
-          <Icon name="check" size={11.5} tint={ui.accent} />
-        </If>
-      </View>
-    </View>
-  );
-}
-
 function StatusBar(props: {
   root: Accessor<string>;
   branch: Accessor<string>;
@@ -582,13 +493,7 @@ function StatusBar(props: {
   activeFile: Accessor<LoadedFile | undefined>;
   line: Accessor<number>;
   col: Accessor<number>;
-  fontFamily: Accessor<string>;
-  fontSize: Accessor<number>;
   theme: Accessor<EditorTheme>;
-  onSelectTheme: (themeId: string) => void;
-  onSelectFont: (family: string) => void;
-  onRefresh: () => void;
-  onToggleTheme: () => void;
 }): JSX.Element {
   const contextInfo = computed(() =>
     getContextAwareInfo(props.activeFile(), props.line(), props.col())
@@ -596,46 +501,24 @@ function StatusBar(props: {
   const statusInk = computed(
     () => props.theme().ui.statusBarForeground ?? props.theme().ui.mutedForeground
   );
-  const fontBadge = computed(() =>
-    shortFontLabel(props.fontFamily(), props.fontSize())
-  );
-  const themeOptions = EDITOR_THEMES.map((t) => ({
-    value: t.id,
-    title: t.name,
-  }));
-  const fontOptions = computed(() => {
-    const current = props.fontFamily();
-    const families = FONT_FAMILY_PRESETS.includes(current)
-      ? FONT_FAMILY_PRESETS
-      : [current, ...FONT_FAMILY_PRESETS];
-    return families.map((f) => ({ value: f, title: f }));
-  });
 
   return (
     <View
+      testID="status-bar"
       class="h-6 px-3 select-none flex-row items-center justify-between shrink-0"
       style={{
         backgroundColor: props.theme().ui.statusBar ?? props.theme().ui.sidebar,
       }}
     >
       <View class="flex-row items-center gap-2">
-        <If when={!!props.root()}>
-          <If when={!!props.branch()}>
-            <View class="flex-row items-center gap-1">
-              <Icon name="branch" size={12} tint={statusInk} />
-              <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
-                {props.branch()}
-                {props.changedCount() > 0 ? "*" : ""}
-              </Text>
-            </View>
-          </If>
-          <Button
-            testID="sidebar-refresh"
-            onPress={props.onRefresh}
-            class="h-4 w-4 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
-          >
-            <Icon name="refresh" size={11} tint={statusInk} />
-          </Button>
+        <If when={!!props.root() && !!props.branch()}>
+          <View class="flex-row items-center gap-1">
+            <Icon name="branch" size={12} tint={statusInk} />
+            <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
+              {props.branch()}
+              {props.changedCount() > 0 ? "*" : ""}
+            </Text>
+          </View>
         </If>
       </View>
 
@@ -645,85 +528,6 @@ function StatusBar(props: {
             {contextInfo()}
           </Text>
         </If>
-        <Select
-          testID="statusbar-theme-select"
-          value={props.theme().id}
-          items={themeOptions}
-          placement="top"
-          align="end"
-          offset={6}
-          onChange={({ value }) => {
-            if (value) props.onSelectTheme(value);
-          }}
-          popupClass="w-56 rounded-lg shadow-2xl p-1"
-          popupStyle={{
-            backgroundColor: props.theme().ui.card,
-          }}
-          itemClass="rounded cursor-pointer"
-          renderItem={(item) => (
-            <ThemeSelectOptionRow
-              optionId={item.value}
-              selected={item.value === props.theme().id}
-              activeTheme={props.theme}
-            />
-          )}
-          trigger={
-            <View
-              testID="statusbar-theme-trigger"
-              class="h-4 px-1.5 rounded flex-row items-center gap-1.5 hover:bg-white/10"
-            >
-              <View
-                class="w-2 h-2 rounded-full"
-                style={{ backgroundColor: props.theme().ui.accent }}
-              />
-              <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
-                {props.theme().name}
-              </Text>
-            </View>
-          }
-          class="h-4"
-        />
-        <Select
-          testID="statusbar-font-select"
-          value={props.fontFamily()}
-          items={fontOptions()}
-          placement="top"
-          align="end"
-          offset={6}
-          onChange={({ value }) => {
-            if (value) props.onSelectFont(value);
-          }}
-          popupClass="w-64 rounded-lg shadow-2xl p-1"
-          popupStyle={{
-            backgroundColor: props.theme().ui.card,
-          }}
-          itemClass="rounded cursor-pointer"
-          renderItem={(item) => (
-            <FontSelectOptionRow
-              family={item.value}
-              selected={item.value === props.fontFamily()}
-              activeTheme={props.theme}
-            />
-          )}
-          trigger={
-            <View
-              testID="statusbar-font-trigger"
-              class="h-4 px-1.5 rounded flex-row items-center hover:bg-white/10"
-            >
-              <Text class="text-[11px] font-mono" style={{ color: statusInk() }}>
-                {fontBadge()}
-              </Text>
-            </View>
-          }
-          class="h-4"
-        />
-        <Button
-          testID="titlebar-toggle-theme"
-          onPress={props.onToggleTheme}
-          class="h-4 w-4 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
-        >
-          <Icon name="sun" size={12} tint={statusInk} />
-        </Button>
       </View>
     </View>
   );
@@ -1497,7 +1301,7 @@ function setupDesktopChrome(
         submenu: [
           { role: "about" },
           { type: "separator" },
-          { label: "Font Settings...", shortcut: "mod+,", onSelect: () => actions.openFontSettings() },
+          { label: "Preferences...", shortcut: "mod+,", onSelect: () => actions.openFontSettings() },
           { type: "separator" },
           { role: "hide", shortcut: "mod+h" },
           { role: "hideOthers", shortcut: "mod+alt+h" },
@@ -1536,6 +1340,7 @@ function setupDesktopChrome(
         label: "View",
         submenu: [
           { label: "Command Palette...", shortcut: "mod+shift+p", onSelect: () => actions.openCommandPalette() },
+          { label: "Refresh Workspace", shortcut: "mod+r", onSelect: () => actions.refresh() },
           { type: "separator" },
           { label: "Toggle Sidebar", shortcut: "mod+b", onSelect: () => actions.toggleSidebar() },
           { label: "Toggle Terminal", shortcut: "mod+j", onSelect: () => actions.toggleTerminal() },
@@ -1598,6 +1403,7 @@ function bindAppShortcuts(actions: AppActions): () => void {
     "mod+w": () => actions.closeCurrent(),
     "mod+shift+w": () => actions.closeFolder(),
     "mod+o": () => actions.openFolder(),
+    "mod+r": () => actions.refresh(),
     "mod+=": () => actions.adjustFontSize(1),
     "mod+-": () => actions.adjustFontSize(-1),
     "mod+0": () => actions.resetFont(),
@@ -2274,13 +2080,7 @@ function App(): JSX.Element {
         activeFile={activeFile}
         line={cursorLine}
         col={cursorCol}
-        fontFamily={fontFamily}
-        fontSize={fontSize}
         theme={activeTheme}
-        onSelectTheme={selectTheme}
-        onSelectFont={setFontFamily}
-        onRefresh={refresh}
-        onToggleTheme={actions.toggleTheme}
       />
 
       <FontSettingsDialog

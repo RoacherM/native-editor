@@ -197,9 +197,13 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(cleanApp.shows("id:welcome-panel")).toBe(true);
     expect(cleanApp.shows("text:Aed")).toBe(true);
     expect(cleanApp.shows("text:⌘O")).toBe(false);
-    expect(cleanApp.shows("text:Tokyo Night")).toBe(true);
+    expect(cleanApp.spanStyle("text:Aed").color).toBe("#c0caf5ff");
     expect(cleanApp.shows("id:workspace-tree")).toBe(false);
     expect(cleanApp.shows("id:theme-preset-tokyo-night")).toBe(false);
+    expect(cleanApp.shows("id:sidebar-refresh")).toBe(false);
+    expect(cleanApp.shows("id:statusbar-theme-trigger")).toBe(false);
+    expect(cleanApp.shows("id:statusbar-font-trigger")).toBe(false);
+    expect(cleanApp.shows("id:titlebar-toggle-theme")).toBe(false);
     expect(cleanApp.shows("text:main")).toBe(false);
 
     // Shrinking viewport below minimum window dimensions must not crush the poster grid
@@ -336,22 +340,12 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("id:titlebar-toggle-sidebar");
     await app.waitFor("id:workspace-tree");
 
-    // 12. Theme toggle (Dark <-> Light), Statusbar Theme Select popup & Font Family/Size configuration
-    await app.press("id:titlebar-toggle-theme");
-    await app.press("id:titlebar-toggle-theme");
-
-    await app.press("id:statusbar-theme-trigger");
-    await app.waitFor("id:theme-option-tokyo-night");
-    expect(app.shows("id:theme-option-tokyo-night")).toBe(true);
-    await app.press("id:theme-option-tokyo-night");
-    expect(app.shows("text:Tokyo Night")).toBe(true);
-
-    // Status-bar font badge opens a plain font list, not the Preferences dialog
-    await app.press("id:statusbar-font-trigger");
-    await app.waitFor("id:font-option-Menlo");
-    expect(app.shows("id:font-settings-dialog")).toBe(false);
-    await app.press("id:font-option-Menlo");
-    await app.waitFor("text:Menlo · 14px");
+    // 12. Read-only StatusBar (no mystery refresh or accidental theme/font buttons) & Preferences dialog (mod+,)
+    expect(app.shows("id:status-bar")).toBe(true);
+    expect(app.shows("id:sidebar-refresh")).toBe(false);
+    expect(app.shows("id:statusbar-theme-trigger")).toBe(false);
+    expect(app.shows("id:statusbar-font-trigger")).toBe(false);
+    expect(app.shows("id:titlebar-toggle-theme")).toBe(false);
 
     await app.keyboard.press("mod+,");
     await app.waitFor("id:font-settings-dialog");
