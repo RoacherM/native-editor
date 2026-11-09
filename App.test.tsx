@@ -6,7 +6,22 @@ import {
   parseTableData,
   probeImageDimensions,
 } from "./src/classify";
-import { detectMermaidKind, preprocessMermaidCode } from "./src/mermaid";
+import {
+  detectMermaidKind,
+  preprocessMermaidCode,
+  requeueOrphanedJobs,
+} from "./src/mermaid";
+import {
+  classifyExternalFile,
+  decideGuard,
+  deriveEditorSurface,
+  deriveWindowMode,
+  nextActiveAfterClose,
+  planWorkspaceIntent,
+  WINDOW_TRANSITIONS,
+  type WindowEvent,
+  type WindowMode,
+} from "./src/session";
 import { parseGhosttyConfig } from "./src/TerminalPane";
 import manifest from "./nsh.json";
 import {
@@ -188,6 +203,95 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
       patched: false,
     });
     expect(normalizeMachOBuildVersion(new Uint8Array([1, 2, 3]))).toBeNull();
+  });
+});
+
+interface SessionSim {
+  root: string;
+  tabs: string[];
+}
+
+const SIM_STATES: Record<WindowMode, SessionSim> = {
+  home: { root: "", tabs: [] },
+  workspace: { root: "/w/cur", tabs: ["/w/cur/a.ts"] },
+  loose: { root: "", tabs: ["/elsewhere/n.md"] },
+};
+
+function openExternal(s: SessionSim, file: string): SessionSim {
+  const root = classifyExternalFile(s.root, file) === "loose-file" ? "" : s.root;
+  return { root, tabs: [...s.tabs, file] };
+}
+
+function applyWorkspace(s: SessionSim, plan: ReturnType<typeof planWorkspaceIntent>): SessionSim {
+  return plan.action === "reset" ? { root: plan.nextRoot, tabs: [] } : s;
+}
+
+/** Replays one event through the same session.ts rules App.tsx runs. */
+function applySessionEvent(s: SessionSim, event: WindowEvent): SessionSim {
+  switch (event) {
+    case "open-folder":
+      return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "open", root: "/w/other/" }));
+    case "reopen-current-folder":
+      return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "open", root: s.root || "/w/cur" }));
+    case "close-folder":
+      return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "close" }));
+    case "open-workspace-file":
+      return openExternal(s, `${s.root || "/w/cur"}/b.ts`);
+    case "open-loose-file":
+      return openExternal(s, "/elsewhere/loose.md");
+    case "close-last-tab":
+      return { root: s.root, tabs: [] };
+  }
+}
+
+describe("window session state machine (src/session.ts)", () => {
+  test("every WINDOW_TRANSITIONS cell matches the rules App.tsx runs", () => {
+    for (const mode of Object.keys(WINDOW_TRANSITIONS) as WindowMode[]) {
+      const start = SIM_STATES[mode];
+      expect(deriveWindowMode(start.root, start.tabs.length)).toBe(mode);
+      for (const event of Object.keys(WINDOW_TRANSITIONS[mode]) as WindowEvent[]) {
+        const end = applySessionEvent(start, event);
+        expect(`${mode} --${event}--> ${deriveWindowMode(end.root, end.tabs.length)}`).toBe(
+          `${mode} --${event}--> ${WINDOW_TRANSITIONS[mode][event]}`
+        );
+      }
+    }
+    // Reopening the open folder keeps its tabs instead of resetting them.
+    expect(applySessionEvent(SIM_STATES.workspace, "reopen-current-folder").tabs).toEqual(["/w/cur/a.ts"]);
+  });
+
+  test("workspace intents, editor surface, guard and tab-close rules", () => {
+    expect(planWorkspaceIntent("/w/cur", 2, { kind: "open", root: "/w/cur/" })).toEqual({ action: "refresh" });
+    expect(planWorkspaceIntent("/w/cur", 2, { kind: "open", root: "/" })).toEqual({ action: "ignore" });
+    expect(planWorkspaceIntent("", 0, { kind: "close" })).toEqual({ action: "ignore" });
+    expect(planWorkspaceIntent("", 1, { kind: "close" })).toEqual({ action: "reset", nextRoot: "" });
+    expect(classifyExternalFile("/w/cur", "/w/cur-other/x.ts")).toBe("loose-file");
+    expect(classifyExternalFile("/w/cur/", "/w/cur/src/x.ts")).toBe("workspace-file");
+    // External clicks are always tree-less windows (I-007), even inside the folder.
+    expect(classifyExternalFile("/w/cur", "/w/cur/src/x.ts", "click")).toBe("loose-file");
+
+    expect(deriveEditorSurface("", false)).toBe("welcome");
+    expect(deriveEditorSurface("/w", false)).toBe("workspace-empty");
+    expect(deriveEditorSurface("", true)).toBe("file");
+
+    const pending = { dirtyPaths: ["/w/a.ts"], onProceed: () => {} };
+    expect(decideGuard(null, [])).toBe("run");
+    expect(decideGuard(null, ["/w/a.ts"])).toBe("confirm");
+    expect(decideGuard(pending, [])).toBe("busy");
+
+    expect(nextActiveAfterClose(["a", "b", "c"], "b", "b")).toBe("c");
+    expect(nextActiveAfterClose(["a", "b", "c"], "c", "c")).toBe("b");
+    expect(nextActiveAfterClose(["a", "b"], "a", "b")).toBe("b");
+    expect(nextActiveAfterClose(["a", "b"], "b", "b")).toBe("a");
+    expect(nextActiveAfterClose(["a"], "a", "a")).toBeNull();
+  });
+
+  test("Mermaid jobs orphaned by an unmounted WebView go back to the front of the queue", () => {
+    const active = new Map([[1, "job-1"], [2, "job-2"]]);
+    const pending = ["job-3"];
+    requeueOrphanedJobs(active, pending);
+    expect(pending).toEqual(["job-1", "job-2", "job-3"]);
+    expect(active.size).toBe(0);
   });
 });
 
@@ -512,5 +616,75 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await looseApp.press("id:tab-close-README.md");
     await looseApp.waitFor("id:welcome-panel");
     expect(looseApp.shows("id:welcome-panel")).toBe(true);
+  });
+  test("dropping a file from the open folder keeps the file tree (workspace-file, not loose)", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("id:workspace-tree");
+    await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}/main.ts`]);
+    await app.waitFor("id:tab-select-main.ts");
+    expect(app.shows("id:workspace-tree")).toBe(true);
+  });
+
+  test("a second guarded action cannot replace an open unsaved-changes prompt", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    await app.type("id:preview-editor", "// unsaved\n");
+    await app.press("id:tab-close-main.ts");
+    await app.waitFor("id:unsaved-changes-dialog");
+    await app.keyboard.press("mod+shift+w");
+    await app.press("id:unsaved-discard-btn");
+    expect(app.shows("id:tab-select-main.ts")).toBe(false);
+    expect(app.shows("id:workspace-tree")).toBe(true);
+    expect(app.shows("id:welcome-panel")).toBe(false);
+  });
+
+  test("reopening a file shows changes made on disk after Aed first read it", async () => {
+    // The test sandbox cannot write files itself; the app's own PTY does, in a /tmp scratch folder.
+    const scratch = "/tmp/aed-e2e-stale-cache";
+    const runInTerminal = async (app: Awaited<ReturnType<typeof open>>, cmd: string, marker: string) => {
+      if (!app.shows("id:terminal-pane")) {
+        await app.press("id:titlebar-toggle-terminal");
+        await app.waitFor("id:terminal-pane");
+      }
+      await app.type("id:terminal-input", `${cmd} && echo ${marker}`);
+      await app.keyboard.press("enter");
+      await app.waitUntil(
+        () => app.texts().some((t) => t.includes(marker) && !t.includes("echo")),
+        { timeout: 8000 }
+      );
+    };
+    const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await runInTerminal(
+      setup,
+      `rm -rf ${scratch} && mkdir -p ${scratch} && printf 'STALE_V1\\n' > ${scratch}/note.txt`,
+      "SETUP_DONE"
+    );
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: scratch } },
+    });
+    await app.waitFor("text:note.txt");
+    await app.press("text:note.txt");
+    await app.waitUntil(() => app.texts().some((t) => t === "STALE_V1"), { timeout: 5000 });
+    await app.press("id:tab-close-note.txt");
+    await runInTerminal(app, `printf 'FRESH_V2\\n' > ${scratch}/note.txt`, "WRITE_DONE");
+    await app.press("text:note.txt");
+    await app.waitUntil(() => app.texts().some((t) => t === "FRESH_V2"), { timeout: 5000 });
+    expect(app.texts().includes("STALE_V1")).toBe(false);
+    await runInTerminal(app, `rm -rf ${scratch}`, "CLEAN_DONE");
   });
 });

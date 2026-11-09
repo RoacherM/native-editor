@@ -413,6 +413,17 @@ ${scriptTag}
 </html>`;
 }
 
+/**
+ * Worker lifecycle: idle → loading (bundle read) → mounted → ready → idle on
+ * unmount. Jobs sent to a WebView that unmounts get no reply; put them back
+ * at the front of the queue so the next WebView renders them, instead of
+ * leaving their promises (and `inflightRequests` dedupe) stuck forever.
+ */
+export function requeueOrphanedJobs<T>(active: Map<number, T>, pending: T[]): void {
+  pending.unshift(...active.values());
+  active.clear();
+}
+
 function flushPendingJobs(): void {
   if (!workerReady || !activeWebViewRef) return;
   while (pendingQueue.length > 0) {
@@ -534,7 +545,10 @@ export function MermaidRendererHost(): JSX.Element {
         <WebView
           ref={(r) => {
             activeWebViewRef = r;
-            if (!r) workerReady = false;
+            if (!r) {
+              workerReady = false;
+              requeueOrphanedJobs(activeJobs, pendingQueue);
+            }
           }}
           html={workerHtmlSignal()}
           onMessage={({ data }) => handleWorkerMessage(data)}

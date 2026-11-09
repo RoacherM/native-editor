@@ -445,6 +445,50 @@ async function readFileBytesAndSize(
 const MAX_PRELOAD_FILES = 12;
 const MAX_PRELOAD_BYTES = 262_144;
 const preloadedFiles = new Map<string, LoadedFile>();
+/**
+ * Disk stamp (`mtimeMs:size`) of the bytes each loaded file came from. A
+ * cached or open copy is fresh while the stamp on disk still matches; an edit
+ * outside Aed (terminal, git, formatter) changes it. DESIGN.md「状态机清单」.
+ */
+const diskStamps = new Map<string, string>();
+
+async function readDiskStamp(filePath: string): Promise<string | null> {
+  try {
+    const stat = await fs.stat(filePath);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
+async function rememberDiskStamp(filePath: string): Promise<void> {
+  const stamp = await readDiskStamp(filePath);
+  if (stamp) diskStamps.set(filePath, stamp);
+  else diskStamps.delete(filePath);
+}
+
+/**
+ * Reload `file` when it changed on disk since Aed read or saved it. Returns
+ * the fresh copy (same mode), or null when it is unchanged, dirty (the
+ * user's edits win; no silent overwrite), or unreadable.
+ */
+export async function reloadIfChangedOnDisk(
+  file: LoadedFile,
+  root: string,
+): Promise<LoadedFile | null> {
+  if (file.dirty) return null;
+  const known = diskStamps.get(file.path);
+  if (!known) return null;
+  const current = await readDiskStamp(file.path);
+  if (!current || current === known) return null;
+  preloadedFiles.delete(file.path);
+  diskStamps.delete(file.path);
+  try {
+    return await loadFile(file.path, root, file.mode, file.gitStatus);
+  } catch {
+    return null;
+  }
+}
 
 /** Return a preloaded clean LoadedFile synchronously if available in the warm cache. */
 export function getPreloadedFile(
@@ -471,6 +515,7 @@ export function getPreloadedFile(
 export async function warmWorkspaceFiles(snapshot: WorkspaceSnapshot): Promise<void> {
   if (!snapshot.root) {
     preloadedFiles.clear();
+    diskStamps.clear();
     return;
   }
   const candidates = snapshot.flatFiles
@@ -507,17 +552,17 @@ async function resolveInitialDiffPatch(
   return "";
 }
 
-/** Load a file for preview/editing (reads bytes, classifies, parses table/hex/diff/blob as needed). */
+/**
+ * Read a file from disk for preview/editing (classifies, parses table/hex/diff/blob as needed) and
+ * put it in the warm cache. The cache is read only through `getPreloadedFile` (App's 0ms path),
+ * which `reloadIfChangedOnDisk` then revalidates against the disk stamp.
+ */
 export async function loadFile(
   filePath: string,
   root: string,
   preferredMode?: PreviewMode,
   gitStatus?: GitStatusCode,
 ): Promise<LoadedFile> {
-  const preloaded = getPreloadedFile(filePath, root, gitStatus, preferredMode === "diff");
-  if (preloaded) {
-    return preferredMode ? { ...preloaded, mode: preferredMode } : preloaded;
-  }
   const { bytes, size } = await readFileBytesAndSize(filePath);
   const classification = classifyFile(filePath, bytes.slice(0, 4096));
   const mode = preferredMode ?? classification.defaultMode;
@@ -555,6 +600,7 @@ export async function loadFile(
     hexDump,
     diffPatch,
   };
+  await rememberDiskStamp(filePath);
   if (size <= MAX_PRELOAD_BYTES && preloadedFiles.size < 32) {
     preloadedFiles.set(filePath, loaded);
   }
@@ -578,6 +624,7 @@ export async function saveFileText(
     tableData,
     relPath: relativePath(root, file.path),
   };
+  await rememberDiskStamp(file.path);
   preloadedFiles.set(file.path, updated);
   return updated;
 }

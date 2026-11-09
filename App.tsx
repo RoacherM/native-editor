@@ -35,6 +35,15 @@ import {
 import type { PreviewMode } from "./src/classify";
 import { FileBadge, Icon } from "./src/icons";
 import { formatMediaMeta, PreviewPane } from "./src/PreviewPane";
+import {
+  canToggleSidebar,
+  classifyExternalFile,
+  decideGuard,
+  deriveEditorSurface,
+  nextActiveAfterClose,
+  planWorkspaceIntent,
+  type UnsavedGuard as PendingUnsavedGuard,
+} from "./src/session";
 import { CommandPalette, Sidebar } from "./src/Sidebar";
 import {
   discoverTerminalEnvironment,
@@ -58,6 +67,7 @@ import {
   lookupGitStatus,
   normalizeExternalFilePath,
   pickWorkspaceFolder,
+  reloadIfChangedOnDisk,
   saveFileText,
   scanWorkspace,
   shortenHomePath,
@@ -1049,11 +1059,6 @@ function EmptyEditorShortcutRow(props: {
   );
 }
 
-interface PendingUnsavedGuard {
-  dirtyPaths: string[];
-  onProceed: () => void;
-}
-
 function UnsavedChangesDialog(props: {
   pending: Signal<PendingUnsavedGuard | null>;
   theme: Accessor<EditorTheme>;
@@ -1434,6 +1439,21 @@ async function updateFileModeInMap(
   loadedFiles.set({ ...loadedFiles(), [filePath]: updated });
 }
 
+/** A clean open tab whose file changed on disk picks up the new bytes; a dirty tab keeps the user's edits. */
+async function revalidateTabInMap(
+  loadedFiles: Signal<Record<string, LoadedFile>>,
+  openTabs: Accessor<string[]>,
+  filePath: string,
+  root: string
+): Promise<void> {
+  const current = loadedFiles()[filePath];
+  if (!current) return;
+  const fresh = await reloadIfChangedOnDisk(current, root);
+  const latest = loadedFiles()[filePath];
+  if (!fresh || latest?.dirty !== false || !openTabs().includes(filePath)) return;
+  loadedFiles.set({ ...loadedFiles(), [filePath]: fresh });
+}
+
 async function saveFileInMap(
   loadedFiles: Signal<Record<string, LoadedFile>>,
   filePath: string,
@@ -1471,7 +1491,7 @@ function createAppActions(opts: {
   };
   return {
     toggleSidebar: () => {
-      if (opts.workspaceRoot().length > 0) {
+      if (canToggleSidebar(opts.workspaceRoot())) {
         opts.sidebarOpen.update((v) => !v);
       }
     },
@@ -1699,11 +1719,9 @@ function App(): JSX.Element {
     openTabs().filter((p) => !!loadedFiles()[p]?.dirty);
 
   const withUnsavedGuard = (dirtyPaths: string[], onProceed: () => void) => {
-    if (dirtyPaths.length === 0) {
-      onProceed();
-      return;
-    }
-    pendingUnsaved.set({ dirtyPaths, onProceed });
+    const decision = decideGuard(pendingUnsaved(), dirtyPaths);
+    if (decision === "run") onProceed();
+    else if (decision === "confirm") pendingUnsaved.set({ dirtyPaths, onProceed });
   };
 
   const performSwitchToWorkspace = async (folderPath: string) => {
@@ -1714,14 +1732,14 @@ function App(): JSX.Element {
   };
 
   const switchToWorkspace = (folderPath: string) => {
-    const next = folderPath.replace(/\/+$/, "");
-    if (!next) return;
-    if (next === workspaceRoot().replace(/\/+$/, "")) {
-      void refresh();
-      return;
-    }
+    const plan = planWorkspaceIntent(workspaceRoot(), openTabs().length, {
+      kind: "open",
+      root: folderPath,
+    });
+    if (plan.action === "refresh") void refresh();
+    if (plan.action !== "reset") return;
     withUnsavedGuard(getDirtyTabPaths(), () => {
-      void performSwitchToWorkspace(next);
+      void performSwitchToWorkspace(plan.nextRoot);
     });
   };
 
@@ -1731,7 +1749,8 @@ function App(): JSX.Element {
   };
 
   const closeWorkspace = () => {
-    if (!workspaceRoot() && openTabs().length === 0) return;
+    const plan = planWorkspaceIntent(workspaceRoot(), openTabs().length, { kind: "close" });
+    if (plan.action !== "reset") return;
     withUnsavedGuard(getDirtyTabPaths(), () => {
       void performCloseWorkspace();
     });
@@ -1753,7 +1772,11 @@ function App(): JSX.Element {
     expandedIds.set([]);
   };
 
-  const openExternalFile = async (rawPath: string) => {
+  /**
+   * `click`: Finder / Herdr / `AED_OPEN_FILE` — always a tree-less window (I-007).
+   * `drop`: dragged onto this window — a file from the open folder keeps the tree.
+   */
+  const openExternalFile = async (rawPath: string, origin: "click" | "drop" = "click") => {
     const filePath = normalizeExternalFilePath(rawPath);
     if (!filePath) return;
     try {
@@ -1762,7 +1785,9 @@ function App(): JSX.Element {
         if (desktopAvailable) Window.orderFront();
         return;
       }
-      clearWorkspaceTree();
+      if (classifyExternalFile(workspaceRoot(), filePath, origin) === "loose-file") {
+        clearWorkspaceTree();
+      }
       await openFileInTab(filePath);
       if (desktopAvailable) Window.orderFront();
     } catch {
@@ -1792,6 +1817,7 @@ function App(): JSX.Element {
     );
     if (syncHit) {
       activateLoadedTab(filePath, syncHit);
+      void revalidateTabInMap(loadedFiles, openTabs, filePath, workspaceRoot());
       return;
     }
     const file = await fetchOrReuseLoadedFile(
@@ -1874,17 +1900,11 @@ function App(): JSX.Element {
   });
 
   const performCloseTab = (filePath: string) => {
-    const nextTabs = openTabs().filter((p) => p !== filePath);
-    openTabs.set(nextTabs);
+    const nextActive = nextActiveAfterClose(openTabs(), filePath, activeFilePath());
+    openTabs.set(openTabs().filter((p) => p !== filePath));
     const nextLoaded = { ...loadedFiles() };
     delete nextLoaded[filePath];
     loadedFiles.set(nextLoaded);
-    const nextActive =
-      activeFilePath() === filePath
-        ? nextTabs.length > 0
-          ? nextTabs[nextTabs.length - 1]
-          : null
-        : activeFilePath();
     activeFilePath.set(nextActive);
     if (selectedPath() === filePath) {
       selectedPath.set(nextActive);
@@ -1960,6 +1980,10 @@ function App(): JSX.Element {
     return p ? loadedFiles()[p] : undefined;
   });
 
+  const editorSurface = computed(() =>
+    deriveEditorSurface(workspaceRoot(), activeFile() !== undefined)
+  );
+
   const changedCount = computed(() => Object.keys(snapshot().gitStatusMap).length);
   const treeItems = computed(() =>
     filterMode() === "all" ? snapshot().treeItemsAll : snapshot().treeItemsChanged
@@ -1988,7 +2012,7 @@ function App(): JSX.Element {
       }
       onFileDrop={({ uris }) => {
         const p = decodeDroppedUri(uris[0]);
-        if (p) openExternalFile(p);
+        if (p) void openExternalFile(p, "drop");
       }}
     >
       <WindowTitleBar
@@ -2074,7 +2098,7 @@ function App(): JSX.Element {
                   class="flex-1 min-h-0 overflow-hidden"
                   style={{ backgroundColor: activeTheme().ui.background }}
                 >
-                  <If when={activeFile() !== undefined}>
+                  <If when={editorSurface() === "file"}>
                     <PreviewPane
                       file={activeFile}
                       workspaceRoot={workspaceRoot}
@@ -2091,14 +2115,14 @@ function App(): JSX.Element {
                       }}
                     />
                   </If>
-                  <If when={activeFile() === undefined && workspaceRoot().length === 0}>
+                  <If when={editorSurface() === "welcome"}>
                     <WelcomePanel
                       recentWorkspaces={recentWorkspaces}
                       theme={activeTheme}
                       onSelectRecentWorkspace={switchToWorkspace}
                     />
                   </If>
-                  <If when={activeFile() === undefined && workspaceRoot().length > 0}>
+                  <If when={editorSurface() === "workspace-empty"}>
                     <EmptyEditorPanel
                       theme={activeTheme}
                       onQuickOpen={actions.openQuickOpen}
