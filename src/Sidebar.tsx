@@ -32,8 +32,6 @@ export interface SidebarProps {
   gitStatusMap: Accessor<Record<string, GitStatusCode>>;
   theme?: Accessor<EditorTheme>;
   onSelectFile: (filePath: string, openInDiff?: boolean) => void;
-  onOpenFolder: () => void;
-  onCloseFolder: () => void;
 }
 
 export interface CommandPaletteProps {
@@ -207,29 +205,6 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             />
           </Button>
 
-          <Button
-            testID="sidebar-open-folder"
-            onPress={props.onOpenFolder}
-            class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
-          >
-            <Icon
-              name="folder-open"
-              size={14}
-              tint={() => theme().ui.mutedForeground}
-            />
-          </Button>
-
-          <Button
-            testID="sidebar-close-folder"
-            onPress={props.onCloseFolder}
-            class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
-          >
-            <Icon
-              name="close"
-              size={12}
-              tint={() => theme().ui.mutedForeground}
-            />
-          </Button>
         </View>
       </View>
 

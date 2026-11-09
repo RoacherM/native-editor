@@ -2187,8 +2187,6 @@ function App(): JSX.Element {
               gitStatusMap={() => snapshot().gitStatusMap}
               theme={activeTheme}
               onSelectFile={openFileInTab}
-              onOpenFolder={handleOpenFolder}
-              onCloseFolder={closeWorkspace}
             />
           </ResizablePanel>
 

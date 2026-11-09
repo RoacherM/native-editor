@@ -711,7 +711,9 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
 
     await app.waitFor("id:sidebar-workspace-title");
     expect(app.shows("id:sidebar-workspace-title")).toBe(true);
-    expect(app.shows("id:sidebar-close-folder")).toBe(true);
+    // The tree header holds only the folder name and the All / Changed filter.
+    expect(app.shows("id:sidebar-open-folder")).toBe(false);
+    expect(app.shows("id:sidebar-close-folder")).toBe(false);
     expect(app.shows("id:empty-editor-close-folder")).toBe(true);
 
     // Dirty file protection when closing a modified tab
@@ -743,7 +745,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(app.shows("id:tab-select-main.ts")).toBe(true);
 
     // Close Folder returns to WelcomePanel poster and hides file tree
-    await app.press("id:sidebar-close-folder");
+    await app.keyboard.press("mod+shift+w");
     await app.waitFor("id:welcome-panel");
     expect(app.shows("id:welcome-panel")).toBe(true);
     expect(app.shows("id:workspace-tree")).toBe(false);
