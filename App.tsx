@@ -13,6 +13,7 @@ import {
   signal,
   Storage,
   Text,
+  untracked,
   View,
   type Accessor,
   type JSX,
@@ -43,6 +44,7 @@ import {
   deriveEditorSurface,
   nextActiveAfterClose,
   planWorkspaceIntent,
+  serialize,
   type UnsavedGuard as PendingUnsavedGuard,
 } from "./src/session";
 import { CommandPalette, Sidebar } from "./src/Sidebar";
@@ -68,8 +70,8 @@ import {
   lookupGitStatus,
   normalizeExternalFilePath,
   pickWorkspaceFolder,
-  acceptDiskVersion,
   hasChangedOnDisk,
+  readDiskStamp,
   reloadFromDisk,
   reloadIfChangedOnDisk,
   saveFileText,
@@ -1150,16 +1152,15 @@ function UnsavedChangesDialog(props: {
   );
 }
 
-/** Shown above the editor while the active tab has unsaved edits and also changed on disk. */
+/** Shown above the editor while the active tab has unsaved edits and the disk has a newer version. */
 function DiskConflictBanner(props: {
   file: Accessor<LoadedFile | undefined>;
-  conflictPath: Accessor<string | null>;
   theme: Accessor<EditorTheme>;
   onResolve: (choice: "reload" | "keep") => void;
 }): JSX.Element {
   const visible = computed(() => {
     const file = props.file();
-    return !!file && file.dirty && props.conflictPath() === file.path;
+    return !!file && file.dirty && file.diskChanged;
   });
   return (
     <If when={visible()}>
@@ -1516,81 +1517,59 @@ const DISK_CHECK_MS = 1500;
 
 /**
  * Compare an open tab with the disk. A clean tab takes the new bytes; a dirty
- * tab keeps the user's edits and is reported as a conflict for the user to
- * resolve. Returns whether the tab is in conflict.
+ * tab keeps the user's edits and is marked `diskChanged`, a conflict the user
+ * resolves (DiskConflictBanner).
  */
 async function checkTabAgainstDisk(
   loadedFiles: Signal<Record<string, LoadedFile>>,
   openTabs: Accessor<string[]>,
   filePath: string,
   root: string
-): Promise<boolean> {
+): Promise<void> {
   const file = loadedFiles()[filePath];
-  if (!file) return false;
-  if (!file.dirty) {
-    await revalidateTabInMap(loadedFiles, openTabs, filePath, root);
-    return false;
-  }
-  return hasChangedOnDisk(file);
+  if (!file) return;
+  if (!file.dirty) return revalidateTabInMap(loadedFiles, openTabs, filePath, root);
+  if (file.diskChanged || !(await hasChangedOnDisk(file))) return;
+  const latest = loadedFiles()[filePath];
+  // Only the copy that was checked: not a newer read of the file.
+  if (!latest?.dirty || latest.diskStamp !== file.diskStamp) return;
+  loadedFiles.set({ ...loadedFiles(), [filePath]: { ...latest, diskChanged: true } });
 }
 
-/**
- * Compare the active tab with the disk every DISK_CHECK_MS and keep
- * `conflictPath` current. Returns the function that stops the watch.
- */
-function watchActiveTabOnDisk(opts: {
+/** The disk check of the active tab; it never overlaps itself (`serialize`). */
+function createActiveTabDiskCheck(opts: {
   loadedFiles: Signal<Record<string, LoadedFile>>;
   openTabs: Accessor<string[]>;
   activeFilePath: Accessor<string | null>;
   workspaceRoot: Accessor<string>;
-  conflictPath: Signal<string | null>;
-}): () => void {
-  let checking = false;
-  const tick = async () => {
+}): () => Promise<void> {
+  return serialize(async () => {
     const filePath = opts.activeFilePath();
-    if (checking || !filePath) return;
-    checking = true;
-    try {
-      const conflict = await checkTabAgainstDisk(
-        opts.loadedFiles,
-        opts.openTabs,
-        filePath,
-        opts.workspaceRoot()
-      );
-      if (conflict) opts.conflictPath.set(filePath);
-      else if (opts.conflictPath() === filePath) opts.conflictPath.set(null);
-    } finally {
-      checking = false;
-    }
-  };
-  const timer = setInterval(() => void tick(), DISK_CHECK_MS);
-  return () => clearInterval(timer);
+    if (!filePath) return;
+    await checkTabAgainstDisk(opts.loadedFiles, opts.openTabs, filePath, opts.workspaceRoot());
+  });
 }
 
 /**
  * The user's answer to a disk conflict. `reload` drops the edits and shows the
- * disk version; `keep` keeps the edits and takes the disk version as known,
- * so the next save overwrites it.
+ * disk version; `keep` keeps the edits and takes the disk version as this
+ * copy's, so the next save overwrites it and a later disk change asks again.
  */
 async function resolveDiskConflict(
   loadedFiles: Signal<Record<string, LoadedFile>>,
-  openTabs: Accessor<string[]>,
-  conflictPath: Signal<string | null>,
+  filePath: string | null,
   choice: "reload" | "keep",
   root: string
 ): Promise<void> {
-  const filePath = conflictPath();
   const file = filePath ? loadedFiles()[filePath] : undefined;
-  if (!file) return;
-  if (choice === "keep") {
-    await acceptDiskVersion(file.path);
-  } else {
-    const fresh = await reloadFromDisk(file, root);
-    if (fresh && openTabs().includes(file.path)) {
-      loadedFiles.set({ ...loadedFiles(), [file.path]: fresh });
-    }
-  }
-  conflictPath.set(null);
+  if (!filePath || !file) return;
+  const next =
+    choice === "keep"
+      ? { diskStamp: (await readDiskStamp(filePath)) ?? file.diskStamp }
+      : await reloadFromDisk(file, root);
+  const latest = loadedFiles()[filePath];
+  if (!next || !latest) return;
+  loadedFiles.set({ ...loadedFiles(), [filePath]: { ...latest, ...next, diskChanged: false } });
 }
 
 async function saveFileInMap(
@@ -1804,8 +1783,6 @@ function App(): JSX.Element {
   ]);
   const fontDialogOpen = signal<boolean>(false);
   const pendingUnsaved = signal<PendingUnsavedGuard | null>(null);
-  /** The tab whose unsaved edits clash with a newer version on disk. */
-  const diskConflictPath = signal<string | null>(null);
 
   const setFontFamily = (next: string) => {
     fontFamily.set(next);
@@ -1956,7 +1933,6 @@ function App(): JSX.Element {
     );
     if (syncHit) {
       activateLoadedTab(filePath, syncHit);
-      void revalidateTabInMap(loadedFiles, openTabs, filePath, workspaceRoot());
       return;
     }
     const file = await fetchOrReuseLoadedFile(
@@ -2122,17 +2098,21 @@ function App(): JSX.Element {
   const editorSurface = computed(() =>
     deriveEditorSurface(workspaceRoot(), activeFile() !== undefined)
   );
-  // The active tab follows the disk while it stays open (terminal, git, formatter edits).
+  // The active tab follows the disk while it stays open (terminal, git, formatter edits),
+  // and is checked at once when it becomes active, before the user reads or types into it.
+  const checkActiveTabOnDisk = createActiveTabDiskCheck({
+    loadedFiles,
+    openTabs,
+    activeFilePath,
+    workspaceRoot,
+  });
   effect(() => {
-    cleanup(
-      watchActiveTabOnDisk({
-        loadedFiles,
-        openTabs,
-        activeFilePath,
-        workspaceRoot,
-        conflictPath: diskConflictPath,
-      })
-    );
+    const timer = setInterval(() => void checkActiveTabOnDisk(), DISK_CHECK_MS);
+    cleanup(() => clearInterval(timer));
+  });
+  effect(() => {
+    void activeFilePath();
+    untracked(() => void checkActiveTabOnDisk());
   });
 
   const changedCount = computed(() => Object.keys(snapshot().gitStatusMap).length);
@@ -2251,10 +2231,9 @@ function App(): JSX.Element {
                 >
                   <DiskConflictBanner
                     file={activeFile}
-                    conflictPath={diskConflictPath}
                     theme={activeTheme}
                     onResolve={(choice) =>
-                      void resolveDiskConflict(loadedFiles, openTabs, diskConflictPath, choice, workspaceRoot())
+                      void resolveDiskConflict(loadedFiles, activeFilePath(), choice, workspaceRoot())
                     }
                   />
                   <If when={editorSurface() === "file"}>
@@ -2305,6 +2284,7 @@ function App(): JSX.Element {
               >
                 <TerminalPane
                   cwd={workspaceRoot}
+                  visible={terminalOpen}
                   fontFamily={fontFamily}
                   fontSize={fontSize}
                   shellPath={defaultShell}

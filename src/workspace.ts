@@ -59,6 +59,14 @@ export interface LoadedFile {
   tableData: TableData | null;
   hexDump: string;
   diffPatch: string;
+  /**
+   * `mtimeMs:size` of the bytes this copy came from (null when unknown). Each
+   * copy carries its own, so a copy kept over a newer read still knows it is
+   * behind the disk. DESIGN.md「状态机清单」#3.
+   */
+  diskStamp: string | null;
+  /** The disk has a newer version than this copy's unsaved edits: a conflict the user resolves. */
+  diskChanged: boolean;
 }
 
 /** Directories and files the scanner never descends into or lists. */
@@ -445,14 +453,8 @@ async function readFileBytesAndSize(
 const MAX_PRELOAD_FILES = 12;
 const MAX_PRELOAD_BYTES = 262_144;
 const preloadedFiles = new Map<string, LoadedFile>();
-/**
- * Disk stamp (`mtimeMs:size`) of the bytes each loaded file came from. A
- * cached or open copy is fresh while the stamp on disk still matches; an edit
- * outside Aed (terminal, git, formatter) changes it. DESIGN.md「状态机清单」.
- */
-const diskStamps = new Map<string, string>();
-
-async function readDiskStamp(filePath: string): Promise<string | null> {
+/** The current `mtimeMs:size` of `filePath` on disk, or null when it cannot be read. */
+export async function readDiskStamp(filePath: string): Promise<string | null> {
   try {
     const stat = await fs.stat(filePath);
     return `${stat.mtimeMs}:${stat.size}`;
@@ -461,21 +463,14 @@ async function readDiskStamp(filePath: string): Promise<string | null> {
   }
 }
 
-async function rememberDiskStamp(filePath: string): Promise<void> {
-  const stamp = await readDiskStamp(filePath);
-  if (stamp) diskStamps.set(filePath, stamp);
-  else diskStamps.delete(filePath);
+/** Whether the disk now holds other bytes than `stamp` describes; false when either is unknown. */
+export function isBehindDisk(stamp: string | null, current: string | null): boolean {
+  return stamp !== null && current !== null && current !== stamp;
 }
 
-/**
- * Whether `file` changed on disk since Aed read or saved it (or since the user
- * chose to keep their edits). False when Aed never read it or it is gone.
- */
+/** Whether `file` is behind the disk: the file changed since this copy was read or saved. */
 export async function hasChangedOnDisk(file: LoadedFile): Promise<boolean> {
-  const known = diskStamps.get(file.path);
-  if (!known) return false;
-  const current = await readDiskStamp(file.path);
-  return current !== null && current !== known;
+  return isBehindDisk(file.diskStamp, await readDiskStamp(file.path));
 }
 
 /** Read `file` from disk again (same mode), dropping its cached copy; null when unreadable. */
@@ -484,17 +479,11 @@ export async function reloadFromDisk(
   root: string,
 ): Promise<LoadedFile | null> {
   preloadedFiles.delete(file.path);
-  diskStamps.delete(file.path);
   try {
     return await loadFile(file.path, root, file.mode, file.gitStatus);
   } catch {
     return null;
   }
-}
-
-/** The user keeps their edits: take the current disk version as the known one, so Aed stops asking. */
-export async function acceptDiskVersion(filePath: string): Promise<void> {
-  await rememberDiskStamp(filePath);
 }
 
 /**
@@ -535,7 +524,6 @@ export function getPreloadedFile(
 export async function warmWorkspaceFiles(snapshot: WorkspaceSnapshot): Promise<void> {
   if (!snapshot.root) {
     preloadedFiles.clear();
-    diskStamps.clear();
     return;
   }
   const candidates = snapshot.flatFiles
@@ -575,7 +563,8 @@ async function resolveInitialDiffPatch(
 /**
  * Read a file from disk for preview/editing (classifies, parses table/hex/diff/blob as needed) and
  * put it in the warm cache. The cache is read only through `getPreloadedFile` (App's 0ms path),
- * which `reloadIfChangedOnDisk` then revalidates against the disk stamp.
+ * which `reloadIfChangedOnDisk` then revalidates against the disk stamp. The stamp is read before
+ * the bytes: a write in between then shows as a change later, never as a change already seen.
  */
 export async function loadFile(
   filePath: string,
@@ -583,6 +572,7 @@ export async function loadFile(
   preferredMode?: PreviewMode,
   gitStatus?: GitStatusCode,
 ): Promise<LoadedFile> {
+  const diskStamp = await readDiskStamp(filePath);
   const { bytes, size } = await readFileBytesAndSize(filePath);
   const classification = classifyFile(filePath, bytes.slice(0, 4096));
   const mode = preferredMode ?? classification.defaultMode;
@@ -619,8 +609,9 @@ export async function loadFile(
     tableData,
     hexDump,
     diffPatch,
+    diskStamp,
+    diskChanged: false,
   };
-  await rememberDiskStamp(filePath);
   if (size <= MAX_PRELOAD_BYTES && preloadedFiles.size < 32) {
     preloadedFiles.set(filePath, loaded);
   }
@@ -643,8 +634,9 @@ export async function saveFileText(
     dirty: false,
     tableData,
     relPath: relativePath(root, file.path),
+    diskStamp: await readDiskStamp(file.path),
+    diskChanged: false,
   };
-  await rememberDiskStamp(file.path);
   preloadedFiles.set(file.path, updated);
   return updated;
 }

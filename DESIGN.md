@@ -65,9 +65,9 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | 文件 | 核心导出 | 职责边界 |
 |---|---|---|
 | `App.tsx` | `App` (mount root) | 顶层信号状态、可拖拽分栏（水平 `Sidebar` + 垂直 `PreviewPane`/`TerminalPane`）、快捷键、Finder 队列轮询、Preferences 弹窗 |
-| `src/session.ts` | `WINDOW_TRANSITIONS`, `deriveWindowMode`, `deriveEditorSurface`, `planWorkspaceIntent`, `externalOpenKeepsTree`, `decideGuard`, `nextActiveAfterClose`, `canToggleSidebar` | 窗口会话状态机的纯规则（无 I/O）：窗口模式、编辑区显示内容、工作区打开/关闭计划、外部文件是否保留文件树、未保存确认框与关 Tab 后的激活项。见「状态机清单」 |
+| `src/session.ts` | `WINDOW_TRANSITIONS`, `deriveWindowMode`, `deriveEditorSurface`, `planWorkspaceIntent`, `externalOpenKeepsTree`, `decideGuard`, `nextActiveAfterClose`, `canToggleSidebar`, `serialize` | 窗口会话状态机的纯规则（无 I/O）：窗口模式、编辑区显示内容、工作区打开/关闭计划、外部文件是否保留文件树、未保存确认框与关 Tab 后的激活项；`serialize` 让一个异步任务的运行不重叠（磁盘比对用它）。见「状态机清单」 |
 | `src/classify.ts` | `classifyFile`, `parseTableData`, `formatHexDump`, `probeImageDimensions`, `normalizeMachOBuildVersion`, `generateQuickLookUrl`, `createBlobUrl` | 纯文件类型判定（扩展名 + 前 4 KB `\0` 探测）、CSV/TSV/JSONL 解析、4 KB 十六进制格式化、PNG/GIF/SVG 尺寸探测、Mach-O `LC_BUILD_VERSION` 最低系统版本归一化、PDF `sips` 缩略图生成 |
-| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `enqueueFinderOpenPath`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `hasChangedOnDisk`, `reloadFromDisk`, `reloadIfChangedOnDisk`, `acceptDiskVersion`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件路径与 `file://`/`:line:col` 归一化、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
+| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `enqueueFinderOpenPath`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `readDiskStamp`, `isBehindDisk`, `hasChangedOnDisk`, `reloadFromDisk`, `reloadIfChangedOnDisk`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件路径与 `file://`/`:line:col` 归一化、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
 | `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
 | `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL |
 | `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
@@ -103,13 +103,13 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 | # | 状态机 | 状态 | 位置 | 现状 |
 |---|---|---|---|---|
 | 2 | 编辑区显示 | `file` / `welcome` / `workspace-empty` | `deriveEditorSurface` | 显式 |
-| 3 | 文件与磁盘一致性 | 新鲜 / 过期 / 冲突 | `src/workspace.ts` `diskStamps`（`mtimeMs:size`）；App `watchActiveTabOnDisk`、`diskConflictPath` | 显式。读盘或保存时记戳。重新打开 Tab 时比对；当前 Tab 每 1.5 秒（`DISK_CHECK_MS`，一次 `stat`）比对一次。干净 Tab 过期则直接重读。脏 Tab 过期则进「冲突」，编辑区上方出现 `id:disk-conflict-banner`：`Reload from Disk` 丢弃编辑并重读；`Keep My Edits` 保留编辑并把磁盘当前版本记为已知（`acceptDiskVersion`），下次保存会覆盖它，之后磁盘再变会再问。后台 Tab 在切到它后 1.5 秒内比对 |
+| 3 | 文件与磁盘一致性 | 新鲜 / 过期 / 冲突 | 每份副本自带：`LoadedFile.diskStamp`（读到的字节的 `mtimeMs:size`）与 `LoadedFile.diskChanged`（冲突）；App `checkTabAgainstDisk`、`createActiveTabDiskCheck` | 显式。戳跟着副本走，不存在按路径共享的表：被保留的脏副本带着自己的旧戳，下一次比对仍判为过期，冲突不会丢。`loadFile` 先读戳再读字节（中途被写只会多判一次过期，不会漏判）；保存时换成新戳。当前 Tab 每 1.5 秒（`DISK_CHECK_MS`，一次 `stat`）比对一次，**切到某个 Tab 时立即比对**；比对从不重叠（`serialize`：进行中再被调用则结束后补跑一次）。干净 Tab 过期则直接重读。脏 Tab 过期则把该副本标为 `diskChanged`，编辑区上方出现 `id:disk-conflict-banner`：`Reload from Disk` 丢弃编辑并重读；`Keep My Edits` 保留编辑并把磁盘当前戳记为该副本的戳，下次保存会覆盖磁盘，之后磁盘再变会再问。冲突随副本结束：保存、关 Tab、切目录、重读都换掉副本，所以横幅不会在下一次比对前「复现」。每个 Tab 各有各的冲突 |
 | 4 | 单个 Tab | 加载中 → 干净 ⇄ 脏 → 关闭；模式 `preview` / `source` / `diff` | `LoadedFile.dirty` / `.mode`，`loadedFiles` | 隐式。关 Tab 时从 `loadedFiles` 删除；从 `All` 再打开时退出 `diff` |
-| 5 | Mermaid 渲染进程 | 未启动 → 读 bundle → WebView 挂载 → `ready` → 卸载 | `src/mermaid.tsx` 模块变量 | 半显式。WebView 卸载时，在途任务回到队首（`requeueOrphanedJobs`）。每个渲染任务 20 秒（`RENDER_TIMEOUT_MS`）无回复即失败（`takeJob` 从所在队列取出），图表块显示错误而不是一直空白；若此时 WebView 从未 `ready`（如 CDN 请求卡住），丢弃该 WebView，下一张图重新加载。注：bundle 缺失且断网时 CDN 脚本加载失败，`load` 仍触发、`ready` 仍到达，渲染会很快报错；超时兜底的是请求卡住与渲染无回复 |
+| 5 | Mermaid 渲染进程 | 未启动 → 读 bundle → WebView 挂载 → `ready` → 卸载；每次启动是新的一代（`workerGeneration`） | `src/mermaid.tsx` 模块变量 | 半显式。WebView 卸载时，在途任务回到队首（`requeueOrphanedJobs`）。每个渲染任务 20 秒（`RENDER_TIMEOUT_MS`）无回复即失败，图表块显示错误而不是一直空白。任务记下它等的是哪一代；超时时只有当它等的正是当前这一代，才丢弃渲染器（`planJobTimeout`）：`ready` 之后卡死的渲染器也会被换掉，而旧任务的超时不会杀掉正在启动的新渲染器。丢弃时这一代作废，晚到的旧 bundle 不会把它复活。注：bundle 缺失且断网时 CDN 脚本加载失败，`load` 仍触发、`ready` 仍到达，渲染会很快报错；超时兜底的是请求卡住与渲染无回复 |
 | 6 | 单个 Mermaid 块 | 渲染中 / 已渲染 / 出错 | `MermaidDiagramBlock` 信号 | 隐式，正常 |
 | 7 | 冷启动 | 两路并行：扫描初始目录；打开初始文件 → 读 Finder 队列 → 读偏好 → 读 Ghostty 后再套一次主题 | `App` `appInitialized` | 隐式，只跑一次 |
 | 8 | Finder 队列 | 轮询中（150ms，最多 16 次）/ 已取到 / 停止；同一时刻只有一次读取 | `drainFinderOpenQueue` `inflightDrain` | 隐式，正常 |
-| 9 | 终端会话 | 启动 → 运行（未用 / 已用）→ 退出；关最后一个 Tab 立即重开 | `src/TerminalPane.tsx` `sessions`、`PtySession.cwd` / `.used` | 半显式。用户还没输入过的 Shell 跟随打开的目录：工作区变化时在新目录重启（`shouldFollowCwd`、`followFolder`）；输入过的 Shell 保留自己的目录与进程。重启（换目录或换 Shell）后旧 Shell 迟到的 `exit` 不再结束新会话（`endSession` 只认当前会话） |
+| 9 | 终端会话 | 未启动 → 启动中（输入排队）→ 运行（未用 / 已用）→ 退出；关最后一个 Tab 立即重开 | `src/TerminalPane.tsx` `sessions`、`PtySession.cwd` / `.used` / `.gate` | 半显式。面板第一次显示时才启动 Shell（启动时不再有隐藏的登录 Shell）；提交命令时若该 Tab 没有 Shell（还没起来，或已 `session ended`）则当场启动一个。启动中输入先排队（`createInputGate`）：Shell 第一次输出后安静 200 毫秒（`SHELL_QUIET_MS`，提示符已画完）或满 3 秒（`SHELL_READY_MAX_MS`，闸门创建时自己计时）才放行。没输入过、且输入框里没有半截命令的 Shell 跟随打开的目录（`shouldFollowCwd`、`followFolder`）；输入过或有半截命令的 Shell 保留目录、输入与进程。换 Shell 只重启正在运行的 Shell，用户在下拉框里选的除外。重启后旧 Shell 迟到的 `exit` 不再结束新会话（`endSession` 只认当前会话） |
 | 10 | 浮层 | 命令面板（关 / `files` / `commands`）、偏好设置、查找栏 | `commandOpen` + `commandMode`、`fontDialogOpen`、`findOpen` | 隐式，正常 |
 | 11 | 文件树视图 | `all` / `changed`，展开项，选中项 | `filterMode`、`expandedIds`、`selectedPath` | 隐式。切换或关闭工作区时一起重置 |
 | 12 | 窗口最小尺寸 | 正常 / 已纠正 | `lastEnforcedKey` | 隐式，正常 |
@@ -130,7 +130,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
    - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
 3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
    - Markdown 中的 ` ```mermaid ` 代码块（通过 `TextView` 的 `extensions` 拦截）与独立 `.mmd` / `.mermaid` 文件共用 `MermaidDiagramBlock`。
-   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/aed-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束（见「状态机清单」#5）。
+   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/aed-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束；只丢弃该任务等的那一代渲染器（见「状态机清单」#5）。
    - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。
 
 ---
@@ -139,7 +139,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 
 - **无需 Rust 原生扩展的真 PTY**：`src/TerminalPane.tsx` 使用 `process.spawn("python3", ["-u", "-c", PY_PTY_SCRIPT, shellPath, termProgram, ghosttyResourcesDir], { cwd, stdin: "pipe" })`，在 Python 标准库中调用 `pty.fork()` 与 `termios.TIOCSWINSZ`（32×140）启动登录 Shell（`execvp(shell, [shell, "-l"])`）。
 - **流式 ANSI 解析与半截转义序列拼接**：`extractProcessableChunk()` 使用 `INCOMPLETE_ANSI_TAIL` 缓存跨 chunk 截断的 ESC/CSI/OSC 序列，剥离非 CSI 控制码，处理 `\r` 行内覆盖、`\b` 退格、`CSI K` 清行与 `CSI 2J`/`3J` 清屏，每个会话保留最近 `1000` 行输出。
-- **工作目录**：新终端 Tab 在当前工作区启动（无工作区时 `~`）。用户还没输入过的 Tab 在工作区变化时于新目录重启；输入过的 Tab 不动（见「状态机清单」#9）。
+- **工作目录与启动**：面板第一次显示时才启动 Shell。新终端 Tab 在当前工作区启动（无工作区时 `~`）。没输入过、输入框里也没有半截命令的 Tab，在工作区变化时于新目录重启；其余 Tab 不动。启动中提交的命令先排队，等提示符画完再写入（见「状态机清单」#9 与踩坑 9）。
 - **Ghostty 与 Shell 环境继承**：启动时 `discoverTerminalEnvironment()` 扫描 `~/.config/ghostty/config*` 与 `~/Library/Application Support/com.mitchellh.ghostty/config*`，自动继承用户的 `font-family`、`font-size`、`theme` 与 `command`，并探测本机已安装的 `zsh`、`fish`、`nu`、`bash`、`sh` 供终端顶栏下拉切换。
 
 ---
@@ -204,6 +204,11 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 8. **在 `effect` 的一次运行里 `process.spawn` 的子进程，会在该 `effect` 下次运行时被结束（`nsh 0.3.0` 实测）**：
    - 实测：`TerminalPane` 曾在 `effect(() => { void props.cwd(); ...restart... })` 里直接重启 Shell；先拖入目录（effect 运行，Shell B 在这次运行里启动），再 `⌘⇧W` 关目录（effect 再次运行，B 已被用过，本不该重启），B 却立即退出并打印 `session ended`。`untracked` 不能解除这种归属。
    - 做法：需要在 `effect` 里启动的长寿命进程，用 `setTimeout(..., 0)` 移出这次运行再 `spawn`（`TerminalPane` `followFolder`）。事件回调（按钮、键盘、`onSubmit`）里 `spawn` 不受影响。`App.test.tsx` › a terminal the user has not typed into moves to the folder that opens 锁住此行为。
+
+   - 同理，`TerminalPane` 里所有在 `effect` 中触发的启动或重启（面板显示时启动、偏好设置改 Shell、跟随目录）都用 `setTimeout(..., 0)` 移出 effect 的运行。
+9. **Shell 启动期间写入的输入会被丢掉（本机 zsh 配置实测，测试负载下）**：
+   - 现象：终端刚打开就提交命令，PTY 回显了这条命令（TTY 已收到），但 zsh 的行编辑器初始化后没有执行它。整套 `nsh test` 下约每 10 次出现 3 次；单独跑不出现，因为负载让 zsh 启动变慢、窗口变大。曾被误判为键盘焦点问题，改用 `app.submit` 后看似变稳，其实没有消除根因。
+   - 做法：`createInputGate` 先排队，等 Shell 第一次输出后安静 200 毫秒（提示符画完）再写入，最晚 3 秒强制放行。`App.test.tsx` › terminal input waits until the shell has drawn its prompt 用注入的假调度器锁住规则；› a command submitted the moment the terminal opens still runs 跑真实 Shell。
 
 ---
 

@@ -153,3 +153,30 @@ export function nextActiveAfterClose(
   const remaining = tabs.filter((p) => p !== closing);
   return remaining.length > 0 ? remaining[remaining.length - 1] : null;
 }
+
+/**
+ * Wrap `task` so its runs never overlap: a call while one runs makes it run
+ * once more afterwards (any number of such calls make one more run). App's
+ * disk check of the active tab runs through this.
+ */
+export function serialize(task: () => Promise<void>): () => Promise<void> {
+  let running = false;
+  let again = false;
+  const run = async (): Promise<void> => {
+    if (running) {
+      again = true;
+      return;
+    }
+    running = true;
+    try {
+      await task();
+    } finally {
+      running = false;
+    }
+    if (again) {
+      again = false;
+      await run();
+    }
+  };
+  return run;
+}

@@ -20,6 +20,8 @@ import { EDITOR_THEMES, type EditorTheme } from "./themes";
 
 export interface TerminalPaneProps {
   cwd: Accessor<string>;
+  /** Whether the panel is shown; shells start the first time it is (none at launch). */
+  visible: Accessor<boolean>;
   fontFamily?: Accessor<string>;
   fontSize?: Accessor<number>;
   shellPath?: Accessor<string>;
@@ -74,18 +76,70 @@ interface PtySession {
   cwd: string;
   /** Whether the user has sent the shell any input. */
   used: boolean;
+  /** Holds input until the shell has drawn its first prompt. */
+  gate: InputGate;
+}
+
+/** Quiet time after the shell's first output that means its prompt is drawn. */
+const SHELL_QUIET_MS = 200;
+/** Input is let through after this long even if the shell stays silent. */
+const SHELL_READY_MAX_MS = 3000;
+
+export interface InputGate {
+  /** Write `text` now if the shell is ready, else queue it. */
+  send(text: string): void;
+  /** The shell printed something. */
+  output(): void;
+  /** Let queued and later input through. */
+  open(): void;
+}
+
+/**
+ * Some shell setups drop input typed while they start (the TTY echoes it, then
+ * the line editor flushes it). The gate queues input until the shell's first
+ * output is followed by SHELL_QUIET_MS of quiet (the prompt is drawn), or
+ * SHELL_READY_MAX_MS passed. `schedule` / `cancel` are injectable for tests.
+ * Opening again is harmless: the queue is already empty.
+ */
+export function createInputGate(
+  write: (text: string) => void,
+  schedule: (fn: () => void, ms: number) => unknown = setTimeout,
+  cancel: (handle: unknown) => void = (h) => clearTimeout(h as ReturnType<typeof setTimeout>)
+): InputGate {
+  let ready = false;
+  let quiet: unknown;
+  const queued: string[] = [];
+  const open = () => {
+    ready = true;
+    cancel(quiet);
+    cancel(fallback);
+    for (const text of queued.splice(0)) write(text);
+  };
+  // A shell that stays silent still gets its input.
+  const fallback = schedule(open, SHELL_READY_MAX_MS);
+  return {
+    send: (text) => (ready ? write(text) : void queued.push(text)),
+    output: () => {
+      if (ready) return;
+      cancel(quiet);
+      quiet = schedule(open, SHELL_QUIET_MS);
+    },
+    open,
+  };
 }
 
 /**
  * A shell the user has not typed into yet follows the open folder: it
- * restarts in `cwd`. A shell the user has used keeps its directory and
- * whatever runs in it. DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
+ * restarts in `cwd`. A shell the user has used, or one with a half-typed
+ * command in its input (`draft`), keeps its directory, input and whatever
+ * runs in it. DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
  */
 export function shouldFollowCwd(
   session: { cwd: string; used: boolean } | undefined,
-  cwd: string
+  cwd: string,
+  draft = ""
 ): boolean {
-  return !!session && !session.used && session.cwd !== cwd;
+  return !!session && !session.used && draft.trim() === "" && session.cwd !== cwd;
 }
 
 /** How many output lines one session keeps. */
@@ -454,6 +508,15 @@ function appendChunk(tab: TermTab, session: PtySession, text: string): void {
   pushLines(tab, complete);
 }
 
+/** Write to a shell's stdin; a shell that already exited (EPIPE) drops it. */
+function writeToChild(child: ChildProcess, text: string): void {
+  try {
+    child.write(text);
+  } catch {
+    // The shell is gone; its exit line says so.
+  }
+}
+
 /**
  * A shell exited. A restarted tab (new folder or shell) already runs a new
  * session; the old shell's late exit must not end it.
@@ -494,11 +557,16 @@ function startPtySession(
       col: 0,
       cwd,
       used: false,
+      gate: createInputGate((text) => writeToChild(child, text)),
     };
     sessions.set(tab.id, session);
     tab.running.set(true);
-    child.on("stdout", (text) => appendChunk(tab, session, text));
-    child.on("stderr", (text) => appendChunk(tab, session, text));
+    const onOutput = (text: string) => {
+      session.gate.output();
+      appendChunk(tab, session, text);
+    };
+    child.on("stdout", onOutput);
+    child.on("stderr", onOutput);
     child.on("exit", () => endSession(tab, sessions, session));
   } catch (error) {
     pushLines(tab, [`[error] ${String(error)}`]);
@@ -539,7 +607,7 @@ function writeCommandToSession(
   const session = tab ? sessions.get(tab.id) : undefined;
   if (!tab || !session) return;
   session.used = true;
-  session.child.write(text.endsWith("\n") ? text : `${text}\n`);
+  session.gate.send(text.endsWith("\n") ? text : `${text}\n`);
   tab.input.set("");
 }
 
@@ -628,11 +696,25 @@ function switchTabShell(
   nextShell: ShellProfile,
   sessions: Map<number, PtySession>,
   cwd: Accessor<string>,
+  primaryApp: Accessor<ExternalTerminalApp | undefined>,
+  startIfIdle: boolean
+): void {
+  const running = sessions.has(tab.id);
+  if (tab.shell().path === nextShell.path && running) return;
+  tab.shell.set(nextShell);
+  // `startIfIdle`: the user picked it, so run it now (also for a tab whose shell ended).
+  // Otherwise a shell that has not started yet starts later, with the new choice.
+  if (running || startIfIdle) restartSession(tab, sessions, cwd, primaryApp);
+}
+
+/** Start every tab's shell that is not running yet. */
+function startAllSessions(
+  tabs: TermTab[],
+  sessions: Map<number, PtySession>,
+  cwd: Accessor<string>,
   primaryApp: Accessor<ExternalTerminalApp | undefined>
 ): void {
-  if (tab.shell().path === nextShell.path && sessions.has(tab.id)) return;
-  tab.shell.set(nextShell);
-  restartSession(tab, sessions, cwd, primaryApp);
+  for (const tab of tabs) startPtySession(tab, sessions, cwd, primaryApp);
 }
 
 /** Restart every tab whose shell should follow the open folder (see `shouldFollowCwd`). */
@@ -644,7 +726,8 @@ function followFolder(
 ): void {
   const dir = untracked(() => cwd()) || os.homedir();
   for (const tab of tabs) {
-    if (shouldFollowCwd(sessions.get(tab.id), dir)) restartSession(tab, sessions, cwd, primaryApp);
+    const draft = untracked(() => tab.input());
+    if (shouldFollowCwd(sessions.get(tab.id), dir, draft)) restartSession(tab, sessions, cwd, primaryApp);
   }
 }
 
@@ -762,13 +845,8 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   const applyShellSelection = (shell: ShellProfile, notifyParent: boolean) => {
     selectedShell.set(shell);
     if (notifyParent) props.onShellChange?.(shell.path);
-    switchTabShell(
-      untracked(() => activeTab()),
-      shell,
-      sessions,
-      props.cwd,
-      primaryExternal
-    );
+    const tab = untracked(() => activeTab());
+    switchTabShell(tab, shell, sessions, props.cwd, primaryExternal, notifyParent);
     focusInput();
   };
 
@@ -794,11 +872,14 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       fallbackShell
     );
     if (untracked(() => activeTab().shell().path) !== resolved.path) {
-      applyShellSelection(resolved, false);
+      // Outside this effect's run: a shell spawned inside it ends when the effect runs again.
+      setTimeout(() => applyShellSelection(resolved, false), 0);
     }
   });
 
   const sendCommand = (text: string) => {
+    // A command for a tab with no shell (it ended, or has not started yet) starts one.
+    startPtySession(activeTab(), sessions, props.cwd, primaryExternal);
     writeCommandToSession(activeTab(), sessions, text);
     focusInput();
   };
@@ -830,12 +911,13 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
     focusInput();
   });
 
+  // Shells start the first time the panel shows (no hidden login shell at launch),
+  // outside the effect's run (a shell spawned inside it ends when the effect runs again).
   effect(() => {
-    untracked(() => {
-      for (const tab of tabs()) {
-        startPtySession(tab, sessions, props.cwd, primaryExternal);
-      }
-    });
+    if (!props.visible()) return;
+    setTimeout(() => startAllSessions(untracked(() => tabs()), sessions, props.cwd, primaryExternal), 0);
+  });
+  effect(() => {
     cleanup(() => disposeAllSessions(sessions));
   });
 

@@ -30,6 +30,8 @@ export interface MermaidRenderResult {
 
 interface PendingJob {
   id: number;
+  /** The worker generation this job was queued for (see `planJobTimeout`). */
+  generation: number;
   code: string;
   theme: "dark" | "light";
   palette: ThemeUiColors;
@@ -65,6 +67,8 @@ let activeWebViewRef: WebViewRef | null = null;
 let workerReady = false;
 let jobCounter = 0;
 let initStarted = false;
+/** Counts the workers started; a timeout only drops the worker its job waited on. */
+let workerGeneration = 0;
 
 /** Extract a concise diagram type badge (e.g. "flowchart TB", "sequenceDiagram") from Mermaid source. */
 export function detectMermaidKind(code: string): string {
@@ -446,11 +450,29 @@ export function takeJob<T extends { id: number }>(
   return index >= 0 ? pending.splice(index, 1)[0] : undefined;
 }
 
+/**
+ * What a render timeout does. The job always fails. The worker is dropped only
+ * when it is the one the job waited on (same generation): a worker that hangs
+ * after `ready` is replaced too, but an older job's timeout never kills a
+ * newer worker that is still starting.
+ */
+export function planJobTimeout<T extends { id: number; generation: number }>(
+  id: number,
+  active: Map<number, T>,
+  pending: T[],
+  currentGeneration: number
+): { job: T | undefined; dropWorker: boolean } {
+  const job = takeJob(id, active, pending);
+  return { job, dropWorker: job !== undefined && job.generation === currentGeneration };
+}
+
 function expireJob(id: number): void {
-  const job = takeJob(id, activeJobs, pendingQueue);
+  const { job, dropWorker } = planJobTimeout(id, activeJobs, pendingQueue, workerGeneration);
   if (!job) return;
-  if (!workerReady) {
-    // The worker never started: drop it so the next diagram loads it again.
+  if (dropWorker) {
+    // Retire this generation; the next diagram starts a new worker.
+    workerGeneration += 1;
+    workerReady = false;
     initStarted = false;
     workerHtmlSignal.set("");
   }
@@ -511,8 +533,11 @@ function handleWorkerMessage(rawData: string): void {
 function ensureWorkerInitialized(): void {
   if (initStarted) return;
   initStarted = true;
+  workerGeneration += 1;
+  const generation = workerGeneration;
   void loadMermaidBundleJs().then((bundle) => {
-    workerHtmlSignal.set(buildWorkerHtml(bundle));
+    // A worker dropped while its bundle loaded stays dropped.
+    if (generation === workerGeneration) workerHtmlSignal.set(buildWorkerHtml(bundle));
   });
 }
 
@@ -543,6 +568,7 @@ export function requestMermaidRender(
     const timer = setTimeout(() => expireJob(id), RENDER_TIMEOUT_MS);
     pendingQueue.push({
       id,
+      generation: workerGeneration,
       code: normalized,
       theme: resolvedTheme.appearance,
       palette: resolvedTheme.ui,

@@ -9,6 +9,7 @@ import {
 import {
   detectMermaidKind,
   preprocessMermaidCode,
+  planJobTimeout,
   requeueOrphanedJobs,
   takeJob,
 } from "./src/mermaid";
@@ -20,11 +21,12 @@ import {
   type ExternalOrigin,
   nextActiveAfterClose,
   planWorkspaceIntent,
+  serialize,
   WINDOW_TRANSITIONS,
   type WindowEvent,
   type WindowMode,
 } from "./src/session";
-import { parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
+import { createInputGate, parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
 import manifest from "./nsh.json";
 import {
   computeSyntaxDecorations,
@@ -33,7 +35,7 @@ import {
   fontDisplayName,
   getThemeById,
 } from "./src/themes";
-import { normalizeExternalFilePath, shortenHomePath } from "./src/workspace";
+import { isBehindDisk, normalizeExternalFilePath, shortenHomePath } from "./src/workspace";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -309,7 +311,93 @@ describe("window session state machine (src/session.ts)", () => {
     expect(pending).toEqual([]);
   });
 
+  test("a Mermaid timeout drops only the worker its job waited on", () => {
+    // A: the current worker (ready or not) never answered: drop it.
+    const active = new Map([[1, { id: 1, generation: 3 }]]);
+    expect(planJobTimeout(1, active, [], 3)).toEqual({ job: { id: 1, generation: 3 }, dropWorker: true });
+    // B: an older job's timeout must not kill the newer worker that is still starting.
+    const pending = [{ id: 2, generation: 3 }];
+    expect(planJobTimeout(2, new Map(), pending, 4)).toEqual({ job: { id: 2, generation: 3 }, dropWorker: false });
+    // Already settled: nothing to fail, nothing to drop.
+    expect(planJobTimeout(2, new Map(), pending, 4)).toEqual({ job: undefined, dropWorker: false });
+  });
+
+  test("a copy is behind the disk only when both stamps are known and differ", () => {
+    expect(isBehindDisk("1:5", "1:5")).toBe(false);
+    expect(isBehindDisk("1:5", "2:5")).toBe(true);
+    expect(isBehindDisk(null, "2:5")).toBe(false);
+    expect(isBehindDisk("1:5", null)).toBe(false);
+  });
+
+  test("terminal input waits until the shell has drawn its prompt", () => {
+    const written: string[] = [];
+    const timers: Array<{ fn: () => void; ms: number; live: boolean }> = [];
+    const gate = createInputGate(
+      (text) => written.push(text),
+      (fn, ms) => {
+        const t = { fn, ms, live: true };
+        timers.push(t);
+        return t;
+      },
+      (t) => {
+        if (t) (t as { live: boolean }).live = false;
+      }
+    );
+    const fireLast = () => {
+      const t = timers[timers.length - 1];
+      if (t.live) t.fn();
+    };
+    const fallback = timers[0]; // SHELL_READY_MAX_MS, set when the gate is made
+    expect(fallback.ms).toBe(3000);
+    gate.send("echo early\n");
+    expect(written).toEqual([]); // the shell has printed nothing yet
+    gate.output();
+    gate.output(); // more startup output restarts the quiet wait
+    expect(timers.filter((t) => t.live).length).toBe(2);
+    expect(written).toEqual([]);
+    fireLast(); // quiet after output: the prompt is drawn
+    expect(written).toEqual(["echo early\n"]);
+    gate.send("echo late\n");
+    expect(written).toEqual(["echo early\n", "echo late\n"]);
+    expect(fallback.live).toBe(false); // opened: the fallback is cancelled
+    // A shell that prints nothing still gets its input after SHELL_READY_MAX_MS.
+    const silentWritten: string[] = [];
+    const silentTimers: Array<() => void> = [];
+    const silent = createInputGate(
+      (text) => silentWritten.push(text),
+      (fn) => silentTimers.push(fn),
+      () => undefined
+    );
+    silent.send("echo quiet\n");
+    expect(silentWritten).toEqual([]);
+    silentTimers[0]();
+    expect(silentWritten).toEqual(["echo quiet\n"]);
+  });
+
+  test("the disk check never overlaps itself and runs once more after calls made meanwhile", async () => {
+    let runs = 0;
+    let release: () => void = () => undefined;
+    const check = serialize(() => {
+      runs += 1;
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    const first = check();
+    await check(); // returns at once: a run is in flight
+    await check();
+    expect(runs).toBe(1);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2); // the calls made meanwhile give exactly one more run
+    release();
+    await first;
+    expect(runs).toBe(2);
+  });
+
   test("only a terminal the user has not typed into follows the open folder", () => {
+    expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur", "ls -la")).toBe(false);
+    expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur", "  ")).toBe(true);
     expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur")).toBe(true);
     expect(shouldFollowCwd({ cwd: "/home", used: true }, "/w/cur")).toBe(false);
     expect(shouldFollowCwd({ cwd: "/w/cur", used: false }, "/w/cur")).toBe(false);
@@ -319,8 +407,12 @@ describe("window session state machine (src/session.ts)", () => {
 
 type TestApp = Awaited<ReturnType<typeof open>>;
 
-/** Scratch folder for disk-change tests; the test sandbox cannot write files, so the app's own PTY does. */
-const SCRATCH = "/tmp/aed-e2e-disk";
+/**
+ * Scratch folders for disk-change tests (the test sandbox cannot write files, so the
+ * app's own PTY does). One folder per test and run, removed when the test ends.
+ */
+const SCRATCH_RUN = `/tmp/aed-e2e-disk-${Date.now().toString(36)}`;
+let scratchCount = 0;
 
 async function runInTerminal(app: TestApp, cmd: string, marker: string): Promise<void> {
   if (!app.shows("id:terminal-pane")) {
@@ -340,24 +432,46 @@ const showsText = (app: TestApp, text: string) => app.texts().some((t) => t === 
 /** Longer than one disk check (DISK_CHECK_MS = 1500), so a wrong banner would have appeared. */
 const pastOneDiskCheck = () => new Promise((resolve) => setTimeout(resolve, 2000));
 
-/** A window on a fresh SCRATCH folder holding `note.txt` (= `content`), with note.txt open. */
-async function openScratchNote(content: string): Promise<TestApp> {
+interface Scratch {
+  app: TestApp;
+  dir: string;
+  write: (name: string, content: string) => Promise<void>;
+}
+
+/**
+ * Run `body` in a window on a fresh scratch folder holding `files` (name → one line),
+ * with `files`' first name open. The folder is removed afterwards, also on failure.
+ */
+async function withScratch(files: Record<string, string>, body: (s: Scratch) => Promise<void>) {
+  scratchCount += 1;
+  const dir = `${SCRATCH_RUN}-${scratchCount}`;
+  const writes = Object.entries(files).map(([n, c]) => `printf '${c}\\n' > ${dir}/${n}`);
   const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-  await runInTerminal(
-    setup,
-    `rm -rf ${SCRATCH} && mkdir -p ${SCRATCH} && printf '${content}\\n' > ${SCRATCH}/note.txt`,
-    "SETUP_DONE"
-  );
+  await runInTerminal(setup, [`rm -rf ${dir}`, `mkdir -p ${dir}`, ...writes].join(" && "), "SETUP_DONE");
   const app = await open("./App.tsx", {
     platform: "macos",
     width: 1280,
     height: 800,
-    host: { params: { workspaceRoot: SCRATCH } },
+    host: { params: { workspaceRoot: dir } },
   });
-  await app.waitFor("text:note.txt");
-  await app.press("text:note.txt");
-  await app.waitUntil(() => showsText(app, content), { timeout: 5000 });
-  return app;
+  let step = 0;
+  const write = (name: string, content: string) =>
+    runInTerminal(app, `printf '${content}\\n' > ${dir}/${name}`, `WRITE_DONE_${(step += 1)}`);
+  try {
+    const [first, content] = Object.entries(files)[0];
+    await app.waitFor(`text:${first}`);
+    await app.press(`text:${first}`);
+    await app.waitUntil(() => showsText(app, content), { timeout: 5000 });
+    await body({ app, dir, write });
+  } finally {
+    await runInTerminal(setup, `rm -rf ${dir}`, "CLEAN_DONE");
+  }
+}
+
+/** Make the open tab dirty by typing `text`, and wait for its unsaved dot. */
+async function editTab(app: TestApp, text: string): Promise<void> {
+  await app.type("id:preview-editor", text);
+  await app.waitUntil(() => showsText(app, "•"), { timeout: 3000 });
 }
 
 describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
@@ -683,12 +797,12 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(looseApp.shows("id:welcome-panel")).toBe(true);
   });
   test("dropping any file onto a workspace window opens it as a tab and keeps the file tree", async () => {
-    const app = await openScratchNote("NOTE_V1");
-    await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}/main.ts`]);
-    await app.waitFor("id:tab-select-main.ts");
-    expect(app.shows("id:workspace-tree")).toBe(true);
-    expect(app.shows("id:tab-select-note.txt")).toBe(true);
-    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+    await withScratch({ "note.txt": "NOTE_V1" }, async ({ app }) => {
+      await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}/main.ts`]);
+      await app.waitFor("id:tab-select-main.ts");
+      expect(app.shows("id:workspace-tree")).toBe(true);
+      expect(app.shows("id:tab-select-note.txt")).toBe(true);
+    });
   });
 
   test("a second guarded action cannot replace an open unsaved-changes prompt", async () => {
@@ -712,58 +826,98 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
   });
 
   test("reopening a file shows changes made on disk after Aed first read it", async () => {
-    const app = await openScratchNote("STALE_V1");
-    await app.press("id:tab-close-note.txt");
-    await runInTerminal(app, `printf 'FRESH_V2\\n' > ${SCRATCH}/note.txt`, "WRITE_DONE");
-    await app.press("text:note.txt");
-    await app.waitUntil(() => showsText(app, "FRESH_V2"), { timeout: 5000 });
-    expect(showsText(app, "STALE_V1")).toBe(false);
-    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+    await withScratch({ "note.txt": "STALE_V1" }, async ({ app, write }) => {
+      await app.press("id:tab-close-note.txt");
+      await write("note.txt", "FRESH_V2");
+      await app.press("text:note.txt");
+      await app.waitUntil(() => showsText(app, "FRESH_V2"), { timeout: 5000 });
+      expect(showsText(app, "STALE_V1")).toBe(false);
+    });
   });
 
   test("an open clean tab shows changes made on disk without reopening", async () => {
-    const app = await openScratchNote("OPEN_V1");
-    await runInTerminal(app, `printf 'OPEN_V2\\n' > ${SCRATCH}/note.txt`, "WRITE_DONE");
-    await app.waitUntil(() => showsText(app, "OPEN_V2"), { timeout: 6000 });
-    expect(app.shows("id:disk-conflict-banner")).toBe(false);
-    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+    await withScratch({ "note.txt": "OPEN_V1" }, async ({ app, write }) => {
+      await write("note.txt", "OPEN_V2");
+      await app.waitUntil(() => showsText(app, "OPEN_V2"), { timeout: 6000 });
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    });
   });
 
   test("a tab with unsaved edits that changed on disk asks to keep the edits or reload", async () => {
-    const app = await openScratchNote("DISK_V1");
-    await app.type("id:preview-editor", "MINE ");
-    await app.waitUntil(() => showsText(app, "•"), { timeout: 3000 });
-    // Unsaved edits alone are not a conflict.
-    await pastOneDiskCheck();
-    expect(app.shows("id:disk-conflict-banner")).toBe(false);
-    await runInTerminal(app, `printf 'DISK_V2\\n' > ${SCRATCH}/note.txt`, "WRITE_V2");
-    await app.waitFor("id:disk-conflict-banner");
-    // Keep: the edits stay, the banner goes, and it stays gone.
-    await app.press("id:disk-conflict-keep-btn");
-    await app.waitUntil(() => !app.shows("id:disk-conflict-banner"), { timeout: 3000 });
-    await pastOneDiskCheck();
-    expect(app.shows("id:disk-conflict-banner")).toBe(false);
-    expect(showsText(app, "•")).toBe(true);
-    expect(showsText(app, "DISK_V2")).toBe(false);
-    // A newer disk change asks again; Reload drops the edits and shows the disk.
-    await runInTerminal(app, `printf 'DISK_V3\\n' > ${SCRATCH}/note.txt`, "WRITE_V3");
-    await app.waitFor("id:disk-conflict-banner");
-    await app.press("id:disk-conflict-reload-btn");
-    await app.waitUntil(() => showsText(app, "DISK_V3"), { timeout: 5000 });
-    expect(app.shows("id:disk-conflict-banner")).toBe(false);
-    expect(showsText(app, "•")).toBe(false);
-    // Saving over a disk change also ends the conflict; the next edit does not bring the banner back.
-    await app.type("id:preview-editor", "AGAIN ");
-    await runInTerminal(app, `printf 'DISK_V4\\n' > ${SCRATCH}/note.txt`, "WRITE_V4");
-    await app.waitFor("id:disk-conflict-banner");
-    await app.keyboard.press("mod+s");
-    await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
-    await pastOneDiskCheck();
-    await app.type("id:preview-editor", "MORE ");
-    await app.waitUntil(() => showsText(app, "•"), { timeout: 3000 });
-    await pastOneDiskCheck();
-    expect(app.shows("id:disk-conflict-banner")).toBe(false);
-    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+    await withScratch({ "note.txt": "DISK_V1" }, async ({ app, write }) => {
+      await editTab(app, "MINE ");
+      // Unsaved edits alone are not a conflict.
+      await pastOneDiskCheck();
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+      await write("note.txt", "DISK_V2");
+      await app.waitFor("id:disk-conflict-banner");
+      // Keep: the edits stay, the banner goes, and it stays gone.
+      await app.press("id:disk-conflict-keep-btn");
+      await app.waitUntil(() => !app.shows("id:disk-conflict-banner"), { timeout: 3000 });
+      await pastOneDiskCheck();
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+      expect(showsText(app, "•")).toBe(true);
+      expect(showsText(app, "DISK_V2")).toBe(false);
+      // A newer disk change asks again; Reload drops the edits and shows the disk.
+      await write("note.txt", "DISK_V3");
+      await app.waitFor("id:disk-conflict-banner");
+      await app.press("id:disk-conflict-reload-btn");
+      await app.waitUntil(() => showsText(app, "DISK_V3"), { timeout: 5000 });
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+      expect(showsText(app, "•")).toBe(false);
+    });
+  });
+
+  test("saving or closing a conflicted tab ends its conflict at once, not at the next disk check", async () => {
+    await withScratch({ "note.txt": "SAVE_V1" }, async ({ app, write }) => {
+      // Save over the disk change, then type again at once: no banner.
+      await editTab(app, "MINE ");
+      await write("note.txt", "SAVE_V2");
+      await app.waitFor("id:disk-conflict-banner");
+      await app.keyboard.press("mod+s");
+      await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
+      await editTab(app, "MORE ");
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+      await pastOneDiskCheck();
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+      // Close without saving, reopen, type at once: no banner left from the closed copy.
+      await write("note.txt", "SAVE_V3");
+      await app.waitFor("id:disk-conflict-banner");
+      await app.press("id:tab-close-note.txt");
+      await app.press("id:unsaved-discard-btn");
+      await app.press("text:note.txt");
+      await app.waitUntil(() => showsText(app, "SAVE_V3"), { timeout: 5000 });
+      await editTab(app, "AGAIN ");
+      expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    });
+  });
+
+  test("a tab that becomes active is checked against the disk at once; each tab keeps its own conflict", async () => {
+    await withScratch({ "a.txt": "A_V1", "b.txt": "B_V1" }, async ({ app, write }) => {
+      await app.press("text:b.txt");
+      await app.waitUntil(() => showsText(app, "B_V1"), { timeout: 5000 });
+      // Well under one DISK_CHECK_MS: the switch itself checks. Two rounds, so a
+      // periodic check that happens to land in the window passes by luck only ~3%.
+      for (const version of ["A_V2", "A_V3"]) {
+        await write("a.txt", version);
+        await pastOneDiskCheck();
+        await app.press("id:tab-select-a.txt");
+        await app.waitUntil(() => showsText(app, version), { timeout: 250 });
+        await app.press("id:tab-select-b.txt");
+        await app.waitUntil(() => showsText(app, "B_V1"), { timeout: 2000 });
+      }
+      await app.press("id:tab-select-a.txt");
+      // Two conflicted tabs: each shows its own banner as soon as it is active.
+      await editTab(app, "MINE_A ");
+      await write("a.txt", "A_V4");
+      await app.waitFor("id:disk-conflict-banner");
+      await app.press("id:tab-select-b.txt");
+      await editTab(app, "MINE_B ");
+      await write("b.txt", "B_V2");
+      await app.waitFor("id:disk-conflict-banner");
+      await app.press("id:tab-select-a.txt");
+      await app.waitUntil(() => app.shows("id:disk-conflict-banner"), { timeout: 300 });
+    });
   });
 
   test("a terminal the user has not typed into moves to the folder that opens", async () => {
@@ -780,4 +934,40 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await runInTerminal(app, "pwd", "PWD_AGAIN");
     expect(app.texts().filter((t) => t === FIXTURE_ROOT).length).toBe(2);
   });
+
+  test("a command submitted the moment the terminal opens still runs", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await app.press("id:titlebar-toggle-terminal");
+    await app.waitFor("id:terminal-pane");
+    await app.type("id:terminal-input", "echo FIRST_CMD_RAN");
+    await app.submit("id:terminal-input");
+    await app.waitUntil(() => showsText(app, "FIRST_CMD_RAN"), { timeout: 8000 });
+  });
+
+  test("a command submitted after the shell ended starts a new shell", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await app.press("id:titlebar-toggle-terminal");
+    await app.waitFor("id:terminal-pane");
+    await runInTerminal(app, "true", "SHELL_UP");
+    await app.type("id:terminal-input", "exit");
+    await app.submit("id:terminal-input");
+    await app.waitUntil(() => app.texts().some((t) => t.endsWith("session ended")), { timeout: 8000 });
+    await runInTerminal(app, "true", "SHELL_BACK");
+  });
+
+  test("a half-typed terminal command stays, with its shell, when a folder opens", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await app.press("id:titlebar-toggle-terminal");
+    await app.waitFor("id:terminal-pane");
+    await app.type("id:terminal-input", "echo DRAFT_KEPT");
+    await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
+    await app.waitFor("id:workspace-tree");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The input values are not in texts(): submit the kept draft and read its output.
+    await app.submit("id:terminal-input");
+    await app.waitUntil(() => showsText(app, "DRAFT_KEPT"), { timeout: 8000 });
+    await runInTerminal(app, "pwd", "PWD_DONE");
+    expect(showsText(app, FIXTURE_ROOT)).toBe(false);
+  });
+
 });
