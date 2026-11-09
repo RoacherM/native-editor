@@ -204,6 +204,8 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await cleanApp.waitFor("id:welcome-panel");
     expect(cleanApp.shows("id:welcome-panel")).toBe(true);
     expect(cleanApp.shows("text:Aed")).toBe(true);
+    expect(cleanApp.shows("text:Open Folder")).toBe(false);
+    expect(cleanApp.shows("id:welcome-open-folder")).toBe(false);
     expect(cleanApp.shows("text:⌘O")).toBe(false);
     expect(cleanApp.spanStyle("text:Aed").color).toBe("#c0caf5ff");
     expect(cleanApp.shows("id:workspace-tree")).toBe(false);

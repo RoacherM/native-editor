@@ -49,7 +49,6 @@ import {
 } from "./src/themes";
 import {
   consumeFinderOpenQueue,
-  enqueueFinderOpenPath,
   getFileDiffPatch,
   getInitialOpenFile,
   getInitialWorkspaceRoot,
@@ -825,8 +824,8 @@ function FontSettingsDialog(props: {
 
 // DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a poster.
 // Three flat fields carry the composition: a signal-red arch (right), an ink
-// block (bottom left) that IS the primary action, and a stone quarter disc
-// where they meet. Text sits on the paper, top left, on one grid.
+// block (bottom left), and a stone quarter disc where they meet.
+// Text sits on the paper, top left, on one grid.
 const POSTER_FONT = "Helvetica Neue";
 
 interface PosterBox {
@@ -887,7 +886,7 @@ function PosterFields(props: {
         cx.lineTo(w, h);
         cx.closePath();
         cx.fill();
-        // Ink block: the primary action's field.
+        // Ink block: bottom-left geometric field.
         cx.fillStyle = ui.foreground;
         cx.fillRect(0, g.blockTop, g.split, h - g.blockTop);
         // Stone quarter disc: centred on the block's top-right corner, it
@@ -954,7 +953,6 @@ function PosterRecent(props: {
 function WelcomePanel(props: {
   recentWorkspaces: Accessor<string[]>;
   theme: Accessor<EditorTheme>;
-  onOpenFolder: () => void;
   onSelectRecentWorkspace: (folderPath: string) => void;
 }): JSX.Element {
   const home = os.homedir();
@@ -1018,33 +1016,6 @@ function WelcomePanel(props: {
           </View>
         </If>
       </View>
-
-      <Button
-        testID="welcome-open-folder"
-        onPress={props.onOpenFolder}
-        class="absolute justify-end bg-transparent hover:bg-white/5 active:bg-white/10 border-none shadow-none rounded-none"
-        style={{
-          left: 0,
-          bottom: 0,
-          width: grid().split,
-          height: grid().blockH,
-          paddingLeft: grid().pad,
-          paddingBottom: Math.round(grid().pad * 0.8),
-          paddingRight: grid().pad,
-        }}
-      >
-        <Text
-          style={{
-            color: ui().background,
-            fontFamily: POSTER_FONT,
-            fontWeight: "bold",
-            fontSize: 26,
-            letterSpacing: -0.6,
-          }}
-        >
-          Open Folder
-        </Text>
-      </Button>
     </View>
   );
 }
@@ -1883,12 +1854,19 @@ function App(): JSX.Element {
   effect(() => {
     const stopHostQueue = host.on("enqueueFinderOpen", (payload) => {
       if (typeof payload === "string" && payload.length > 0) {
-        void enqueueFinderOpenPath(payload);
+        const clean = normalizeExternalFilePath(payload);
+        if (clean) void openExternalFile(clean);
       }
     });
+    let ticks = 0;
     const timer = setInterval(() => {
-      void drainFinderOpenQueue();
-    }, 200);
+      ticks += 1;
+      void drainFinderOpenQueue().then((claimed) => {
+        if (claimed || ticks >= 16) {
+          clearInterval(timer);
+        }
+      });
+    }, 150);
     cleanup(() => {
       stopHostQueue();
       clearInterval(timer);
@@ -2117,7 +2095,6 @@ function App(): JSX.Element {
                     <WelcomePanel
                       recentWorkspaces={recentWorkspaces}
                       theme={activeTheme}
-                      onOpenFolder={handleOpenFolder}
                       onSelectRecentWorkspace={switchToWorkspace}
                     />
                   </If>
