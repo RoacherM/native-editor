@@ -69,7 +69,10 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `src/classify.ts` | `classifyFile`, `parseTableData`, `formatHexDump`, `probeImageDimensions`, `normalizeMachOBuildVersion`, `generateQuickLookUrl`, `createBlobUrl` | 纯文件类型判定（扩展名 + 前 4 KB `\0` 探测）、CSV/TSV/JSONL 解析、4 KB 十六进制格式化、PNG/GIF/SVG 尺寸探测、Mach-O `LC_BUILD_VERSION` 最低系统版本归一化、PDF `sips` 缩略图生成 |
 | `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `enqueueFinderOpenPath`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `readDiskStamp`, `isBehindDisk`, `hasChangedOnDisk`, `reloadFromDisk`, `reloadIfChangedOnDisk`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件路径与 `file://`/`:line:col` 归一化、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
 | `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
-| `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL |
+| `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender`, `loadMermaidBundleJs`, `buildMermaidConfig` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL；`buildMermaidConfig` 是两条 Mermaid 渲染路径共用的主题配置工厂 |
+| `src/markdownPage.ts` | `buildPreviewShellHtml`, `buildPreviewThemeCss`, `classifyPreviewLink`, `resolvePreviewImagePath`, `imageMimeForPath`, `parsePreviewMessage`, `handlePreviewMessage`, `isExternalOrHashUrl`, `resolveRelativeLink` | Markdown 预览的纯协议/路径/主题逻辑（无 I/O）：严格 CSP 壳页、主题化阅读排版与 TOC CSS、链接与图片路径安全分类、页面上行消息校验与路由 |
+| `src/MarkdownPreview.tsx` | `MarkdownPreview` | Markdown WebView 的 I/O 外壳：注入运行时与 `render`/`setTheme`/`setImages` 载荷、图片按 `classify` MIME 读为 `data:`（≤20 MB）、`openUrl`/已解析路径回传、进程内滚动记忆、测试调试通道 |
+| `vendor/markdown/` | `entry.mjs`, `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的第三方运行时源码（markdown-it 插件组 + KaTeX + hljs + github-markdown-css + DOMPurify），仅由 `scripts/build-markdown-vendor.sh` 构建为 `src/markdownVendor.generated.ts` |
 | `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
 | `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig` | 多标签 Python `pty.fork()` 终端会话、ANSI CSI/OSC 流式剥离与回车覆盖处理、本机 Shell 与 Ghostty 配置探测 |
 | `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 8 套配色主题（默认 Industrial Paper / Industrial Carbon，另有 Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、One Dark、Rose Pine、GitHub Light）及带 LRU 缓存的预编译正则语法高亮装饰器 |
@@ -129,9 +132,19 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 2. **模式胶囊按钮显示规则（`App.tsx` `hasRichPreview`）**：
    - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
 3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
-   - Markdown 中的 ` ```mermaid ` 代码块（通过 `TextView` 的 `extensions` 拦截）与独立 `.mmd` / `.mermaid` 文件共用 `MermaidDiagramBlock`。
-   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/aed-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束；只丢弃该任务等的那一代渲染器（见「状态机清单」#5）。
+   - 独立 `.mmd` / `.mermaid` 文件预览使用 `MermaidDiagramBlock`；Markdown 内的 ` ```mermaid ` 代码块由预览页在 WebView 内直接渲染为 SVG（见下条），两条路径共享 `buildMermaidConfig()` 生成的同一份 `mermaid.initialize` 配置（预览页在其上覆写 `securityLevel: "strict"`）。
+   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/aed-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束；只丢弃该任务等的那一代渲染器（见「状态机清单」#5）。`loadMermaidBundleJs()` 导出这份 bundle 提取逻辑供 Markdown 预览页复用。
    - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。
+4. **Markdown WebView 渲染契约（`src/MarkdownPreview.tsx` + `src/markdownPage.ts` + `vendor/markdown/`）**：
+   - 渲染全部在 WebView（JSC）内完成，宿主只投递运行时与载荷并响应页面请求。`vendor/markdown/entry.mjs` 构建 markdown-it 15.0.3 管线（`html:true`、`linkify:true`、footnote / task-lists / CJK 安全去重 slug 的 anchor / GitHub alerts / highlight.js 11.12.0 common 子集 / KaTeX 0.19.1，`mermaid` 围栏保留为 `<pre class="mermaid">`），与 `page.mjs`（DOMPurify 消毒 + `window.__aed` 协议）一起经 `scripts/build-markdown-vendor.sh`（`bun install --frozen-lockfile` + `bun build --format iife`）打进 `src/markdownVendor.generated.ts`（已提交，`MARKDOWN_RUNTIME_JS` / `KATEX_CSS`（`url(fonts/*.woff2)` 全部内联为 `data:`、丢弃 woff/ttf 回退）/ `GITHUB_MARKDOWN_CSS` 自动明暗两变量版）。许可证见 `vendor/markdown/THIRD_PARTY_NOTICES.txt`。重建：`sh scripts/build-markdown-vendor.sh`。构建把 `entry.mjs + page.mjs + bun.lock` 的 sha256 前缀写成 `globalThis.AedMarkdown.buildId`（防 `dist/` 与生成文件漂移，测试断言 `MARKDOWN_RUNTIME_JS` 包含同一 buildId）。
+   - 页面壳层 `buildPreviewShellHtml()` 只含 `<meta charset>`、严格 CSP（`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: https:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`）、三个 `<style>` 块与空 `<main>`/`<nav>`，**不含任何 `<script>`**；运行时只在 `onLoad` 注入一次（`page.mjs` 顶部有 `!window.__aed` 安装守卫，重复注入不产生重复监听器），随后每次 `sendRender` 只发 `__aed.render(payload)`（绕过 HTML 解析器与 `script-src`，见踩坑记录）。
+   - 协议：宿主 `__aed.render({renderId, path, markdown, themeCss, scrollY, mermaidConfig})` / `__aed.setTheme` / `__aed.setImages` / `__aed.mermaidReady` / `__aed.mermaidUnavailable`；页面上行 `link`（非 `#` 链接）、`images`（非 `https:`/`data:` src 去重，≤200 条）、`scroll`（~200ms 节流）、`needMermaid`。`handlePreviewMessage` 在 `src/markdownPage.ts` 中纯函数化：外链仅 `http:`/`https:`/`mailto:`（大小写不敏感）走 `openUrl`，其余 scheme 一律 `none`；相对/绝对/`file://` 路径解码 `%XX`、剥 `#`/`?` 后相对 Markdown 文件目录解析并 `openFile`，`javascript:`/`data:`/`vbscript:`/`#` 锚点不动作；图片仅解析 `png jpg jpeg gif webp avif svg bmp ico` 本地路径，宿主按 `classify.ts` MIME 表读取并以 `data:` 回传（单图 20 MB 上限，失败回 `null` 加 `aed-img-missing`）。
+   - 消毒：DOMPurify 默认配置（保留 `id`/`class`、任务列表 `input[type=checkbox][disabled]`、KaTeX MathML/SVG、`<details>/<summary>`），默认即禁 `<style>` 与全部 `on*` 属性。
+   - TOC 与栏宽：TOC 仅当视口 ≥1120px 且 ≥2 个 H1–H3 时显示；显示时页面加 `body.aed-has-toc`（`padding-right: 276px` = 220 TOC + 24 右距 + 32 间隙），阅读栏在 TOC 左侧空间内居中，绝不重叠。
+   - Mermaid 尺寸：`fitMermaidSvgs()` 按 viewBox 取天然宽，`scale = clamp(colW/natW, 0.66, 1)`；`height:auto` 消除上下留白；`scale×natW > colW` 时容器 `overflow-x:auto` 横向滚动而非继续缩小。每次渲染与 `resize` 后重算。预览内 Mermaid 用正文 UI 字体（`buildMermaidConfig(theme, "")`）。
+   - Keep-alive：`markdownMounted` 信号一旦置真不再卸载——切到非 Markdown 视图时外层 `display:none` 隐藏而非卸载，页面与滚动状态保留；切换 Markdown 文件复用同一 WebView 发新 `render`；主题/字体变化只发 `setTheme` 不重解析；滚动记忆为进程内 `Map<path, y>`（无 `Storage` 键）。
+   - 调试通道：宿主事件 `aed.preview.eval` 注入任意页面 JS、页面 `__dbg:` 前缀消息经 `host.post("aedPreviewDebug")` 回传，仅真机测试使用，打包宿主不发送。
+   - `nsh 0.4.0` 无头 `nsh test` 不执行 WebView 页面 JS（见踩坑记录），所以页面行为只能用 `--target macos` 真机窗口验证。这类测试用系统真实输入，会占用用户的鼠标和键盘，只在用户同意时跑；脚本不入库。
 
 ---
 
@@ -176,6 +189,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 | 状态栏是一块只读实色 | `ui.statusBar` / `ui.statusBarForeground`（Industrial Paper 上为墨色底、纸色字）；未设置时回退 `sidebar` / `mutedForeground`。左侧仅在当前工作区确属 Git 仓库时显示分支名，右侧仅显示当前文件只读元数据（路径、大小、行列或媒体尺寸），不放刷新或主题/字体切换按钮以免在终端输入区与窗口底边误触 | `StatusBar` |
 | 欢迎页是一张海报 | 3 个平面：右侧红色拱形、左下墨色块（纯粹几何色块，不放「Open Folder」文字或按钮以免破坏海报感或误触系统选目录弹窗）、两者交界处的石色 1/4 圆。标题 `Aed` 采用 `Helvetica Neue` 粗体、紧字距单行展示；标签采用 Sentence case（`Recent`）。窗口最小尺寸锁定为 `760×520pt`（`MIN_WINDOW_WIDTH` / `MIN_WINDOW_HEIGHT` + AppKit `NSWindow.minSize`），`posterGrid()` 对画布尺寸施加 `520×380pt` 结构下限并按列宽与顶栏净空约束字号，保证标题绝不拆词折行、文字不压到色块上 | `App.tsx` `PosterFields` / `WelcomePanel`、`scripts/finder_bridge.m` |
 | 颜色跟随主题重绘 | `Canvas` 只在 `draw` 内读到的 signal 变化时重绘，所以主题色必须在 `draw` 里读（`Icon` 的 `tint` 与 `AppLogo` 的 `ink` / `accent` 均支持传 accessor） | `src/icons.tsx` `Icon` / `AppLogo` |
+| 预览阅读排版与 TOC 强调 | Markdown 预览遵循同一套规则：阅读栏 `860px` 居中、4px 网格、无阴影/渐变；标题为 `foreground` 600 无彩色，标题下与表格用 `--border` 发丝线；行内代码 `card` 底、代码块 `sidebar` 底 + `editorFont`；引用/GFM Alerts 用 `2px` 左侧条（note→`syntax.property`、tip→`syntax.string`、important→`syntax.type`、warning→`syntax.number`、caution→`ui.accent`）；链接下划线用 `border`，悬停才升 `accent`；TOC（视口 ≥1120px 且 ≥2 个 H1–H3 才显示）唯一强调用法是当前小节 `foreground` + `2px accent` 左条 | `src/markdownPage.ts` `buildPreviewThemeCss` |
 
 **为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.3.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
 
@@ -209,6 +223,12 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 9. **Shell 启动期间写入的输入会被丢掉（本机 zsh 配置实测，测试负载下）**：
    - 现象：终端刚打开就提交命令，PTY 回显了这条命令（TTY 已收到），但 zsh 的行编辑器初始化后没有执行它。整套 `nsh test` 下约每 10 次出现 3 次；单独跑不出现，因为负载让 zsh 启动变慢、窗口变大。曾被误判为键盘焦点问题，改用 `app.submit` 后看似变稳，其实没有消除根因。
    - 做法：`createInputGate` 先排队，等 Shell 第一次输出后安静 200 毫秒（提示符画完）再写入，最晚 3 秒强制放行。`App.test.tsx` › terminal input waits until the shell has drawn its prompt 用注入的假调度器锁住规则；› a command submitted the moment the terminal opens still runs 跑真实 Shell。
+10. **WebView 页面 JS 与 `injectJavaScript`（`nsh 0.4.0` 实测）**：
+   - 无头 `nsh test`（`platform: "macos"`）会挂载 `WebView` 但**不执行页面 JS、不投递 `onMessage`**；页面行为只能在 `--target macos` 真机窗口验证。
+   - `webview.hosts` 能力无法放行 `file:` URL：`baseUrl=file:///…` 整页导航报 `ERR_ACCESS_DENIED`，相对/绝对 `file://` 的 `<img>` 同样被拒；`data:` URL 正常。所以本地图片由宿主读取并以 `data:` 内联（`img-src data: https:`）。
+   - 把 hljs/markdown-it 源放进行内 `<script>` 会触发 HTML 解析器的 double-escaped 状态吞掉 `</script>`，页面静默不运行；因此壳页 0 个 `<script>`，全部 JS 经 `ref.injectJavaScript()` 在 `onLoad` 后原生注入（绕过 HTML 解析器，且不受 `script-src 'none'` CSP 限制）。
+   - `Each` 的 children 参数是 accessor（函数），必须调用 `item()` 取值，直接渲染得到 `[native code]`。
+   - `props.file` 为 `Accessor<LoadedFile>`：文件加载期间可瞬时返回 `undefined`，在 `effect`/`onLoad` 里直接读 `.path` 会抛错并使后续重渲染失效——先判空（`MarkdownPreview.sendRender`）。
 
 ---
 
@@ -218,6 +238,10 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 - **使用 `qlmanage` + 底部外部打开操作栏预览 PDF**：`qlmanage -t` 在部分系统环境下会弹窗或阻塞，且底部常驻 `Open in Preview` 操作栏喧宾夺主；已改为直接调用 macOS 内置 `sips -Z 1800 -s format png` 生成 2x Retina 预览图，并以暖白纸张底衬（`#f7f4ee`）+ 缩放控制条承载，避免透明底黑字在深色主题下不可读。
 - **在底部 24pt 状态栏放置刷新图标与主题/字体切换按钮**：在非 Git 目录下左下角会留下孤立无文字的 `↻` 图标（语义不明），而右下角的主题下拉、字体下拉与单点循环切主题按钮紧贴终端输入行与窗口缩放边缘，极易误触切走配色或弹出大菜单；现 `StatusBar` 统一改为纯只读状态展示，主题/字体配置与工作区刷新统一走 `⌘,`（Preferences）、应用菜单与 `⌘⇧P` 命令面板。
 - **在 Markdown 预览中用字符画（`mmd2txt`）替代矢量图**：终端适合字符画，但桌面 GUI 编辑器用户期望高分辨率图表；因此采用隐藏 `WebView` + SVG `<foreignObject>` 内联 + 2x Retina PNG 光栅化方案。
+- **原生 `TextView` 重新排版做 Markdown 预览**：需从零实现阅读排版、语法高亮、TOC、链接路由与图片加载，工作量与成熟库差距大；改用 WebView + markdown-it 生态。
+- **在宿主 QuickJS 上渲染 Markdown 再下发 HTML**：实测同一 60 KB 合成文档 QuickJS 中位 283 ms vs WebView JSC 52 ms（快 ~5.5×），且 608 KB 运行时的解析/求值占住应用线程；渲染改在页面侧完成，宿主只做载荷与文件/URL 服务。
+- **直接复用 xicilion markdown-viewer 的成品 bundle**：该扩展为 GPLv3，不能随 Aed 分发。Aed 只沿用旧逻辑：运行时用 `loadMermaidBundleJs()` 读取用户本机已装扩展里的 Mermaid bundle，自己不打包它。
+- **WebView `baseUrl=file://` 加载相对资源**：`nsh 0.4.0` 能力层无法授予 `file:`（见踩坑记录 #10）；改为 CSP `img-src data: https:` + 宿主侧图片内联，KaTeX 字体也全部 `data:` 内联。
 
 ---
 

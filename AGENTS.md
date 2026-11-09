@@ -8,7 +8,8 @@ Lightweight macOS native editor, multi-format previewer (`code`, `markdown`, `me
 |---|---|---|
 | `App.tsx` | 窗口壳层、标题栏、可拖拽分栏（`ResizablePanelGroup`）、Tab 与快捷键状态编排 | 改这行是在改顶层窗口布局/状态路由，还是具体面板内部渲染？ |
 | `src/` | 业务模块：`workspace.ts`（目录/Git/Finder 队列）、`classify.ts`（类型判定/CSV-JSONL/Hex/sips）、`PreviewPane.tsx`、`mermaid.tsx`、`Sidebar.tsx`、`TerminalPane.tsx`、`themes.ts`、`icons.tsx` | 纯解析逻辑与 I/O 外壳分离；读取或探测失败返回 `null`/`undefined`，不伪造空数据 |
-| `scripts/` | macOS 打包脚本（`package-macos.sh`）、Finder 桥接动态库（`finder_bridge.m`）、CLI 启动器（`launcher.c`）、UTI 注册（`set_default_handlers.m`） | 是在改 `.app` Bundle 注入、签名、DMG 或 LaunchServices 关联吗？ |
+| `scripts/` | macOS 打包脚本（`package-macos.sh`）、Finder 桥接动态库（`finder_bridge.m`）、CLI 启动器（`launcher.c`）、UTI 注册（`set_default_handlers.m`）、vendored Markdown 运行时构建（`build-markdown-vendor.sh`） | 是在改 `.app` Bundle 注入、签名、DMG、LaunchServices 关联或 vendored 运行时构建吗？ |
+| `vendor/` | 固定版本的第三方源码与锁文件（`vendor/markdown/package.json` + `bun.lock`）；**只有构建脚本会写 `src/markdownVendor.generated.ts`**，不手改生成物 | 是第三方依赖的版本、源码或重建吗？ |
 | `App.test.tsx` + `fixtures/` | `nsh test` 免预启动单测与桌面无头端到端契约测试及固定测试样本 | 不依赖外部服务、不改用户 `/Applications` 或配置即可跑通吗？ |
 | `.scratch/` | 临时截图、一次性排查产物与手工原型（已 `.gitignore`） | 是一次性排查数据或草稿吗？严禁放进 `docs/` 或提交入库 |
 
@@ -27,9 +28,10 @@ Lightweight macOS native editor, multi-format previewer (`code`, `markdown`, `me
 ```sh
 nsh check                           # TypeScript 原生类型检查（~0.2s）
 nsh test --trace                    # 免预启动单测 + 桌面无头 E2E 测试（~1.0s）
-nsh test App.tsx --target macos     # 真机 AppKit 窗口交互测试
+nsh test App.tsx --target macos     # 真机 AppKit 窗口交互测试：会用系统真实输入抢走用户的鼠标和键盘，用户明确要求时才跑；平时一律无头
 nsh run --target macos              # 开发热重载宿主
 nsh package --target macos          # 仅打包 .nsh/out/Aed.app（不写 /Applications）
+sh scripts/build-markdown-vendor.sh # 重建 vendored Markdown 运行时（需要 bun）
 sh scripts/package-macos.sh         # 完整构建、签名、装到 /Applications、注册默认打开方式（改完用户可见的功能后直接跑）
 ```
 

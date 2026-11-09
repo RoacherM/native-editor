@@ -1251,23 +1251,6 @@ function EmptyEditorPanel(props: {
   );
 }
 
-function isExternalOrHashUrl(url: string): boolean {
-  return (
-    url.startsWith("http://") ||
-    url.startsWith("https://") ||
-    url.startsWith("#")
-  );
-}
-
-function resolveRelativeLink(relUrl: string, baseFilePath: string): string | null {
-  if (isExternalOrHashUrl(relUrl)) return null;
-  const withoutAnchor = relUrl.split("#")[0] || "";
-  const cleaned = normalizeExternalFilePath(withoutAnchor);
-  if (!cleaned) return null;
-  if (cleaned.startsWith("/")) return path.normalize(cleaned);
-  return path.resolve(path.dirname(baseFilePath), cleaned);
-}
-
 interface AppActions {
   toggleSidebar: () => void;
   toggleTerminal: () => void;
@@ -2043,9 +2026,8 @@ function App(): JSX.Element {
     updateFileTextInMap(loadedFiles, filePath, newText);
   const handleModeChange = (filePath: string, mode: PreviewMode) =>
     updateFileModeInMap(loadedFiles, filePath, mode, workspaceRoot());
-  const handleOpenRelativeLink = (relUrl: string, baseFilePath: string) => {
-    const resolved = resolveRelativeLink(relUrl, baseFilePath);
-    if (resolved) openFileInTab(resolved);
+  const handleOpenRelativeLink = (resolvedPath: string) => {
+    openFileInTab(resolvedPath);
   };
 
   const handleSaveAndProceed = async (guard: PendingUnsavedGuard) => {

@@ -20,7 +20,6 @@ import {
   DiffView,
   Editor,
   Input,
-  TextView,
   type DataTableColumn,
   type DataTableSort,
   type DiffLayout,
@@ -28,6 +27,7 @@ import {
 } from "nsh/base";
 import type { PreviewMode } from "./classify";
 import { Icon } from "./icons";
+import { MarkdownPreview } from "./MarkdownPreview";
 import { MermaidDiagramBlock, MermaidRendererHost } from "./mermaid";
 import {
   buildEditorThemeStyles,
@@ -36,11 +36,6 @@ import {
   type EditorTheme,
 } from "./themes";
 import { type LoadedFile } from "./workspace";
-
-const MARKDOWN_MERMAID_EXTENSIONS = [
-  { name: "mermaid", language: "mermaid" },
-  { name: "mermaid", language: "mmd" },
-];
 
 export interface PreviewPaneProps {
   file: Accessor<LoadedFile | undefined>;
@@ -51,7 +46,8 @@ export interface PreviewPaneProps {
   onTextChange: (filePath: string, newText: string) => void;
   onSave: (filePath: string) => void;
   onModeChange?: (filePath: string, mode: PreviewMode) => void;
-  onOpenRelativeLink: (relUrl: string, baseFilePath: string) => void;
+  /** Receives an already-resolved absolute path (markdown links, file links). */
+  onOpenRelativeLink: (resolvedPath: string) => void;
   onCursorChange?: (line: number, column: number) => void;
 }
 
@@ -625,6 +621,10 @@ function PreviewBody(props: {
   paneProps: PreviewPaneProps;
 }): JSX.Element {
   const activeView = computed(() => getActiveView(props.file()));
+  const markdownMounted = signal(false);
+  effect(() => {
+    if (activeView() === "markdown") markdownMounted.set(true);
+  });
   const fontStyle = computed(() => ({
     fontFamily: props.paneProps.fontFamily?.() || undefined,
     fontSize: props.paneProps.fontSize?.() ?? 13,
@@ -669,31 +669,24 @@ function PreviewBody(props: {
           class="flex-1"
         />
       </If>
-      <If when={activeView() === "markdown"}>
-        <Scroll
-          class="flex-1 p-6"
-          style={{ backgroundColor: props.theme().ui.background }}
-        >
-          <TextView
-            testID="preview-markdown"
-            markdown={props.file().text}
-            selectable
-            codeBlockActions={[{ id: "copy" }]}
-            extensions={MARKDOWN_MERMAID_EXTENSIONS}
-            renderCustom={(node) => (
-              <MermaidDiagramBlock
-                code={node.text ?? ""}
-                fontStyle={fontStyle}
-                theme={props.theme}
-              />
-            )}
-            styles={{ codeBlockCode: fontStyle(), code: fontStyle() }}
-            onLinkPress={({ url }) =>
-              props.paneProps.onOpenRelativeLink(url, props.file().path)
-            }
+      {/* The markdown preview WebView stays mounted once first shown: hiding
+          it (display: none) preserves the page, scroll and loaded runtime. */}
+      <View
+        style={{
+          display: activeView() === "markdown" ? "flex" : "none",
+          flex: 1,
+          flexDirection: "column",
+        }}
+      >
+        <If when={markdownMounted()}>
+          <MarkdownPreview
+            file={props.file}
+            theme={props.theme}
+            fontStyle={fontStyle}
+            onOpenRelativeLink={props.paneProps.onOpenRelativeLink}
           />
-        </Scroll>
-      </If>
+        </If>
+      </View>
       <If when={activeView() === "mermaid"}>
         <Scroll
           testID="preview-mermaid"

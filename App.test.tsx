@@ -36,6 +36,18 @@ import {
   getThemeById,
 } from "./src/themes";
 import { isBehindDisk, normalizeExternalFilePath, shortenHomePath } from "./src/workspace";
+import {
+  buildPreviewShellHtml,
+  buildPreviewThemeCss,
+  classifyPreviewLink,
+  handlePreviewMessage,
+  parsePreviewMessage,
+  resolvePreviewImagePath,
+  type PreviewBridgeDeps,
+  type PreviewMessage,
+} from "./src/markdownPage";
+import { buildMermaidConfig } from "./src/mermaid";
+import { MARKDOWN_RUNTIME_JS } from "./src/markdownVendor.generated";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -656,13 +668,18 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(app.shows("text:13px")).toBe(true);
     await app.press("id:font-dialog-close");
 
-    // 13. Quick Open + Markdown Mermaid diagram block & standalone .mmd preview + Copy
+    // 13. Quick Open + Markdown WebView preview & standalone .mmd Mermaid block + Copy
     expect(app.shows("text:fixtures")).toBe(true);
     await app.press("id:titlebar-quick-open");
     await app.waitFor("id:command-palette");
     await app.type("id:command-palette", "guide.md");
     await app.keyboard.press("enter");
     await app.waitFor("id:preview-markdown");
+    expect(app.shows("id:preview-markdown")).toBe(true);
+
+    await app.press("text:architecture.mmd");
+    await app.waitFor("id:preview-mermaid");
+    expect(app.shows("id:preview-mermaid")).toBe(true);
     await app.waitFor("id:mermaid-block >> nth=0");
     expect(app.shows("id:mermaid-block >> nth=0")).toBe(true);
     expect(app.shows("text:MERMAID")).toBe(false);
@@ -670,10 +687,6 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("id:mermaid-toggle-code >> nth=0");
     await app.waitFor("id:mermaid-code-view");
     await app.press("id:mermaid-toggle-code >> nth=0");
-
-    await app.press("text:architecture.mmd");
-    await app.waitFor("id:preview-mermaid");
-    expect(app.shows("id:preview-mermaid")).toBe(true);
     await app.press("id:mode-source");
     await app.waitFor("id:preview-editor");
     await app.keyboard.press("mod+f");
@@ -972,4 +985,369 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(showsText(app, FIXTURE_ROOT)).toBe(false);
   });
 
+});
+
+const PREVIEW_SPEC_MD = `# 文档标题
+
+## 根因
+
+正文段落，包含**加粗**与 \`inline code\`。
+
+## 根因
+
+> [!NOTE]
+> 提示内容。
+
+> [!WARNING]
+> 警告内容。
+
+- [x] 完成项
+- [ ] 未完成项
+
+脚注引用[^f1]。
+
+[^f1]: 脚注说明。
+
+行内公式 $E=mc^2$ 与块级公式：
+
+$$
+\\int_0^1 x^2\\,dx
+$$
+
+| A | B |
+|---|---|
+| 1 | 2 |
+
+\`\`\`ts
+const answer: number = 42;
+\`\`\`
+
+\`\`\`mermaid
+graph TD; A--<B
+\`\`\`
+
+\`\`\`frobnicate
+<raw> & text
+\`\`\`
+`;
+
+interface RenderedMd {
+  html: string;
+  headings: { level: number; text: string; id: string }[];
+}
+
+async function evalMarkdownRuntime(): Promise<
+  typeof globalThis.AedMarkdown
+> {
+  // QuickJS disables the Function constructor; importing the built artifact
+  // runs the same IIFE that MARKDOWN_RUNTIME_JS injects into the page.
+  await import("./vendor/markdown/dist/markdown-runtime.js");
+  return globalThis.AedMarkdown;
+}
+
+function fakeDeps(overrides: Partial<PreviewBridgeDeps> = {}) {
+  const calls = {
+    openUrls: [] as string[],
+    openFiles: [] as string[],
+    readImages: [] as string[],
+    injects: [] as string[],
+    scrolls: [] as [string, number][],
+    mermaidLoadCount: 0,
+  };
+  const deps: PreviewBridgeDeps = {
+    basePath: () => "/ws/docs/guide.md",
+    openUrl: (url) => {
+      calls.openUrls.push(url);
+    },
+    openFile: (p) => {
+      calls.openFiles.push(p);
+    },
+    readImageDataUrl: async (p) => {
+      calls.readImages.push(p);
+      return `data:image/png;base64,${p.length}`;
+    },
+    inject: (js) => {
+      calls.injects.push(js);
+    },
+    loadMermaidJs: async () => {
+      calls.mermaidLoadCount += 1;
+      return "MERMAID_BUNDLE";
+    },
+    rememberScroll: (p, y) => {
+      calls.scrolls.push([p, y]);
+    },
+    currentRenderId: () => 7,
+    mermaidConfig: () => ({ theme: "base" }),
+    ...overrides,
+  };
+  return { calls, deps };
+}
+
+describe("markdown preview runtime & bridge", () => {
+  test("runtime evaluates without document and renders all features", async () => {
+    let md: Awaited<ReturnType<typeof evalMarkdownRuntime>> | null = null;
+    md = await evalMarkdownRuntime();
+    const r = md.renderMarkdown(PREVIEW_SPEC_MD);
+
+    // Duplicate CJK headings get deduped GitHub-style ids.
+    const h = r.headings.filter((x) => x.text === "根因");
+    expect(h).toEqual([
+      { level: 2, text: "根因", id: "根因" },
+      { level: 2, text: "根因", id: "根因-1" },
+    ]);
+    expect(r.headings[0]).toEqual({ level: 1, text: "文档标题", id: "文档标题" });
+
+    expect(r.html).toContain('class="markdown-alert markdown-alert-note"');
+    expect(r.html).toContain('class="markdown-alert markdown-alert-warning"');
+    expect(r.html).toContain("task-list-item-checkbox");
+    expect(r.html).toContain("disabled");
+    expect(r.html).toContain('id="fnref1"');
+    expect(r.html).toContain('id="fn1"');
+    expect(r.html).toContain('class="katex"');
+    expect(r.html).toContain('<pre class="mermaid">');
+    expect(r.html).toContain("A--&lt;B");
+    expect(r.html).toContain("hljs-keyword");
+    expect(r.html).toContain("&lt;raw&gt; &amp; text");
+
+    // The committed dist artifact and MARKDOWN_RUNTIME_JS share one build.
+    expect(md.buildId).toMatch(/^[0-9a-f]{16}$/);
+    expect(MARKDOWN_RUNTIME_JS).toContain(md.buildId);
+  });
+
+  test("classifyPreviewLink routes external/file/none", () => {
+    const base = "/ws/docs/guide.md";
+    expect(classifyPreviewLink("https://example.com/x", base)).toEqual({
+      kind: "external",
+      url: "https://example.com/x",
+    });
+    expect(classifyPreviewLink("http://a.b", base)).toEqual({
+      kind: "external",
+      url: "http://a.b",
+    });
+    expect(classifyPreviewLink("mailto:a@b.c", base)).toEqual({
+      kind: "external",
+      url: "mailto:a@b.c",
+    });
+    expect(classifyPreviewLink("HTTPS://EXAMPLE.COM", base)).toEqual({
+      kind: "external",
+      url: "HTTPS://EXAMPLE.COM",
+    });
+    expect(classifyPreviewLink("ssh://host/x", base)).toEqual({
+      kind: "none",
+    });
+    expect(classifyPreviewLink("x-apple.systempreferences:", base)).toEqual({
+      kind: "none",
+    });
+    expect(classifyPreviewLink("javascript:alert(1)", base)).toEqual({
+      kind: "none",
+    });
+    expect(classifyPreviewLink("data:text/html,x", base)).toEqual({
+      kind: "none",
+    });
+    expect(classifyPreviewLink("", base)).toEqual({ kind: "none" });
+    expect(classifyPreviewLink("#frag", base)).toEqual({ kind: "none" });
+    expect(classifyPreviewLink("./b.md#x", base)).toEqual({
+      kind: "file",
+      path: "/ws/docs/b.md",
+    });
+    expect(classifyPreviewLink("../docs/a%20b.md", base)).toEqual({
+      kind: "file",
+      path: "/ws/docs/a b.md",
+    });
+    expect(classifyPreviewLink("file:///tmp/x.md", base)).toEqual({
+      kind: "file",
+      path: "/tmp/x.md",
+    });
+    expect(classifyPreviewLink("/abs/y.md", base)).toEqual({
+      kind: "file",
+      path: "/abs/y.md",
+    });
+  });
+
+  test("resolvePreviewImagePath accepts image paths only", () => {
+    const base = "/ws/docs/guide.md";
+    expect(resolvePreviewImagePath("poster.png", base)).toBe(
+      "/ws/docs/poster.png",
+    );
+    expect(resolvePreviewImagePath("../img/a.jpeg", base)).toBe(
+      "/ws/img/a.jpeg",
+    );
+    expect(resolvePreviewImagePath("/tmp/p.svg", base)).toBe("/tmp/p.svg");
+    expect(resolvePreviewImagePath("file:///tmp/p.webp", base)).toBe(
+      "/tmp/p.webp",
+    );
+    expect(resolvePreviewImagePath("my%20pic.png", base)).toBe(
+      "/ws/docs/my pic.png",
+    );
+    expect(resolvePreviewImagePath("p.png?v=1", base)).toBe("/ws/docs/p.png");
+    expect(resolvePreviewImagePath("p.png#x", base)).toBe("/ws/docs/p.png");
+    expect(resolvePreviewImagePath("p.PNG", base)).toBe("/ws/docs/p.PNG");
+    expect(resolvePreviewImagePath("https://x.io/p.png", base)).toBeNull();
+    expect(resolvePreviewImagePath("data:image/png;base64,AA", base)).toBeNull();
+    expect(resolvePreviewImagePath("notes.txt", base)).toBeNull();
+    expect(resolvePreviewImagePath("", base)).toBeNull();
+  });
+
+  test("parsePreviewMessage validates shape strictly", () => {
+    expect(parsePreviewMessage('{"type":"link","href":"https://a.b"}')).toEqual(
+      { type: "link", href: "https://a.b" },
+    );
+    expect(
+      parsePreviewMessage('{"type":"images","renderId":3,"srcs":["a.png"]}'),
+    ).toEqual({ type: "images", renderId: 3, srcs: ["a.png"] });
+    expect(
+      parsePreviewMessage('{"type":"scroll","path":"/x.md","y":120}'),
+    ).toEqual({ type: "scroll", path: "/x.md", y: 120 });
+    expect(parsePreviewMessage('{"type":"needMermaid"}')).toEqual({
+      type: "needMermaid",
+    });
+    expect(parsePreviewMessage("not json")).toBeNull();
+    expect(parsePreviewMessage('{"type":"wat"}')).toBeNull();
+    expect(parsePreviewMessage('{"type":"link","href":1}')).toBeNull();
+    expect(
+      parsePreviewMessage('{"type":"images","renderId":"3","srcs":[]}'),
+    ).toBeNull();
+    expect(parsePreviewMessage('{"type":"scroll","path":1,"y":2}')).toBeNull();
+    const big = JSON.stringify({
+      type: "images",
+      renderId: 1,
+      srcs: Array.from({ length: 250 }, (_, i) => `s${i}`),
+    });
+    const parsed = parsePreviewMessage(big);
+    expect(parsed?.type).toBe("images");
+    expect((parsed as { srcs: string[] }).srcs.length).toBe(200);
+  });
+
+  test("handlePreviewMessage routes link/images/scroll/mermaid", async () => {
+    // https link → openUrl once, openFile never.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage(
+        { type: "link", href: "https://example.com/x" },
+        deps,
+      );
+      expect(calls.openUrls).toEqual(["https://example.com/x"]);
+      expect(calls.openFiles).toEqual([]);
+    }
+    // relative link → openFile with resolved path.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage({ type: "link", href: "./b.md" }, deps);
+      expect(calls.openFiles).toEqual(["/ws/docs/b.md"]);
+      expect(calls.openUrls).toEqual([]);
+    }
+    // javascript link → nothing.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage(
+        { type: "link", href: "javascript:alert(1)" },
+        deps,
+      );
+      expect(calls.openUrls).toEqual([]);
+      expect(calls.openFiles).toEqual([]);
+    }
+    // images → reads only resolvable srcs, one setImages inject.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage(
+        {
+          type: "images",
+          renderId: 7,
+          srcs: ["p.png", "https://x.io/a.png", "notes.txt"],
+        },
+        deps,
+      );
+      expect(calls.readImages).toEqual(["/ws/docs/p.png"]);
+      expect(calls.injects.length).toBe(1);
+      expect(calls.injects[0]).toContain("__aed.setImages");
+      expect(calls.injects[0]).toContain('"renderId":7');
+      expect(calls.injects[0]).toContain('"https://x.io/a.png":null');
+      expect(calls.injects[0]).toContain('"notes.txt":null');
+    }
+    // stale renderId → nothing.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage(
+        { type: "images", renderId: 3, srcs: ["p.png"] },
+        deps,
+      );
+      expect(calls.readImages).toEqual([]);
+      expect(calls.injects).toEqual([]);
+    }
+    // needMermaid with bundle → bundle injected then mermaidReady.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage({ type: "needMermaid" }, deps);
+      expect(calls.injects[0]).toBe("MERMAID_BUNDLE");
+      expect(calls.injects[1]).toContain("__aed.mermaidReady");
+    }
+    // needMermaid without bundle → mermaidUnavailable.
+    {
+      const { calls, deps } = fakeDeps({ loadMermaidJs: async () => null });
+      await handlePreviewMessage({ type: "needMermaid" }, deps);
+      expect(calls.injects[0]).toContain("__aed.mermaidUnavailable");
+    }
+    // scroll → rememberScroll.
+    {
+      const { calls, deps } = fakeDeps();
+      await handlePreviewMessage(
+        { type: "scroll", path: "/ws/a.md", y: 420 },
+        deps,
+      );
+      expect(calls.scrolls).toEqual([["/ws/a.md", 420]]);
+    }
+  });
+
+  test("buildPreviewShellHtml carries the strict CSP and no script tags", () => {
+    const html = buildPreviewShellHtml();
+    expect(html).toContain(
+      "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: https:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'",
+    );
+    expect(html).not.toContain("<script");
+    expect(html).toContain('id="aed-content"');
+    expect(html).toContain('id="aed-toc"');
+    expect(html).toContain('id="aed-theme"');
+  });
+
+  test("buildPreviewThemeCss maps theme + font to preview CSS", () => {
+    const carbon = getThemeById("industrial-carbon")!;
+    const paper = getThemeById("industrial-paper")!;
+    const darkCss = buildPreviewThemeCss(carbon, {
+      fontFamily: "Menlo",
+      fontSize: 14,
+    });
+    expect(darkCss).toContain(carbon.ui.background);
+    expect(darkCss).toContain(carbon.ui.foreground);
+    expect(darkCss).toContain(carbon.ui.accent);
+    expect(darkCss).toContain(carbon.syntax.keyword);
+    expect(darkCss).toContain("Menlo");
+    expect(darkCss).toContain("14px");
+    expect(darkCss).toContain("color-scheme: dark");
+    const lightCss = buildPreviewThemeCss(paper, { fontSize: 13 });
+    expect(lightCss).toContain(paper.ui.background);
+    expect(lightCss).toContain(paper.syntax.keyword);
+    expect(lightCss).toContain("color-scheme: light");
+  });
+
+  test("buildMermaidConfig keeps the worker's theme variables", () => {
+    const carbon = getThemeById("industrial-carbon")!;
+    const cfg = buildMermaidConfig(carbon, "Menlo") as {
+      securityLevel: string;
+      theme: string;
+      fontFamily: string;
+      themeVariables: Record<string, unknown>;
+    };
+    expect(cfg.theme).toBe("base");
+    expect(cfg.fontFamily).toContain("Menlo");
+    expect(cfg.fontFamily).toContain("-apple-system");
+    expect(cfg.themeVariables.darkMode).toBe(true);
+    expect(cfg.themeVariables.background).toBe("transparent");
+    expect(cfg.themeVariables.primaryColor).toBe("#232220");
+    expect(cfg.themeVariables.primaryTextColor).toBe("#ede8de");
+    expect(cfg.themeVariables.primaryBorderColor).toBe("#33312d");
+    expect(cfg.themeVariables.lineColor).toBe("#8f897e");
+    expect(cfg.themeVariables.secondaryColor).toBe("#1d1c1a");
+    expect(cfg.themeVariables.tertiaryColor).toBe("#161514");
+    expect(cfg.themeVariables.fontSize).toBe("13px");
+  });
 });

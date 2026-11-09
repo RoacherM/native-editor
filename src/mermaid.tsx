@@ -36,6 +36,7 @@ interface PendingJob {
   theme: "dark" | "light";
   palette: ThemeUiColors;
   fontFamily: string;
+  mermaidConfig: MermaidInitConfig;
   resolve: (res: MermaidRenderResult) => void;
   reject: (err: Error) => void;
 }
@@ -133,7 +134,64 @@ async function scanExtensionRoot(extRoot: string): Promise<string | null> {
   return null;
 }
 
-async function loadMermaidBundleJs(): Promise<string | null> {
+export interface MermaidInitConfig {
+  startOnLoad: boolean;
+  securityLevel: string;
+  theme: string;
+  look: string;
+  fontFamily: string;
+  flowchart: { htmlLabels: boolean; curve: string; padding: number };
+  sequence: { useMaxWidth: boolean };
+  themeVariables: Record<string, unknown>;
+}
+
+/**
+ * The `mermaid.initialize(...)` config shared by the offscreen .mmd worker and
+ * the markdown preview page. The preview overrides `securityLevel: "strict"`.
+ */
+export function buildMermaidConfig(
+  theme: EditorTheme,
+  fontFamily: string,
+): MermaidInitConfig {
+  const ui = theme.ui;
+  const isDark = theme.appearance !== "light";
+  const font =
+    (fontFamily ? fontFamily + ", " : "") +
+    '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif';
+  return {
+    startOnLoad: false,
+    securityLevel: "loose",
+    theme: "base",
+    look: "classic",
+    fontFamily: font,
+    flowchart: { htmlLabels: true, curve: "basis", padding: 14 },
+    sequence: { useMaxWidth: false },
+    themeVariables: {
+      darkMode: isDark,
+      fontFamily: font,
+      fontSize: "13px",
+      background: "transparent",
+      primaryColor: ui.card,
+      primaryTextColor: ui.foreground,
+      primaryBorderColor: ui.border,
+      lineColor: ui.mutedForeground,
+      secondaryColor: ui.sidebar,
+      tertiaryColor: ui.background,
+      clusterBkg: ui.sidebar,
+      clusterBorder: ui.border,
+      edgeLabelBackground: ui.card,
+      actorBkg: ui.card,
+      actorBorder: ui.border,
+      actorTextColor: ui.foreground,
+      signalColor: ui.foreground,
+      noteBkgColor: ui.sidebar,
+      noteTextColor: ui.foreground,
+      noteBorderColor: ui.border,
+    },
+  };
+}
+
+export async function loadMermaidBundleJs(): Promise<string | null> {
   const cached = await tryReadCachedBundle();
   if (cached) return cached;
 
@@ -324,43 +382,7 @@ window.__nshRenderMermaid = async function(req) {
     const p = req.palette || {};
     const fg = p.foreground || (isDark ? "#ede8de" : "#141414");
     const card = p.card || (isDark ? "#232220" : "#f7f4ee");
-    const sidebar = p.sidebar || (isDark ? "#1d1c1a" : "#e5e0d5");
-    const bg = p.background || (isDark ? "#161514" : "#efebe3");
-    const border = p.border || (isDark ? "#33312d" : "#cfc8bb");
-    const muted = p.mutedForeground || (isDark ? "#8f897e" : "#6d685f");
-    const font = (req.fontFamily ? req.fontFamily + ", " : "") +
-      '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif';
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "loose",
-      theme: "base",
-      look: "classic",
-      fontFamily: font,
-      flowchart: { htmlLabels: true, curve: "basis", padding: 14 },
-      sequence: { useMaxWidth: false },
-      themeVariables: {
-        darkMode: isDark,
-        fontFamily: font,
-        fontSize: "13px",
-        background: "transparent",
-        primaryColor: card,
-        primaryTextColor: fg,
-        primaryBorderColor: border,
-        lineColor: muted,
-        secondaryColor: sidebar,
-        tertiaryColor: bg,
-        clusterBkg: sidebar,
-        clusterBorder: border,
-        edgeLabelBackground: card,
-        actorBkg: card,
-        actorBorder: border,
-        actorTextColor: fg,
-        signalColor: fg,
-        noteBkgColor: sidebar,
-        noteTextColor: fg,
-        noteBorderColor: border,
-      },
-    });
+    mermaid.initialize(req.mermaidConfig || {});
     const out = await mermaid.render("nsh-mmd-" + req.id, req.code);
     stage.innerHTML = out.svg;
     const svgEl = stage.querySelector("svg");
@@ -492,6 +514,7 @@ function flushPendingJobs(): void {
       theme: job.theme,
       palette: job.palette,
       fontFamily: job.fontFamily,
+      mermaidConfig: job.mermaidConfig,
     });
     activeWebViewRef.injectJavaScript(`window.__nshRenderMermaid(${payload});`);
   }
@@ -573,6 +596,7 @@ export function requestMermaidRender(
       theme: resolvedTheme.appearance,
       palette: resolvedTheme.ui,
       fontFamily,
+      mermaidConfig: buildMermaidConfig(resolvedTheme, fontFamily),
       resolve: (res) => {
         clearTimeout(timer);
         renderCache.set(cacheKey, res);
