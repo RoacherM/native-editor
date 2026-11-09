@@ -53,7 +53,8 @@ static void enforceAllWindowsMinSize(void) {
   }
 }
 
-static CFAbsoluteTime gLaunchTime = 0.0;
+static CFAbsoluteTime gDidFinishLaunchingTime = 0.0;
+static BOOL gDidFinishLaunching = NO;
 static BOOL gHasClaimedInitialTarget = NO;
 
 static void bringAppToFront(NSApplication *app) {
@@ -116,7 +117,7 @@ static void spawnStandaloneWindow(NSString *path) {
 
 static void handleExternalOpenPath(NSApplication *app, NSString *path) {
   if (!path || [path length] == 0) return;
-  BOOL isColdInitialOpen = (!gHasClaimedInitialTarget && (CFAbsoluteTimeGetCurrent() - gLaunchTime) < 1.2);
+  BOOL isColdInitialOpen = (!gHasClaimedInitialTarget && (!gDidFinishLaunching || (CFAbsoluteTimeGetCurrent() - gDidFinishLaunchingTime) < 1.5));
   if (isColdInitialOpen) {
     gHasClaimedInitialTarget = YES;
     recordOpenedFilePath(path);
@@ -167,7 +168,6 @@ static void swizzled_setDelegate(id self, SEL _cmd, id delegate) {
 __attribute__((constructor))
 static void initFinderBridge(void) {
   unsetenv("DYLD_INSERT_LIBRARIES");
-  gLaunchTime = CFAbsoluteTimeGetCurrent();
   const char *initFile = getenv("AED_OPEN_FILE");
   const char *initRoot = getenv("AED_ROOT");
   if ((initFile && initFile[0] != '\0') || (initRoot && initRoot[0] != '\0')) {
@@ -190,6 +190,10 @@ static void initFinderBridge(void) {
                   object:nil
                    queue:nil
               usingBlock:^(NSNotification *note) {
+                if (!gDidFinishLaunching) {
+                  gDidFinishLaunching = YES;
+                  gDidFinishLaunchingTime = CFAbsoluteTimeGetCurrent();
+                }
                 attachOpenHandlersToDelegate([NSApp delegate]);
                 enforceAllWindowsMinSize();
                 bringAppToFront(NSApp);

@@ -31,6 +31,7 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 
 | ID | 子系统 | 标题 | Commit | 回归测试 | 日期 |
 |---|---|---|---|---|---|
+| I-008 | `DESIGN.md` | 冷启动不再强制自动打开 `aed.recentWorkspaces[0]` 旧工作区（始终进 `WelcomePanel` 海报页保留 `Recent` 列表），且 `finder_bridge.m` 初始冷启动窗口改为基于 `NSApplicationDidFinishLaunchingNotification` 判定避免 Gatekeeper 延迟丢单文件事件 | `7814e39` | `App.test.tsx` › clean launch without workspace hides file tree, shows Aed welcome panel, and migrates legacy storage | 2026-11-09 |
 | I-007 | `DESIGN.md` | 外部文件点击一律以无文件树独立窗口打开：运行态通过 `open -n <Aed.app> --args <path>` 新开独立无侧栏窗口，冷启动清空自动恢复工作区，分离独立无信号依赖的队列定时器并支持 `file://`/`#L<line>`/`:line:col` 归一化 | `039a263` | `App.test.tsx` › supports returning to welcome page, static sidebar title, dirty-tab guard, and loose external file without hijacking workspace | 2026-11-07 |
 | I-006 | `DESIGN.md` | 文件打开与渲染速度优化：并发目录/Git 扫描、工作区小文件预热与 0ms 同步 Tab 复用、Mermaid WebView 按需懒加载、语法高亮 LRU 缓存与预编译正则、CSV 无引号快路径及 PDF QuickLook 缓存 | `61b6a29` | `App.test.tsx` › formats binary bytes as hex + ASCII dump and computes syntax decorations across themes | 2026-11-07 |
 | I-005 | `DESIGN.md` | 工作区与文件交互逻辑重构：静态侧栏标题防误触弹窗、`Close Folder` 返回开屏页、纯只读底部状态栏防误触、脏文件拦截确认框及外部单文件独立打开 | `ba99199` | `App.test.tsx` › supports returning to welcome page, static sidebar title, dirty-tab guard, and loose external file without hijacking workspace | 2026-11-07 |

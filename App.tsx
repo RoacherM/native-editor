@@ -1591,8 +1591,7 @@ async function initUserPreferences(
   themeId: Signal<string>,
   defaultShell: Signal<string>,
   availableShells: Signal<ShellProfile[]>,
-  recentWorkspaces: Signal<string[]>,
-  onRestoreRecentWorkspace?: (folderPath: string) => Promise<void>
+  recentWorkspaces: Signal<string[]>
 ): Promise<void> {
   const [savedFamily, savedSize, savedTheme, savedShell, savedRecent] =
     await Promise.all([
@@ -1616,12 +1615,7 @@ async function initUserPreferences(
   const recent = parseRecentWorkspaces(savedRecent);
   recentWorkspaces.set(recent);
 
-  const [, env] = await Promise.all([
-    recent.length > 0 && onRestoreRecentWorkspace
-      ? onRestoreRecentWorkspace(recent[0])
-      : Promise.resolve(),
-    discoverTerminalEnvironment(),
-  ]);
+  const env = await discoverTerminalEnvironment();
   applySavedThemeAndFont(
     fontFamily,
     fontSize,
@@ -1638,7 +1632,6 @@ async function initUserPreferences(
 
 function App(): JSX.Element {
   const initialRoot = getInitialWorkspaceRoot();
-  let workspaceTouched = initialRoot.length > 0 || !!getInitialOpenFile();
   const workspaceRoot = signal<string>(initialRoot);
   const recentWorkspaces = signal<string[]>([]);
   const snapshot = signal<WorkspaceSnapshot>({
@@ -1719,7 +1712,6 @@ function App(): JSX.Element {
   };
 
   const resetWorkspaceState = (nextRoot: string) => {
-    workspaceTouched = true;
     workspaceRoot.set(nextRoot);
     openTabs.set([]);
     activeFilePath.set(null);
@@ -1793,7 +1785,6 @@ function App(): JSX.Element {
   const openExternalFile = async (rawPath: string) => {
     const filePath = normalizeExternalFilePath(rawPath);
     if (!filePath) return;
-    workspaceTouched = true;
     try {
       if (await isDirectoryPath(filePath)) {
         switchToWorkspace(filePath);
@@ -1821,7 +1812,6 @@ function App(): JSX.Element {
   };
 
   const openFileInTab = async (filePath: string, openInDiff?: boolean) => {
-    workspaceTouched = true;
     const syncHit = tryReuseLoadedFileSync(
       loadedFiles(),
       filePath,
@@ -1843,21 +1833,22 @@ function App(): JSX.Element {
     activateLoadedTab(filePath, file);
   };
 
-  let pollingFinderQueue = false;
-  const drainFinderOpenQueue = async (): Promise<boolean> => {
-    if (pollingFinderQueue) return false;
-    pollingFinderQueue = true;
-    try {
-      const queued = await consumeFinderOpenQueue();
-      if (queued.length === 0) return false;
-      workspaceTouched = true;
-      for (const f of queued) {
-        await openExternalFile(f);
+  let inflightDrain: Promise<boolean> | null = null;
+  const drainFinderOpenQueue = (): Promise<boolean> => {
+    if (inflightDrain) return inflightDrain;
+    inflightDrain = (async () => {
+      try {
+        const queued = await consumeFinderOpenQueue();
+        if (queued.length === 0) return false;
+        for (const f of queued) {
+          await openExternalFile(f);
+        }
+        return true;
+      } finally {
+        inflightDrain = null;
       }
-      return true;
-    } finally {
-      pollingFinderQueue = false;
-    }
+    })();
+    return inflightDrain;
   };
 
   let appInitialized = false;
@@ -1875,7 +1866,6 @@ function App(): JSX.Element {
     void (async () => {
       const initFile = getInitialOpenFile();
       if (initFile) {
-        workspaceTouched = true;
         await openExternalFile(initFile);
       }
       await drainFinderOpenQueue();
@@ -1885,19 +1875,7 @@ function App(): JSX.Element {
         themeId,
         defaultShell,
         availableShells,
-        recentWorkspaces,
-        async (lastFolder) => {
-          if (await drainFinderOpenQueue()) return;
-          if (!workspaceTouched && !workspaceRoot() && !getInitialOpenFile()) {
-            const scanned = await scanWorkspace(lastFolder);
-            if (await drainFinderOpenQueue()) return;
-            if (!workspaceTouched && scanned.entries.length > 0) {
-              workspaceRoot.set(lastFolder);
-              snapshot.set(scanned);
-              void warmWorkspaceFiles(scanned);
-            }
-          }
-        }
+        recentWorkspaces
       );
     })();
   });

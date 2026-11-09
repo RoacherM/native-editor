@@ -218,7 +218,8 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await cleanApp.setViewport(280, 450);
     expect(cleanApp.spanStyle("text:Aed").fontSize).toBeGreaterThanOrEqual(56);
 
-    // Subsequent launches with saved recentWorkspaces auto-restore workspace without showing poster
+    // Subsequent launches with saved recentWorkspaces must stay on WelcomePanel poster
+    // (listing recent workspaces for 1-click access) instead of forcibly opening the old folder.
     const returningApp = await open("./App.tsx", {
       platform: "macos",
       width: 1280,
@@ -227,8 +228,12 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
         "aed.recentWorkspaces": JSON.stringify([FIXTURE_ROOT]),
       },
     });
+    await returningApp.waitFor("id:welcome-recent-fixtures");
+    expect(returningApp.shows("id:welcome-panel")).toBe(true);
+    expect(returningApp.shows("id:empty-editor-panel")).toBe(false);
+    expect(returningApp.shows("id:workspace-tree")).toBe(false);
+    await returningApp.press("id:welcome-recent-fixtures");
     await returningApp.waitFor("id:empty-editor-panel");
-    expect(returningApp.shows("id:welcome-panel")).toBe(false);
     expect(returningApp.shows("id:workspace-tree")).toBe(true);
   });
 
