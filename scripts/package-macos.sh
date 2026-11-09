@@ -4,6 +4,7 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+VERSION="$(plutil -extract version raw nsh.json)"
 APP_BUNDLE=".nsh/out/Aed.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 PLIST_PATH="$APP_BUNDLE/Contents/Info.plist"
@@ -199,7 +200,7 @@ open "/Applications/Aed.app"
 EOF
 chmod +x ".nsh/dmg-stage/Install & Set Default.command"
 
-ditto -c -k --norsrc --noextattr --keepParent "$APP_BUNDLE" .nsh/out/Aed-0.0.1-macos-arm64.zip
-hdiutil create -volname "Aed 0.0.1" -srcfolder .nsh/dmg-stage -ov -format UDZO .nsh/out/Aed-0.0.1-macos-arm64.dmg
+ditto -c -k --norsrc --noextattr --keepParent "$APP_BUNDLE" ".nsh/out/Aed-$VERSION-macos-arm64.zip"
+hdiutil create -volname "Aed $VERSION" -srcfolder .nsh/dmg-stage -ov -format UDZO ".nsh/out/Aed-$VERSION-macos-arm64.dmg"
 rm -rf .nsh/dmg-stage
 ls -lh .nsh/out/

@@ -1,7 +1,7 @@
 {
   "name": "Aed",
   "id": "dev.byronwayne.aed",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "build": 1,
   "icon": "assets/icon.png",
   "theme": {

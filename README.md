@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/RoacherM/native-editor/master/insta
 
 ### Manual Download (DMG / ZIP)
 
-Grab [`Aed-0.0.1-macos-arm64.dmg`](https://github.com/RoacherM/native-editor/releases/latest) or [`Aed-0.0.1-macos-arm64.zip`](https://github.com/RoacherM/native-editor/releases/latest) from [Releases](https://github.com/RoacherM/native-editor/releases), drag **Aed.app** into `/Applications`, and clear quarantine on first launch:
+Grab `Aed-<version>-macos-arm64.dmg` or `.zip` from the [latest release](https://github.com/RoacherM/native-editor/releases/latest) (all versions: [Releases](https://github.com/RoacherM/native-editor/releases)), drag **Aed.app** into `/Applications`, and clear quarantine on first launch:
 
 ```sh
 xattr -cr "/Applications/Aed.app"
