@@ -13,24 +13,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Downloading latest Aed release from $REPO..."
-ZIP_URL="https://github.com/$REPO/releases/latest/download/Aed-0.0.1-macos-arm64.zip"
-DMG_URL="https://github.com/$REPO/releases/latest/download/Aed-0.0.1-macos-arm64.dmg"
+echo "==> Finding the latest Aed release of $REPO..."
+# /releases/latest redirects to /releases/tag/v<version>; asset names carry the version.
+LATEST_URL="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+VERSION="${LATEST_URL##*/v}"
+case "$VERSION" in
+  ""|*/*) echo "error: cannot read the latest version from $LATEST_URL" >&2; exit 1 ;;
+esac
+BASE_URL="https://github.com/$REPO/releases/download/v$VERSION"
+ZIP_URL="$BASE_URL/Aed-$VERSION-macos-arm64.zip"
+DMG_URL="$BASE_URL/Aed-$VERSION-macos-arm64.dmg"
 
-echo "==> Extracting $APP_NAME..."
-rm -rf "$INSTALL_DIR/Native Editor.app" "$INSTALL_DIR/$APP_NAME"
+# Download and unpack first: a failed download must not remove the installed app.
+echo "==> Downloading Aed $VERSION..."
 if curl -fsSL "$ZIP_URL" -o "$TMP_DIR/Aed.zip" 2>/dev/null; then
   ditto -x -k --norsrc "$TMP_DIR/Aed.zip" "$TMP_DIR"
-  echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
-  mv "$TMP_DIR/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
 else
   curl -fsSL "$DMG_URL" -o "$TMP_DIR/Aed.dmg"
   mkdir -p "$TMP_DIR/mnt"
   hdiutil attach -nobrowse -readonly -noverify -noautoopen -mountpoint "$TMP_DIR/mnt" "$TMP_DIR/Aed.dmg" >/dev/null
-  echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
-  ditto --norsrc "$TMP_DIR/mnt/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
+  ditto --norsrc "$TMP_DIR/mnt/$APP_NAME" "$TMP_DIR/$APP_NAME"
   hdiutil detach "$TMP_DIR/mnt" -force -quiet 2>/dev/null || true
 fi
+
+echo "==> Installing to $INSTALL_DIR/$APP_NAME..."
+rm -rf "$INSTALL_DIR/Native Editor.app" "$INSTALL_DIR/$APP_NAME"
+mv "$TMP_DIR/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
 
 /usr/bin/plutil -replace LSMinimumSystemVersion -string "11.0" "$INSTALL_DIR/$APP_NAME/Contents/Info.plist" 2>/dev/null || true
 
