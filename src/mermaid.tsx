@@ -424,6 +424,41 @@ export function requeueOrphanedJobs<T>(active: Map<number, T>, pending: T[]): vo
   active.clear();
 }
 
+/**
+ * A render with no reply after this long fails, so a diagram never stays
+ * blank: a stalled CDN script (no offline bundle), or a WebView that never
+ * posts `ready` or never answers.
+ */
+const RENDER_TIMEOUT_MS = 20_000;
+
+/** Remove job `id` from whichever queue holds it (in flight first); undefined when already settled. */
+export function takeJob<T extends { id: number }>(
+  id: number,
+  active: Map<number, T>,
+  pending: T[]
+): T | undefined {
+  const job = active.get(id);
+  if (job) {
+    active.delete(id);
+    return job;
+  }
+  const index = pending.findIndex((p) => p.id === id);
+  return index >= 0 ? pending.splice(index, 1)[0] : undefined;
+}
+
+function expireJob(id: number): void {
+  const job = takeJob(id, activeJobs, pendingQueue);
+  if (!job) return;
+  if (!workerReady) {
+    // The worker never started: drop it so the next diagram loads it again.
+    initStarted = false;
+    workerHtmlSignal.set("");
+  }
+  job.reject(
+    new Error("The diagram renderer did not respond (offline?). Reopen the file to try again.")
+  );
+}
+
 function flushPendingJobs(): void {
   if (!workerReady || !activeWebViewRef) return;
   while (pendingQueue.length > 0) {
@@ -504,18 +539,22 @@ export function requestMermaidRender(
 
   const promise = new Promise<MermaidRenderResult>((resolve, reject) => {
     jobCounter += 1;
+    const id = jobCounter;
+    const timer = setTimeout(() => expireJob(id), RENDER_TIMEOUT_MS);
     pendingQueue.push({
-      id: jobCounter,
+      id,
       code: normalized,
       theme: resolvedTheme.appearance,
       palette: resolvedTheme.ui,
       fontFamily,
       resolve: (res) => {
+        clearTimeout(timer);
         renderCache.set(cacheKey, res);
         inflightRequests.delete(cacheKey);
         resolve(res);
       },
       reject: (err) => {
+        clearTimeout(timer);
         inflightRequests.delete(cacheKey);
         reject(err);
       },

@@ -37,7 +37,8 @@ import { FileBadge, Icon } from "./src/icons";
 import { formatMediaMeta, PreviewPane } from "./src/PreviewPane";
 import {
   canToggleSidebar,
-  classifyExternalFile,
+  externalOpenKeepsTree,
+  type ExternalOrigin,
   decideGuard,
   deriveEditorSurface,
   nextActiveAfterClose,
@@ -67,6 +68,9 @@ import {
   lookupGitStatus,
   normalizeExternalFilePath,
   pickWorkspaceFolder,
+  acceptDiskVersion,
+  hasChangedOnDisk,
+  reloadFromDisk,
   reloadIfChangedOnDisk,
   saveFileText,
   scanWorkspace,
@@ -1146,6 +1150,59 @@ function UnsavedChangesDialog(props: {
   );
 }
 
+/** Shown above the editor while the active tab has unsaved edits and also changed on disk. */
+function DiskConflictBanner(props: {
+  file: Accessor<LoadedFile | undefined>;
+  conflictPath: Accessor<string | null>;
+  theme: Accessor<EditorTheme>;
+  onResolve: (choice: "reload" | "keep") => void;
+}): JSX.Element {
+  const visible = computed(() => {
+    const file = props.file();
+    return !!file && file.dirty && props.conflictPath() === file.path;
+  });
+  return (
+    <If when={visible()}>
+      <View
+        testID="disk-conflict-banner"
+        style={{ backgroundColor: props.theme().ui.card }}
+        class="h-9 px-3 flex-row items-center gap-3 select-none"
+      >
+        <View
+          style={{ backgroundColor: props.theme().ui.accent }}
+          class="w-1.5 h-1.5 rounded-full"
+        />
+        <Text
+          style={{ color: props.theme().ui.foreground }}
+          class="flex-1 text-xs truncate"
+        >
+          {`${props.file()?.name ?? ""} changed on disk. Your edits are not saved yet.`}
+        </Text>
+        <Button
+          testID="disk-conflict-keep-btn"
+          onPress={() => props.onResolve("keep")}
+          style={{ backgroundColor: props.theme().ui.sidebar }}
+          class="h-6 px-3 rounded border-none shadow-none"
+        >
+          <Text style={{ color: props.theme().ui.foreground }} class="text-xs">
+            Keep My Edits
+          </Text>
+        </Button>
+        <Button
+          testID="disk-conflict-reload-btn"
+          onPress={() => props.onResolve("reload")}
+          style={{ backgroundColor: props.theme().ui.accent }}
+          class="h-6 px-3 rounded border-none shadow-none"
+        >
+          <Text style={{ color: "#ffffff" }} class="text-xs font-medium">
+            Reload from Disk
+          </Text>
+        </Button>
+      </View>
+    </If>
+  );
+}
+
 function EmptyEditorPanel(props: {
   theme: Accessor<EditorTheme>;
   onQuickOpen: () => void;
@@ -1454,6 +1511,88 @@ async function revalidateTabInMap(
   loadedFiles.set({ ...loadedFiles(), [filePath]: fresh });
 }
 
+/** How often the active tab is compared with the disk (one `stat`). */
+const DISK_CHECK_MS = 1500;
+
+/**
+ * Compare an open tab with the disk. A clean tab takes the new bytes; a dirty
+ * tab keeps the user's edits and is reported as a conflict for the user to
+ * resolve. Returns whether the tab is in conflict.
+ */
+async function checkTabAgainstDisk(
+  loadedFiles: Signal<Record<string, LoadedFile>>,
+  openTabs: Accessor<string[]>,
+  filePath: string,
+  root: string
+): Promise<boolean> {
+  const file = loadedFiles()[filePath];
+  if (!file) return false;
+  if (!file.dirty) {
+    await revalidateTabInMap(loadedFiles, openTabs, filePath, root);
+    return false;
+  }
+  return hasChangedOnDisk(file);
+}
+
+/**
+ * Compare the active tab with the disk every DISK_CHECK_MS and keep
+ * `conflictPath` current. Returns the function that stops the watch.
+ */
+function watchActiveTabOnDisk(opts: {
+  loadedFiles: Signal<Record<string, LoadedFile>>;
+  openTabs: Accessor<string[]>;
+  activeFilePath: Accessor<string | null>;
+  workspaceRoot: Accessor<string>;
+  conflictPath: Signal<string | null>;
+}): () => void {
+  let checking = false;
+  const tick = async () => {
+    const filePath = opts.activeFilePath();
+    if (checking || !filePath) return;
+    checking = true;
+    try {
+      const conflict = await checkTabAgainstDisk(
+        opts.loadedFiles,
+        opts.openTabs,
+        filePath,
+        opts.workspaceRoot()
+      );
+      if (conflict) opts.conflictPath.set(filePath);
+      else if (opts.conflictPath() === filePath) opts.conflictPath.set(null);
+    } finally {
+      checking = false;
+    }
+  };
+  const timer = setInterval(() => void tick(), DISK_CHECK_MS);
+  return () => clearInterval(timer);
+}
+
+/**
+ * The user's answer to a disk conflict. `reload` drops the edits and shows the
+ * disk version; `keep` keeps the edits and takes the disk version as known,
+ * so the next save overwrites it.
+ */
+async function resolveDiskConflict(
+  loadedFiles: Signal<Record<string, LoadedFile>>,
+  openTabs: Accessor<string[]>,
+  conflictPath: Signal<string | null>,
+  choice: "reload" | "keep",
+  root: string
+): Promise<void> {
+  const filePath = conflictPath();
+  const file = filePath ? loadedFiles()[filePath] : undefined;
+  if (!file) return;
+  if (choice === "keep") {
+    await acceptDiskVersion(file.path);
+  } else {
+    const fresh = await reloadFromDisk(file, root);
+    if (fresh && openTabs().includes(file.path)) {
+      loadedFiles.set({ ...loadedFiles(), [file.path]: fresh });
+    }
+  }
+  conflictPath.set(null);
+}
+
 async function saveFileInMap(
   loadedFiles: Signal<Record<string, LoadedFile>>,
   filePath: string,
@@ -1665,6 +1804,8 @@ function App(): JSX.Element {
   ]);
   const fontDialogOpen = signal<boolean>(false);
   const pendingUnsaved = signal<PendingUnsavedGuard | null>(null);
+  /** The tab whose unsaved edits clash with a newer version on disk. */
+  const diskConflictPath = signal<string | null>(null);
 
   const setFontFamily = (next: string) => {
     fontFamily.set(next);
@@ -1774,9 +1915,9 @@ function App(): JSX.Element {
 
   /**
    * `click`: Finder / Herdr / `AED_OPEN_FILE` — always a tree-less window (I-007).
-   * `drop`: dragged onto this window — a file from the open folder keeps the tree.
+   * `drop`: dragged onto this window — opens here as a tab; the folder and tree stay.
    */
-  const openExternalFile = async (rawPath: string, origin: "click" | "drop" = "click") => {
+  const openExternalFile = async (rawPath: string, origin: ExternalOrigin = "click") => {
     const filePath = normalizeExternalFilePath(rawPath);
     if (!filePath) return;
     try {
@@ -1785,9 +1926,7 @@ function App(): JSX.Element {
         if (desktopAvailable) Window.orderFront();
         return;
       }
-      if (classifyExternalFile(workspaceRoot(), filePath, origin) === "loose-file") {
-        clearWorkspaceTree();
-      }
+      if (!externalOpenKeepsTree(origin)) clearWorkspaceTree();
       await openFileInTab(filePath);
       if (desktopAvailable) Window.orderFront();
     } catch {
@@ -1983,6 +2122,18 @@ function App(): JSX.Element {
   const editorSurface = computed(() =>
     deriveEditorSurface(workspaceRoot(), activeFile() !== undefined)
   );
+  // The active tab follows the disk while it stays open (terminal, git, formatter edits).
+  effect(() => {
+    cleanup(
+      watchActiveTabOnDisk({
+        loadedFiles,
+        openTabs,
+        activeFilePath,
+        workspaceRoot,
+        conflictPath: diskConflictPath,
+      })
+    );
+  });
 
   const changedCount = computed(() => Object.keys(snapshot().gitStatusMap).length);
   const treeItems = computed(() =>
@@ -2098,6 +2249,14 @@ function App(): JSX.Element {
                   class="flex-1 min-h-0 overflow-hidden"
                   style={{ backgroundColor: activeTheme().ui.background }}
                 >
+                  <DiskConflictBanner
+                    file={activeFile}
+                    conflictPath={diskConflictPath}
+                    theme={activeTheme}
+                    onResolve={(choice) =>
+                      void resolveDiskConflict(loadedFiles, openTabs, diskConflictPath, choice, workspaceRoot())
+                    }
+                  />
                   <If when={editorSurface() === "file"}>
                     <PreviewPane
                       file={activeFile}

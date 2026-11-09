@@ -19,8 +19,8 @@ export type WindowEvent =
   | "open-folder"
   | "reopen-current-folder"
   | "close-folder"
-  | "open-workspace-file"
-  | "open-loose-file"
+  | "drop-file"
+  | "click-file"
   | "close-last-tab";
 
 /**
@@ -28,11 +28,11 @@ export type WindowEvent =
  * mode after the event. `nsh check` fails when a mode or event is added
  * without a row; `App.test.tsx` replays every cell through the functions
  * below, so the table cannot drift from the code App runs.
- * `open-workspace-file` is a file from inside the open folder dropped onto
- * this window; `open-loose-file` is any external click (Finder, Herdr,
- * `AED_OPEN_FILE`, I-007) or a dropped file from outside the folder.
- * `reopen-current-folder` and `open-workspace-file` need a folder; from
- * `home` / `loose` they behave as `open-folder` / `open-loose-file`.
+ * `drop-file` is any file dragged onto this window: it opens here as a tab
+ * and the mode stays. `click-file` is an external click (Finder, Herdr,
+ * `AED_OPEN_FILE`, I-007): always a tree-less window.
+ * `reopen-current-folder` needs a folder; from `home` / `loose` it behaves
+ * as `open-folder`.
  */
 export const WINDOW_TRANSITIONS: Readonly<
   Record<WindowMode, Readonly<Record<WindowEvent, WindowMode>>>
@@ -41,24 +41,24 @@ export const WINDOW_TRANSITIONS: Readonly<
     "open-folder": "workspace",
     "reopen-current-folder": "workspace",
     "close-folder": "home",
-    "open-workspace-file": "loose",
-    "open-loose-file": "loose",
+    "drop-file": "loose",
+    "click-file": "loose",
     "close-last-tab": "home",
   },
   workspace: {
     "open-folder": "workspace",
     "reopen-current-folder": "workspace",
     "close-folder": "home",
-    "open-workspace-file": "workspace",
-    "open-loose-file": "loose",
+    "drop-file": "workspace",
+    "click-file": "loose",
     "close-last-tab": "workspace",
   },
   loose: {
     "open-folder": "workspace",
     "reopen-current-folder": "workspace",
     "close-folder": "home",
-    "open-workspace-file": "loose",
-    "open-loose-file": "loose",
+    "drop-file": "loose",
+    "click-file": "loose",
     "close-last-tab": "home",
   },
 };
@@ -111,22 +111,16 @@ export function planWorkspaceIntent(
   return { action: "reset", nextRoot };
 }
 
+export type ExternalOrigin = "click" | "drop";
+
 /**
- * A file dropped onto the window from inside the open folder is a workspace
- * file: it opens as a tab and the tree stays. Anything else is a loose file:
- * the window drops its tree. External clicks skip this check and are always
- * loose (DESIGN.md I-007).
+ * Whether opening an external file keeps this window's folder and tree.
+ * A drop means "open it here": the file joins the tabs, from inside or
+ * outside the folder. A click (Finder, Herdr, `AED_OPEN_FILE`) always gets a
+ * tree-less window (DESIGN.md I-007).
  */
-export function classifyExternalFile(
-  root: string,
-  filePath: string,
-  origin: "click" | "drop" = "drop"
-): "workspace-file" | "loose-file" {
-  if (origin === "click") return "loose-file";
-  const cleanRoot = normalizeRoot(root);
-  return cleanRoot && filePath.startsWith(`${cleanRoot}/`)
-    ? "workspace-file"
-    : "loose-file";
+export function externalOpenKeepsTree(origin: ExternalOrigin): boolean {
+  return origin === "drop";
 }
 
 /** A guarded action waiting on the unsaved-changes prompt. */

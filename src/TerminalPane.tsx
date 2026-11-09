@@ -70,6 +70,22 @@ interface PtySession {
   escBuffer: string;
   pending: string;
   col: number;
+  /** The directory the shell started in. */
+  cwd: string;
+  /** Whether the user has sent the shell any input. */
+  used: boolean;
+}
+
+/**
+ * A shell the user has not typed into yet follows the open folder: it
+ * restarts in `cwd`. A shell the user has used keeps its directory and
+ * whatever runs in it. DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
+ */
+export function shouldFollowCwd(
+  session: { cwd: string; used: boolean } | undefined,
+  cwd: string
+): boolean {
+  return !!session && !session.used && session.cwd !== cwd;
 }
 
 /** How many output lines one session keeps. */
@@ -438,6 +454,17 @@ function appendChunk(tab: TermTab, session: PtySession, text: string): void {
   pushLines(tab, complete);
 }
 
+/**
+ * A shell exited. A restarted tab (new folder or shell) already runs a new
+ * session; the old shell's late exit must not end it.
+ */
+function endSession(tab: TermTab, sessions: Map<number, PtySession>, session: PtySession): void {
+  if (sessions.get(tab.id) !== session) return;
+  tab.running.set(false);
+  sessions.delete(tab.id);
+  pushLines(tab, [`[${untracked(() => tab.title())}] session ended`]);
+}
+
 /** Start the PTY for a tab once; a failure shows as a line, not a crash. */
 function startPtySession(
   tab: TermTab,
@@ -465,16 +492,14 @@ function startPtySession(
       escBuffer: "",
       pending: "",
       col: 0,
+      cwd,
+      used: false,
     };
     sessions.set(tab.id, session);
     tab.running.set(true);
     child.on("stdout", (text) => appendChunk(tab, session, text));
     child.on("stderr", (text) => appendChunk(tab, session, text));
-    child.on("exit", () => {
-      tab.running.set(false);
-      sessions.delete(tab.id);
-      pushLines(tab, [`[${untracked(() => tab.title())}] session ended`]);
-    });
+    child.on("exit", () => endSession(tab, sessions, session));
   } catch (error) {
     pushLines(tab, [`[error] ${String(error)}`]);
   }
@@ -513,6 +538,7 @@ function writeCommandToSession(
 ): void {
   const session = tab ? sessions.get(tab.id) : undefined;
   if (!tab || !session) return;
+  session.used = true;
   session.child.write(text.endsWith("\n") ? text : `${text}\n`);
   tab.input.set("");
 }
@@ -605,11 +631,34 @@ function switchTabShell(
   primaryApp: Accessor<ExternalTerminalApp | undefined>
 ): void {
   if (tab.shell().path === nextShell.path && sessions.has(tab.id)) return;
+  tab.shell.set(nextShell);
+  restartSession(tab, sessions, cwd, primaryApp);
+}
+
+/** Restart every tab whose shell should follow the open folder (see `shouldFollowCwd`). */
+function followFolder(
+  tabs: TermTab[],
+  sessions: Map<number, PtySession>,
+  cwd: Accessor<string>,
+  primaryApp: Accessor<ExternalTerminalApp | undefined>
+): void {
+  const dir = untracked(() => cwd()) || os.homedir();
+  for (const tab of tabs) {
+    if (shouldFollowCwd(sessions.get(tab.id), dir)) restartSession(tab, sessions, cwd, primaryApp);
+  }
+}
+
+/** Replace a tab's shell process with a fresh one and clear its screen. */
+function restartSession(
+  tab: TermTab,
+  sessions: Map<number, PtySession>,
+  cwd: Accessor<string>,
+  primaryApp: Accessor<ExternalTerminalApp | undefined>
+): void {
   disposeSession(tab.id, sessions);
   tab.lines.set([]);
   tab.current.set("");
   tab.input.set("");
-  tab.shell.set(nextShell);
   startPtySession(tab, sessions, cwd, primaryApp);
 }
 
@@ -788,6 +837,12 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       }
     });
     cleanup(() => disposeAllSessions(sessions));
+  });
+
+  effect(() => {
+    void props.cwd();
+    // Spawn outside this effect's run: a shell started inside it would end when the effect runs again.
+    setTimeout(() => followFolder(untracked(() => tabs()), sessions, props.cwd, primaryExternal), 0);
   });
 
   effect(() => {

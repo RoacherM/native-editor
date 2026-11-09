@@ -468,6 +468,36 @@ async function rememberDiskStamp(filePath: string): Promise<void> {
 }
 
 /**
+ * Whether `file` changed on disk since Aed read or saved it (or since the user
+ * chose to keep their edits). False when Aed never read it or it is gone.
+ */
+export async function hasChangedOnDisk(file: LoadedFile): Promise<boolean> {
+  const known = diskStamps.get(file.path);
+  if (!known) return false;
+  const current = await readDiskStamp(file.path);
+  return current !== null && current !== known;
+}
+
+/** Read `file` from disk again (same mode), dropping its cached copy; null when unreadable. */
+export async function reloadFromDisk(
+  file: LoadedFile,
+  root: string,
+): Promise<LoadedFile | null> {
+  preloadedFiles.delete(file.path);
+  diskStamps.delete(file.path);
+  try {
+    return await loadFile(file.path, root, file.mode, file.gitStatus);
+  } catch {
+    return null;
+  }
+}
+
+/** The user keeps their edits: take the current disk version as the known one, so Aed stops asking. */
+export async function acceptDiskVersion(filePath: string): Promise<void> {
+  await rememberDiskStamp(filePath);
+}
+
+/**
  * Reload `file` when it changed on disk since Aed read or saved it. Returns
  * the fresh copy (same mode), or null when it is unchanged, dirty (the
  * user's edits win; no silent overwrite), or unreadable.
@@ -476,18 +506,8 @@ export async function reloadIfChangedOnDisk(
   file: LoadedFile,
   root: string,
 ): Promise<LoadedFile | null> {
-  if (file.dirty) return null;
-  const known = diskStamps.get(file.path);
-  if (!known) return null;
-  const current = await readDiskStamp(file.path);
-  if (!current || current === known) return null;
-  preloadedFiles.delete(file.path);
-  diskStamps.delete(file.path);
-  try {
-    return await loadFile(file.path, root, file.mode, file.gitStatus);
-  } catch {
-    return null;
-  }
+  if (file.dirty || !(await hasChangedOnDisk(file))) return null;
+  return reloadFromDisk(file, root);
 }
 
 /** Return a preloaded clean LoadedFile synchronously if available in the warm cache. */

@@ -10,19 +10,21 @@ import {
   detectMermaidKind,
   preprocessMermaidCode,
   requeueOrphanedJobs,
+  takeJob,
 } from "./src/mermaid";
 import {
-  classifyExternalFile,
   decideGuard,
   deriveEditorSurface,
   deriveWindowMode,
+  externalOpenKeepsTree,
+  type ExternalOrigin,
   nextActiveAfterClose,
   planWorkspaceIntent,
   WINDOW_TRANSITIONS,
   type WindowEvent,
   type WindowMode,
 } from "./src/session";
-import { parseGhosttyConfig } from "./src/TerminalPane";
+import { parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
 import manifest from "./nsh.json";
 import {
   computeSyntaxDecorations,
@@ -217,8 +219,8 @@ const SIM_STATES: Record<WindowMode, SessionSim> = {
   loose: { root: "", tabs: ["/elsewhere/n.md"] },
 };
 
-function openExternal(s: SessionSim, file: string): SessionSim {
-  const root = classifyExternalFile(s.root, file) === "loose-file" ? "" : s.root;
+function openExternal(s: SessionSim, file: string, origin: ExternalOrigin): SessionSim {
+  const root = externalOpenKeepsTree(origin) ? s.root : "";
   return { root, tabs: [...s.tabs, file] };
 }
 
@@ -235,10 +237,11 @@ function applySessionEvent(s: SessionSim, event: WindowEvent): SessionSim {
       return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "open", root: s.root || "/w/cur" }));
     case "close-folder":
       return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "close" }));
-    case "open-workspace-file":
-      return openExternal(s, `${s.root || "/w/cur"}/b.ts`);
-    case "open-loose-file":
-      return openExternal(s, "/elsewhere/loose.md");
+    case "drop-file":
+      return openExternal(s, "/elsewhere/dropped.md", "drop");
+    case "click-file":
+      // Even a file from inside the open folder: clicks are tree-less (I-007).
+      return openExternal(s, `${s.root || "/w/cur"}/b.ts`, "click");
     case "close-last-tab":
       return { root: s.root, tabs: [] };
   }
@@ -265,10 +268,8 @@ describe("window session state machine (src/session.ts)", () => {
     expect(planWorkspaceIntent("/w/cur", 2, { kind: "open", root: "/" })).toEqual({ action: "ignore" });
     expect(planWorkspaceIntent("", 0, { kind: "close" })).toEqual({ action: "ignore" });
     expect(planWorkspaceIntent("", 1, { kind: "close" })).toEqual({ action: "reset", nextRoot: "" });
-    expect(classifyExternalFile("/w/cur", "/w/cur-other/x.ts")).toBe("loose-file");
-    expect(classifyExternalFile("/w/cur/", "/w/cur/src/x.ts")).toBe("workspace-file");
-    // External clicks are always tree-less windows (I-007), even inside the folder.
-    expect(classifyExternalFile("/w/cur", "/w/cur/src/x.ts", "click")).toBe("loose-file");
+    expect(externalOpenKeepsTree("drop")).toBe(true);
+    expect(externalOpenKeepsTree("click")).toBe(false);
 
     expect(deriveEditorSurface("", false)).toBe("welcome");
     expect(deriveEditorSurface("/w", false)).toBe("workspace-empty");
@@ -293,7 +294,71 @@ describe("window session state machine (src/session.ts)", () => {
     expect(pending).toEqual(["job-1", "job-2", "job-3"]);
     expect(active.size).toBe(0);
   });
+
+  test("a timed-out Mermaid job leaves whichever queue holds it, once", () => {
+    const active = new Map([[1, { id: 1 }]]);
+    const pending = [{ id: 2 }, { id: 3 }];
+    expect(takeJob(1, active, pending)).toEqual({ id: 1 });
+    expect(active.size).toBe(0);
+    expect(takeJob(3, active, pending)).toEqual({ id: 3 });
+    expect(pending).toEqual([{ id: 2 }]);
+    expect(takeJob(3, active, pending)).toBeUndefined();
+    expect(takeJob(9, active, pending)).toBeUndefined();
+    expect(pending).toEqual([{ id: 2 }]);
+    expect(takeJob(2, active, pending)).toEqual({ id: 2 });
+    expect(pending).toEqual([]);
+  });
+
+  test("only a terminal the user has not typed into follows the open folder", () => {
+    expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur")).toBe(true);
+    expect(shouldFollowCwd({ cwd: "/home", used: true }, "/w/cur")).toBe(false);
+    expect(shouldFollowCwd({ cwd: "/w/cur", used: false }, "/w/cur")).toBe(false);
+    expect(shouldFollowCwd(undefined, "/w/cur")).toBe(false);
+  });
 });
+
+type TestApp = Awaited<ReturnType<typeof open>>;
+
+/** Scratch folder for disk-change tests; the test sandbox cannot write files, so the app's own PTY does. */
+const SCRATCH = "/tmp/aed-e2e-disk";
+
+async function runInTerminal(app: TestApp, cmd: string, marker: string): Promise<void> {
+  if (!app.shows("id:terminal-pane")) {
+    await app.press("id:titlebar-toggle-terminal");
+    await app.waitFor("id:terminal-pane");
+  }
+  await app.type("id:terminal-input", `${cmd} && echo ${marker}`);
+  await app.submit("id:terminal-input");
+  await app.waitUntil(
+    () => app.texts().some((t) => t.includes(marker) && !t.includes("echo")),
+    { timeout: 8000 }
+  );
+}
+
+const showsText = (app: TestApp, text: string) => app.texts().some((t) => t === text);
+
+/** Longer than one disk check (DISK_CHECK_MS = 1500), so a wrong banner would have appeared. */
+const pastOneDiskCheck = () => new Promise((resolve) => setTimeout(resolve, 2000));
+
+/** A window on a fresh SCRATCH folder holding `note.txt` (= `content`), with note.txt open. */
+async function openScratchNote(content: string): Promise<TestApp> {
+  const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+  await runInTerminal(
+    setup,
+    `rm -rf ${SCRATCH} && mkdir -p ${SCRATCH} && printf '${content}\\n' > ${SCRATCH}/note.txt`,
+    "SETUP_DONE"
+  );
+  const app = await open("./App.tsx", {
+    platform: "macos",
+    width: 1280,
+    height: 800,
+    host: { params: { workspaceRoot: SCRATCH } },
+  });
+  await app.waitFor("text:note.txt");
+  await app.press("text:note.txt");
+  await app.waitUntil(() => showsText(app, content), { timeout: 5000 });
+  return app;
+}
 
 describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
   test("clean launch without workspace hides file tree, shows Aed welcome panel, and migrates legacy storage", async () => {
@@ -617,17 +682,13 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await looseApp.waitFor("id:welcome-panel");
     expect(looseApp.shows("id:welcome-panel")).toBe(true);
   });
-  test("dropping a file from the open folder keeps the file tree (workspace-file, not loose)", async () => {
-    const app = await open("./App.tsx", {
-      platform: "macos",
-      width: 1280,
-      height: 800,
-      host: { params: { workspaceRoot: FIXTURE_ROOT } },
-    });
-    await app.waitFor("id:workspace-tree");
+  test("dropping any file onto a workspace window opens it as a tab and keeps the file tree", async () => {
+    const app = await openScratchNote("NOTE_V1");
     await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}/main.ts`]);
     await app.waitFor("id:tab-select-main.ts");
     expect(app.shows("id:workspace-tree")).toBe(true);
+    expect(app.shows("id:tab-select-note.txt")).toBe(true);
+    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
   });
 
   test("a second guarded action cannot replace an open unsaved-changes prompt", async () => {
@@ -651,40 +712,72 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
   });
 
   test("reopening a file shows changes made on disk after Aed first read it", async () => {
-    // The test sandbox cannot write files itself; the app's own PTY does, in a /tmp scratch folder.
-    const scratch = "/tmp/aed-e2e-stale-cache";
-    const runInTerminal = async (app: Awaited<ReturnType<typeof open>>, cmd: string, marker: string) => {
-      if (!app.shows("id:terminal-pane")) {
-        await app.press("id:titlebar-toggle-terminal");
-        await app.waitFor("id:terminal-pane");
-      }
-      await app.type("id:terminal-input", `${cmd} && echo ${marker}`);
-      await app.keyboard.press("enter");
-      await app.waitUntil(
-        () => app.texts().some((t) => t.includes(marker) && !t.includes("echo")),
-        { timeout: 8000 }
-      );
-    };
-    const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-    await runInTerminal(
-      setup,
-      `rm -rf ${scratch} && mkdir -p ${scratch} && printf 'STALE_V1\\n' > ${scratch}/note.txt`,
-      "SETUP_DONE"
-    );
-    const app = await open("./App.tsx", {
-      platform: "macos",
-      width: 1280,
-      height: 800,
-      host: { params: { workspaceRoot: scratch } },
-    });
-    await app.waitFor("text:note.txt");
-    await app.press("text:note.txt");
-    await app.waitUntil(() => app.texts().some((t) => t === "STALE_V1"), { timeout: 5000 });
+    const app = await openScratchNote("STALE_V1");
     await app.press("id:tab-close-note.txt");
-    await runInTerminal(app, `printf 'FRESH_V2\\n' > ${scratch}/note.txt`, "WRITE_DONE");
+    await runInTerminal(app, `printf 'FRESH_V2\\n' > ${SCRATCH}/note.txt`, "WRITE_DONE");
     await app.press("text:note.txt");
-    await app.waitUntil(() => app.texts().some((t) => t === "FRESH_V2"), { timeout: 5000 });
-    expect(app.texts().includes("STALE_V1")).toBe(false);
-    await runInTerminal(app, `rm -rf ${scratch}`, "CLEAN_DONE");
+    await app.waitUntil(() => showsText(app, "FRESH_V2"), { timeout: 5000 });
+    expect(showsText(app, "STALE_V1")).toBe(false);
+    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+  });
+
+  test("an open clean tab shows changes made on disk without reopening", async () => {
+    const app = await openScratchNote("OPEN_V1");
+    await runInTerminal(app, `printf 'OPEN_V2\\n' > ${SCRATCH}/note.txt`, "WRITE_DONE");
+    await app.waitUntil(() => showsText(app, "OPEN_V2"), { timeout: 6000 });
+    expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+  });
+
+  test("a tab with unsaved edits that changed on disk asks to keep the edits or reload", async () => {
+    const app = await openScratchNote("DISK_V1");
+    await app.type("id:preview-editor", "MINE ");
+    await app.waitUntil(() => showsText(app, "•"), { timeout: 3000 });
+    // Unsaved edits alone are not a conflict.
+    await pastOneDiskCheck();
+    expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    await runInTerminal(app, `printf 'DISK_V2\\n' > ${SCRATCH}/note.txt`, "WRITE_V2");
+    await app.waitFor("id:disk-conflict-banner");
+    // Keep: the edits stay, the banner goes, and it stays gone.
+    await app.press("id:disk-conflict-keep-btn");
+    await app.waitUntil(() => !app.shows("id:disk-conflict-banner"), { timeout: 3000 });
+    await pastOneDiskCheck();
+    expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    expect(showsText(app, "•")).toBe(true);
+    expect(showsText(app, "DISK_V2")).toBe(false);
+    // A newer disk change asks again; Reload drops the edits and shows the disk.
+    await runInTerminal(app, `printf 'DISK_V3\\n' > ${SCRATCH}/note.txt`, "WRITE_V3");
+    await app.waitFor("id:disk-conflict-banner");
+    await app.press("id:disk-conflict-reload-btn");
+    await app.waitUntil(() => showsText(app, "DISK_V3"), { timeout: 5000 });
+    expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    expect(showsText(app, "•")).toBe(false);
+    // Saving over a disk change also ends the conflict; the next edit does not bring the banner back.
+    await app.type("id:preview-editor", "AGAIN ");
+    await runInTerminal(app, `printf 'DISK_V4\\n' > ${SCRATCH}/note.txt`, "WRITE_V4");
+    await app.waitFor("id:disk-conflict-banner");
+    await app.keyboard.press("mod+s");
+    await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
+    await pastOneDiskCheck();
+    await app.type("id:preview-editor", "MORE ");
+    await app.waitUntil(() => showsText(app, "•"), { timeout: 3000 });
+    await pastOneDiskCheck();
+    expect(app.shows("id:disk-conflict-banner")).toBe(false);
+    await runInTerminal(app, `rm -rf ${SCRATCH}`, "CLEAN_DONE");
+  });
+
+  test("a terminal the user has not typed into moves to the folder that opens", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await app.press("id:titlebar-toggle-terminal");
+    await app.waitFor("id:terminal-pane");
+    await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
+    await app.waitFor("id:workspace-tree");
+    await runInTerminal(app, "pwd", "PWD_DONE");
+    expect(showsText(app, FIXTURE_ROOT)).toBe(true);
+    // Once used, the shell keeps its directory (and screen) when the folder closes.
+    await app.keyboard.press("mod+shift+w");
+    await app.waitFor("id:welcome-panel");
+    await runInTerminal(app, "pwd", "PWD_AGAIN");
+    expect(app.texts().filter((t) => t === FIXTURE_ROOT).length).toBe(2);
   });
 });
