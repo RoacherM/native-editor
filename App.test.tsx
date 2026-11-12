@@ -1406,6 +1406,8 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     expect(frameBytes(encodeInputFrame(binaryStringBytes("\u001b[M\u00a0!!")))).toEqual([27, 91, 77, 160, 33, 33]);
     expect(frameBytes(encodeInputFrame(new Uint8Array([0xe4, 0xb8])))).toEqual([0xe4, 0xb8]);
     expect(encodeResizeFrame(40, 120)).toBe("R40 120\n");
+    expect(encodeResizeFrame(1, 1)).toBe("R1 1\n");
+    expect(encodeResizeFrame(500, 1000)).toBe("R500 1000\n");
     for (const [rows, cols] of [[0, 80], [24, 0], [1.5, 80], [501, 80], [24, 1001], [Number.NaN, 80]]) {
       expect(encodeResizeFrame(rows, cols)).toBeNull();
     }
@@ -1432,7 +1434,8 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
   });
 
   test("UTF-8 split across frames decodes whole, at every cut", () => {
-    const text = "a中文é😀z";
+    // Leads at each length's edges: U+0800 (E0), U+FF01 (EF), U+1F600 (F0), U+100000 (F4).
+    const text = "a中文é😀z\u0800\uff01\u{100000}";
     const bytes = new TextEncoder().encode(text);
     for (let i = 0; i <= bytes.length; i += 1) {
       for (let j = i; j <= bytes.length; j += 1) {
@@ -1467,6 +1470,14 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     expect(history.chunks()).toEqual(["x".repeat(30)]);
     history.clear();
     expect(history.chunks()).toEqual([]);
+    // Exactly the cap stays whole, also after a clear.
+    history.push("aaaaa");
+    history.push("bbbbb");
+    expect(history.chunks()).toEqual(["aaaaa", "bbbbb"]);
+    const fresh = createOutputHistory(10);
+    fresh.push("aaaaa");
+    fresh.push("bbbbb");
+    expect(fresh.chunks()).toEqual(["aaaaa", "bbbbb"]);
   });
 
   test("the text mirror removes ANSI and follows CR, backspace and line erases", () => {
@@ -1485,6 +1496,36 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     expect(mirror.lines()).toEqual([]);
     mirror.clear();
     expect(mirror.current()).toBe("");
+    mirror.push("X");
+    expect(mirror.current()).toBe("X");
+  });
+
+  test("the text mirror moves the cursor and erases like a terminal line", () => {
+    const lineOf = (text: string) => {
+      const mirror = createTextMirror();
+      mirror.push(text);
+      return mirror.current();
+    };
+    expect(lineOf("abc\u001b[DX")).toBe("abX");
+    expect(lineOf("ab\u001b[9DX")).toBe("Xb");
+    expect(lineOf("abc\u001b[3D\u001b[CX")).toBe("aXc");
+    expect(lineOf("abc\u001b[2GX")).toBe("aXc");
+    expect(lineOf("\bX")).toBe("X");
+    expect(lineOf("a\tb\u0007c\u0001d")).toBe("a\tbcd");
+    expect(lineOf("abc\u001b[2KX")).toBe("X");
+    expect(lineOf("abc\u001b[2D\u001b[0K")).toBe("a");
+    expect(lineOf("abc\u001b[2D\u001b[K")).toBe("a");
+    expect(lineOf("abc\u001b[2D\u001b[1K")).toBe("abc");
+    const mirror = createTextMirror();
+    mirror.push("old\r\n\u001b[3J");
+    expect(mirror.lines()).toEqual([]);
+    // A short escape cut after long text is held; one 512 characters long is not held forever.
+    mirror.push(`${"x".repeat(600)}\u001b[3`);
+    mirror.push("2mok\r\n");
+    expect(mirror.lines()).toEqual([`${"x".repeat(600)}ok`]);
+    mirror.push(`\u001b]${"t".repeat(510)}`);
+    mirror.push("\u0007ok\r\n");
+    expect(mirror.lines()[1]).toBe(`]${"t".repeat(510)}ok`);
   });
 
   test("page messages are validated strictly", () => {
@@ -1493,6 +1534,7 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     expect(parse({ type: "input", tab: 2, data: "ls\r" })).toEqual({ type: "input", tab: 2, data: "ls\r", binary: false });
     expect(parse({ type: "input", tab: 2, data: "\u00a0", binary: true })).toEqual({ type: "input", tab: 2, data: "\u00a0", binary: true });
     expect(parse({ type: "resize", tab: 1, rows: 30, cols: 100 })).toEqual({ type: "resize", tab: 1, rows: 30, cols: 100 });
+    expect((parse({ type: "input", tab: 1, data: "x".repeat(192 * 1024) }) as { data: string }).data.length).toBe(192 * 1024);
     expect(parse({ type: "title", tab: 1, title: " vim\u0007 a.txt " })).toEqual({ type: "title", tab: 1, title: "vim a.txt" });
     expect((parse({ type: "title", tab: 1, title: "t".repeat(500) }) as { title: string }).title.length).toBe(200);
     expect(parse({ type: "link", url: "https://example.com/a?b=1" })).toEqual({ type: "link", url: "https://example.com/a?b=1" });
@@ -1500,7 +1542,7 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     const bad: unknown[] = [
       { type: "input", tab: 0, data: "x" }, { type: "input", tab: "1", data: "x" }, { type: "input", tab: 1.5, data: "x" },
       { type: "input", tab: 1, data: 7 }, { type: "input", tab: 1, data: "x".repeat(192 * 1024 + 1) },
-      { type: "resize", tab: 1, rows: 0, cols: 80 }, { type: "resize", tab: 1, rows: 24, cols: 5000 },
+      { type: "resize", tab: 1, rows: 0, cols: 80 }, { type: "resize", tab: 0, rows: 24, cols: 80 }, { type: "resize", tab: 1, rows: 24, cols: 5000 },
       { type: "resize", tab: 1, rows: "24", cols: 80 }, { type: "title", tab: 1 },
       { type: "link", url: "javascript:alert(1)" }, { type: "link", url: "file:///etc/passwd" },
       { type: "focus", focused: "yes" }, { type: "constructor" }, { type: "__proto__" }, { type: "toString" },
@@ -1557,6 +1599,13 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     expect(derived.red).toBe(custom.syntax.keyword);
     expect(derived.green).toBe(custom.syntax.string);
     expect(derived.brightBlack).toBe(custom.ui.mutedForeground);
+    expect(derived.brightRed).toBe(custom.syntax.keyword);
+    expect(derived.black).toBe(custom.ui.card);
+    const light = EDITOR_THEMES.find((t) => t.appearance === "light")!;
+    expect(buildXtermTheme({ ...light, id: "custom-light" }).black).toBe(light.ui.foreground);
+    const muted = custom.ui.mutedForeground.slice(0, 7);
+    expect([derived.scrollbarSliderBackground, derived.scrollbarSliderHoverBackground, derived.scrollbarSliderActiveBackground])
+      .toEqual([`${muted}40`, `${muted}70`, `${muted}90`]);
     expect(ANSI_NAMES.every((name) => typeof derived[name] === "string")).toBe(true);
   });
 
