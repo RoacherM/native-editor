@@ -27,6 +27,7 @@ import {
   WINDOW_TRANSITIONS,
   type WindowEvent,
   type WindowMode,
+  runApprovedQuit,
 } from "./src/session";
 import { createInputGate, parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
 import { sortRows } from "./src/PreviewPane";
@@ -39,6 +40,7 @@ import {
   getThemeById,
 } from "./src/themes";
 import {
+  externalFileCandidates,
   isBehindDisk,
   normalizeExternalFilePath,
   shortenHomePath,
@@ -1295,6 +1297,20 @@ describe("file safety (I-015)", () => {
 });
 
 describe("quit guard (I-016)", () => {
+  test("a quit the host does not carry out arms the guard again", async () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const refused: boolean[] = [];
+    runApprovedQuit((v) => refused.push(v), () => {
+      throw new Error("process.exit is not granted");
+    });
+    await sleep(10);
+    expect(refused).toEqual([true, false]);
+    const cancelled: boolean[] = [];
+    runApprovedQuit((v) => cancelled.push(v), () => undefined, 20);
+    await sleep(80);
+    expect(cancelled).toEqual([true, false]);
+  });
+
   // ⌘Q is the menu's (headless runs have no menu bar); the palette runs the same action.
   // A quit the guard lets through ends the app: its next step rejects with "the app left".
   const quitLeaves = async (app: TestApp) => {
@@ -1834,6 +1850,33 @@ describe("markdown preview runtime & bridge", () => {
 const AED_CACHE_DIR = `${os.homedir()}/Library/Caches/dev.byronwayne.aed`;
 
 describe("I-018 per-user temp files, external open & capabilities", () => {
+  test("a name that ends with a space is tried as written before it is trimmed", () => {
+    expect(externalFileCandidates("/tmp/notes ").map((c) => c.path)).toEqual(["/tmp/notes ", "/tmp/notes"]);
+  });
+
+  test("the queue path is accepted when HOME ends with a slash", async () => {
+    // launcher builds it from $HOME as set: `/Users/x/` gives `/Users/x//Library/...`.
+    const queue = `${AED_CACHE_DIR.replace("/Library/", "//Library/")}/open-99999991`;
+    await withScratch({ "a.txt": "A_FIRST", "q.txt": "Q_SLASHED" }, async ({ app, dir }) => {
+      try {
+        await runInTerminal(
+          app,
+          [`rm -rf ${queue}`, `mkdir -p ${queue}`, `printf '%s' '${dir}/q.txt' > ${queue}/1.path`].join(" && "),
+          "SLASH_QUEUE_READY"
+        );
+        const qapp = await open("./App.tsx", {
+          platform: "macos",
+          width: 1280,
+          height: 800,
+          host: { params: { openQueue: queue } },
+        });
+        await qapp.waitFor("id:tab-select-q.txt", { timeout: 4000 });
+      } finally {
+        await runInTerminal(app, `rm -rf ${queue}`, "SLASH_QUEUE_CLEANED");
+      }
+    });
+  });
+
   test("file://localhost URLs and %XX escapes decode to the plain path", () => {
     expect(normalizeExternalFilePath("file://localhost/tmp/My%20Notes.md")).toBe("/tmp/My Notes.md");
     expect(normalizeExternalFilePath("file:///tmp/My%20Notes.md#L3")).toBe("/tmp/My Notes.md");

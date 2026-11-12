@@ -281,7 +281,9 @@ export function externalFileCandidates(raw: string): FileLocation[] {
   if (!clean) return [];
   if (!clean.startsWith("file://")) {
     const stripped = splitLineSuffix(clean);
-    return [{ path: clean, line: 0, column: 0 }, ...(stripped ? [stripped] : [])];
+    // A name may begin or end with a space: the bytes as given come first.
+    const literals = [...new Set([raw, clean])].map((p) => ({ path: p, line: 0, column: 0 }));
+    return [...literals, ...(stripped ? [stripped] : [])];
   }
   const { filePath, fragment } = decodeFileUrl(clean);
   const anchored = splitHashLine(fragment);
@@ -316,8 +318,8 @@ function readHostOrEnvParam(paramKey: string, ...envNames: string[]): string {
 
 /** The file reference this window was started to open (Finder, the CLI launcher), unresolved. */
 export function getInitialOpenFile(): string | null {
-  const raw = readHostOrEnvParam("openFile", "AED_OPEN_FILE", "NATIVE_EDITOR_OPEN_FILE").trim();
-  return raw.length > 0 ? raw : null;
+  const raw = readHostOrEnvParam("openFile", "AED_OPEN_FILE", "NATIVE_EDITOR_OPEN_FILE");
+  return raw.trim().length > 0 ? raw : null;
 }
 
 /**
@@ -327,7 +329,8 @@ export function getInitialOpenFile(): string | null {
 export function resolveFinderQueueDir(): string | null {
   const raw = readHostOrEnvParam("openQueue", "AED_OPEN_QUEUE");
   const name = path.basename(raw);
-  const inCache = path.dirname(raw) === aedCacheDir();
+  // The native side builds it from $HOME as set (`/Users/x/` gives `//Library`).
+  const inCache = path.normalize(path.dirname(raw)) === path.normalize(aedCacheDir());
   return inCache && /^open-\d+$/.test(name) ? raw : null;
 }
 

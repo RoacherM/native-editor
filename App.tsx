@@ -46,6 +46,7 @@ import {
   deriveEditorSurface,
   nextActiveAfterClose,
   planWorkspaceIntent,
+  runApprovedQuit,
   serialize,
   unsavedQuestion,
   windowTitle,
@@ -1920,10 +1921,7 @@ function createQuit(
   dirtyPaths: () => string[]
 ): { quit: () => void; edited: Accessor<boolean> } {
   const approved = signal(false);
-  const exit = () => {
-    approved.set(true);
-    process.exit(0);
-  };
+  const exit = () => runApprovedQuit((v) => approved.set(v), () => process.exit(0));
   return {
     quit: () => (approved() ? exit() : guard("quit", dirtyPaths(), exit)),
     edited: computed(() => !approved() && dirtyPaths().length > 0),

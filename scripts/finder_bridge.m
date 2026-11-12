@@ -252,33 +252,72 @@ static BOOL aedHasUnsavedEdits(void) {
   return NO;
 }
 
-// Chooses the app's Quit menu item (⌘Q, not the `terminate:` role) on the next
-// turn of the run loop. NO when the menu has none: the caller then lets the
-// host go on as before rather than block quitting for good.
-static BOOL aedChooseAppQuitItem(void) {
+// The app's Quit menu item (⌘Q, not the `terminate:` role) and the menu it is
+// in, or NO when the menu has none.
+static BOOL aedFindAppQuitItem(NSMenu **outMenu, NSInteger *outIndex) {
   for (NSMenuItem *top in [[NSApp mainMenu] itemArray]) {
     NSMenu *menu = [top submenu];
     for (NSMenuItem *item in [menu itemArray]) {
       NSEventModifierFlags mods = [item keyEquivalentModifierMask] & NSEventModifierFlagDeviceIndependentFlagsMask;
       if (![[item keyEquivalent] isEqualToString:@"q"] || mods != NSEventModifierFlagCommand) continue;
       if ([item action] == @selector(terminate:)) continue;
-      dispatch_async(dispatch_get_main_queue(), ^{
-        NSInteger index = [menu indexOfItem:item];
-        if (index >= 0) [menu performActionForItemAtIndex:index];
-      });
+      *outMenu = menu;
+      *outIndex = [menu indexOfItem:item];
       return YES;
     }
   }
   return NO;
 }
 
+// Chooses the app's Quit item on the next turn of the run loop, looked up
+// again then (the app may rebuild its menu meanwhile). NO when the menu has
+// none: the caller then lets the host go on as before.
+static BOOL aedChooseAppQuitItem(void) {
+  NSMenu *menu = nil;
+  NSInteger index = -1;
+  if (!aedFindAppQuitItem(&menu, &index)) return NO;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSMenu *latest = nil;
+    NSInteger at = -1;
+    if (aedFindAppQuitItem(&latest, &at) && at >= 0) [latest performActionForItemAtIndex:at];
+  });
+  return YES;
+}
+
+// A second close or quit this soon after the last one, with the mark still
+// there, means the page may not be answering: ask natively instead.
+#define AED_QUIT_RETRY_SECONDS 4.0
+static CFAbsoluteTime gAedQuitChosenAt = 0;
+
+static BOOL aedConfirmQuitAnyway(void) {
+  NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+  [alert setMessageText:@"Quit Aed without saving?"];
+  [alert setInformativeText:@"Some files have unsaved changes. If Aed is not responding, you can quit anyway and lose them."];
+  [alert addButtonWithTitle:@"Cancel"];
+  [alert addButtonWithTitle:@"Quit Anyway"];
+  return [alert runModal] == NSAlertSecondButtonReturn;
+}
+
+// YES: refuse this close or quit (the app's Quit item will ask about the
+// unsaved files). NO: let the host's own behavior run.
+static BOOL aedRouteQuitToApp(void) {
+  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if (gAedQuitChosenAt > 0 && now - gAedQuitChosenAt < AED_QUIT_RETRY_SECONDS) {
+    gAedQuitChosenAt = 0;
+    return !aedConfirmQuitAnyway();
+  }
+  if (!aedChooseAppQuitItem()) return NO;
+  gAedQuitChosenAt = now;
+  return YES;
+}
+
 static BOOL ne_windowShouldClose(id self, SEL _cmd, NSWindow *sender) {
-  if ([[sender title] hasSuffix:kAedEditedTitleSuffix] && aedChooseAppQuitItem()) return NO;
+  if ([[sender title] hasSuffix:kAedEditedTitleSuffix] && aedRouteQuitToApp()) return NO;
   return gAedOrigWindowShouldClose ? gAedOrigWindowShouldClose(self, _cmd, sender) : YES;
 }
 
 static NSApplicationTerminateReply ne_applicationShouldTerminate(id self, SEL _cmd, NSApplication *app) {
-  if (aedHasUnsavedEdits() && aedChooseAppQuitItem()) return NSTerminateCancel;
+  if (aedHasUnsavedEdits() && aedRouteQuitToApp()) return NSTerminateCancel;
   return gAedOrigShouldTerminate ? gAedOrigShouldTerminate(self, _cmd, app) : NSTerminateNow;
 }
 

@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <stdio.h>
@@ -64,12 +65,22 @@ static int argToPath(const char *arg, char *out, size_t size, char *fragment, si
 }
 
 /* Strip `#L<line>[C<col>|-L<n>]` from `buf` (at `buf` itself too: a URL fragment); 1 when stripped. */
+/* `#L<line>`, `#L<line>C<col>` or `#L<line>-[L]<n>` at the very end of `buf` (src/workspace.ts HASH_LINE). */
 static int stripHashLine(char *buf, long *line, long *col) {
-  char *hashL = strstr(buf, "#L");
-  if (!hashL || hashL[2] < '0' || hashL[2] > '9') return 0;
+  char *hashL = NULL;
+  for (char *p = strstr(buf, "#L"); p; p = strstr(p + 1, "#L")) hashL = p;
+  if (!hashL || hashL == buf || !isdigit((unsigned char)hashL[2])) return 0;
   char *end = NULL;
-  *line = strtol(hashL + 2, &end, 10);
-  if (end && *end == 'C') *col = strtol(end + 1, NULL, 10);
+  long l = strtol(hashL + 2, &end, 10), c = 0;
+  if (*end == 'C' && isdigit((unsigned char)end[1])) {
+    c = strtol(end + 1, &end, 10);
+  } else if (*end == '-') {
+    char *n = end + 1 + (end[1] == 'L');
+    if (isdigit((unsigned char)*n)) strtol(n, &end, 10);
+  }
+  if (*end != '\0') return 0;
+  *line = l;
+  *col = c;
   *hashL = '\0';
   return 1;
 }
@@ -78,7 +89,7 @@ static int stripHashLine(char *buf, long *line, long *col) {
 static void stripLineColSuffix(char *buf, long *line, long *col) {
   *line = 0;
   *col = 0;
-  if (strstr(buf, "#L") != buf && stripHashLine(buf, line, col)) return;
+  if (stripHashLine(buf, line, col)) return;
   char *lastColon = strrchr(buf, ':');
   if (!lastColon || lastColon == buf || !isDigitsOnly(lastColon + 1)) return;
   long last = strtol(lastColon + 1, NULL, 10);
@@ -157,6 +168,11 @@ static void exportTargets(const OpenTargets *targets) {
 }
 
 int main(int argc, char *argv[]) {
+  // Only this launch's arguments say what to open: a shell in an Aed terminal
+  // (and `open -n` from finder_bridge.m) inherits the window's own values.
+  static const char *const inherited[] = {"AED_OPEN_FILE", "AED_ROOT", "AED_OPEN_QUEUE",
+                                          "NATIVE_EDITOR_OPEN_FILE", "NATIVE_EDITOR_ROOT"};
+  for (size_t i = 0; i < sizeof inherited / sizeof *inherited; i++) unsetenv(inherited[i]);
   pid_t self = getpid();
   aedPrepareQueue(self);
   char queueDir[PATH_MAX];

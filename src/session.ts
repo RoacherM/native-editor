@@ -209,3 +209,30 @@ export function serialize(task: () => Promise<void>): () => Promise<void> {
   };
   return run;
 }
+
+/** How long a quit may take before Aed takes it as not carried out and arms the guard again. */
+export const QUIT_SETTLE_MS = 2000;
+
+/**
+ * An approved quit (I-016). `setApproved(true)` drops the window's edited mark
+ * so the native guard (`scripts/finder_bridge.m`) lets this quit through; the
+ * exit runs on the next turn, after the title has changed. When the exit
+ * throws, or the process is still here `settleMs` later (the host cancelled
+ * it), the approval ends and the guard is armed again.
+ */
+export function runApprovedQuit(
+  setApproved: (approved: boolean) => void,
+  exitProcess: () => void,
+  settleMs: number = QUIT_SETTLE_MS
+): void {
+  setApproved(true);
+  setTimeout(() => {
+    try {
+      exitProcess();
+    } catch {
+      setApproved(false);
+      return;
+    }
+    setTimeout(() => setApproved(false), settleMs);
+  }, 0);
+}
