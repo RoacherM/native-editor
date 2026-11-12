@@ -675,6 +675,7 @@ function MermaidBlockToolbar(props: {
           <View class="flex-row items-center gap-1 mr-1">
             <Button
               testID="mermaid-zoom-out"
+              accessibilityLabel="Zoom out"
               onPress={() => props.onZoomDelta(-25)}
               style={{ backgroundColor: props.theme().ui.card }}
               class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
@@ -700,6 +701,7 @@ function MermaidBlockToolbar(props: {
             </Button>
             <Button
               testID="mermaid-zoom-in"
+              accessibilityLabel="Zoom in"
               onPress={() => props.onZoomDelta(25)}
               style={{ backgroundColor: props.theme().ui.card }}
               class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"

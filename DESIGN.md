@@ -10,7 +10,7 @@ description: 基于 Native Shell (nsh 0.3.0) 的 macOS 原生多格式预览器�
 Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量级 macOS 原生文件预览器、编辑器与终端工作区。
 
 - **拥有边界**：
-  - 工作区目录扫描（深度 ≤ 4，单目录上限 200 项）、Git 变更状态解析（`git status --porcelain=v1 -z -uall`）与单文件 Diff 预览。
+  - 工作区目录扫描（深度 ≤ 4，单目录上限 200 项，先去掉忽略项再截断；读不了的目录、超深目录与被截断的目录在文件树里各有一行说明，不显示成空目录）、Git 变更状态解析（`git status --porcelain=v1 -z -uall`）与单文件 Diff 预览。
   - 10 类文件路由与渲染：`code`、`markdown`、`mermaid`、`html`、`table`（CSV/TSV/JSONL）、`diff`、`image`（PNG/JPG/GIF/WebP/AVIF/SVG）、`video`、`audio`、`quicklook`（PDF）、`binary`（4 KB Hex + ASCII）。
   - 内置多标签真 PTY 终端（`python3` `pty.fork()` 桥接）与本机 Ghostty 字体/主题/Shell 自动探测。
   - macOS Finder 双击/拖拽打开文件桥接（`libFinderBridge.dylib` + `launcher.c`）与 UTI 默认处理程序注册（`set_default_handlers.m`）。
@@ -84,7 +84,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 
 ## 状态机清单
 
-Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移写在一处并有测试；「隐式」表示状态散在信号或模块变量里。改其中任何一个时，先改这张表。
+Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移写在一处并有测试；「隐式」表示状态散在信号或模块变量里。改其中任何一个时，先改这张表。
 
 ### 窗口会话（显式，`src/session.ts`）
 
@@ -109,7 +109,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 | # | 状态机 | 状态 | 位置 | 现状 |
 |---|---|---|---|---|
 | 2 | 编辑区显示 | `file` / `welcome` / `workspace-empty` | `deriveEditorSurface` | 显式 |
-| 3 | 文件与磁盘一致性 | 新鲜 / 过期 / 冲突 | 每份副本自带：`LoadedFile.diskStamp`（读到的字节的 `mtimeMs:size`）与 `LoadedFile.diskChanged`（冲突）；App `checkTabAgainstDisk`、`createActiveTabDiskCheck` | 显式。戳跟着副本走，不存在按路径共享的表：被保留的脏副本带着自己的旧戳，下一次比对仍判为过期，冲突不会丢。`loadFile` 先读戳再读字节（中途被写只会多判一次过期，不会漏判）；保存时换成新戳。当前 Tab 每 1.5 秒（`DISK_CHECK_MS`，一次 `stat`）比对一次，**切到某个 Tab 时立即比对**；比对从不重叠（`serialize`：进行中再被调用则结束后补跑一次）。干净 Tab 过期则直接重读。脏 Tab 过期则把该副本标为 `diskChanged`，编辑区上方出现 `id:disk-conflict-banner`：`Reload from Disk` 丢弃编辑并重读；`Keep My Edits` 保留编辑并把磁盘当前戳记为该副本的戳，下次保存会覆盖磁盘，之后磁盘再变会再问。冲突随副本结束：保存、关 Tab、切目录、重读都换掉副本，所以横幅不会在下一次比对前「复现」。每个 Tab 各有各的冲突 |
+| 3 | 文件与磁盘一致性 | 新鲜 / 过期 / 冲突 / 已移走 | 每份副本自带：`LoadedFile.diskStamp`（读到的字节的 `mtimeMs:size`）与 `LoadedFile.diskChanged`（冲突）；App `checkTabAgainstDisk`、`createActiveTabDiskCheck` | 显式。戳跟着副本走，不存在按路径共享的表：被保留的脏副本带着自己的旧戳，下一次比对仍判为过期，冲突不会丢。`loadFile` 先读戳再读字节（中途被写只会多判一次过期，不会漏判）；保存时换成新戳。当前 Tab 每 1.5 秒（`DISK_CHECK_MS`，一次 `stat`）比对一次，**切到某个 Tab 时立即比对**；比对从不重叠（`serialize`：进行中再被调用则结束后补跑一次）。干净 Tab 过期则直接重读。脏 Tab 过期则把该副本标为 `diskChanged`，编辑区上方出现 `id:disk-conflict-banner`：`Reload from Disk` 丢弃编辑并重读；`Keep My Edits` 保留编辑并把磁盘当前戳记为该副本的戳，下次保存会覆盖磁盘，之后磁盘再变会再问。冲突随副本结束：保存、关 Tab、切目录、重读都换掉副本，所以横幅不会在下一次比对前「复现」。每个 Tab 各有各的冲突 源文件消失（`stat` 失败而副本有戳，`markMissingInMap`）记为 `LoadedFile.diskMissing`，不当成「没变」：编辑区上方 `id:file-missing-banner`「<name> was moved or deleted.」，`Close` 关 Tab（脏则先问），`Save As…`（`osascript` `choose file name`）把 Tab 迁到新路径并写入全文；`saveFileText` 在原路径已不存在时抛 `the file was moved or deleted`，所以 `⌘S` 只显示保存失败横幅，不会在旧路径重建文件 |
 | 4 | 单个 Tab | 加载中 → 干净 ⇄ 脏 → 关闭；保存：空闲 → 写入中 → 已保存 / 失败（`saveError`）；只读（`readOnly`）；模式 `preview` / `source` / `diff` | `LoadedFile.dirty` / `.mode` / `.saveError` / `.readOnly`，`loadedFiles`；保存规则 `src/saving.ts` `saveInStore` | 半显式。关 Tab 时从 `loadedFiles` 删除；从 `All` 再打开时退出 `diff`。**保存**只在 `dirty` 且 `canSaveFile`（非不透明类型、非只读）时写盘，`⌘S`、菜单、命令面板与确认框走同一条路。写完后按当时 store 里的副本收尾（`settleSavedCopy`）：写入期间又输入的保留最新文本并保持 `dirty`，模式保留；期间关掉的 Tab 不写回。写盘失败把「`Could not save <path>: <原因>`」记在副本上，编辑区上方出现 `id:save-error-banner`（`Dismiss` 关掉），Tab 保持 `dirty`，下次保存成功时清除；`saveInStore` 从不抛错。**模式**：不透明类型（`isOpaqueFile`：图片（SVG 除外）、PDF/Office、音视频、二进制）只有预览（`allowsMode`），命令面板、模式按钮、`Changed` 列表打开都切不到 `source` / `diff`。切 `diff` 拉补丁期间的输入保留，期间关掉的 Tab 不写回 |
 | 5 | Mermaid 渲染进程 | 未启动 → 读 bundle → WebView 挂载 → `ready` → 卸载；每次启动是新的一代（`workerGeneration`） | `src/mermaid.tsx` 模块变量 | 半显式。WebView 卸载时，在途任务回到队首（`requeueOrphanedJobs`）。每个渲染任务 20 秒（`RENDER_TIMEOUT_MS`）无回复即失败，图表块显示错误而不是一直空白。任务记下它等的是哪一代；超时时只有当它等的正是当前这一代，才丢弃渲染器（`planJobTimeout`）：`ready` 之后卡死的渲染器也会被换掉，而旧任务的超时不会杀掉正在启动的新渲染器。丢弃时这一代作废，晚到的旧 bundle 不会把它复活。注：bundle 缺失且断网时 CDN 脚本加载失败，`load` 仍触发、`ready` 仍到达，渲染会很快报错；超时兜底的是请求卡住与渲染无回复 |
 | 6 | 单个 Mermaid 块 | 渲染中 / 已渲染 / 出错 | `MermaidDiagramBlock` 信号 | 隐式，正常 |
@@ -117,9 +117,10 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 | 8 | Finder 队列 | 轮询中（150ms，最多 16 次）/ 已取到 / 停止；同一时刻只有一次读取 | `drainFinderOpenQueue` `inflightDrain` | 隐式，正常 |
 | 9 | 终端会话 | 未启动 → 启动中（输入排队）→ 运行（未用 / 已用）→ 退出；关最后一个 Tab 立即重开 | `src/TerminalPane.tsx` `sessions`、`PtySession.cwd` / `.used` / `.gate` | 半显式。面板第一次显示时才启动 Shell（启动时不再有隐藏的登录 Shell）；提交命令时若该 Tab 没有 Shell（还没起来，或已 `session ended`）则当场启动一个。启动中输入先排队（`createInputGate`）：Shell 第一次输出后安静 200 毫秒（`SHELL_QUIET_MS`，提示符已画完）或满 3 秒（`SHELL_READY_MAX_MS`，闸门创建时自己计时）才放行。没输入过、且输入框里没有半截命令的 Shell 跟随打开的目录（`shouldFollowCwd`、`followFolder`）；输入过或有半截命令的 Shell 保留目录、输入与进程。换 Shell 只重启正在运行的 Shell，用户在下拉框里选的除外。重启后旧 Shell 迟到的 `exit` 不再结束新会话（`endSession` 只认当前会话） |
 | 10 | 浮层 | 命令面板（关 / `files` / `commands`）、偏好设置、查找栏 | `commandOpen` + `commandMode`、`fontDialogOpen`、`findOpen` | 隐式，正常 |
-| 11 | 文件树视图 | `all` / `changed`，展开项，选中项 | `filterMode`、`expandedIds`、`selectedPath` | 隐式。切换或关闭工作区时一起重置 |
+| 11 | 文件树视图 | `all` / `changed`，展开项，选中项 | `filterMode`、`expandedIds`、`selectedPath` | 隐式。切换或关闭工作区时一起重置。外部改名时跟着迁移（见 #14） |
 | 12 | 窗口最小尺寸 | 正常 / 已纠正 | `lastEnforcedKey` | 隐式，正常 |
 | 13 | 偏好设置 | 默认值 → 已存值 → Ghostty 补齐 | `initUserPreferences` | 隐式，正常 |
+| 14 | 工作区与磁盘一致性 | 未变 / 目录变了（重扫）/ 只有 Git 变了 / 根目录不可用 | App `createWorkspaceDiskCheck`、`watchWorkspaceDisk`、`followRenames`；`src/workspace.ts` `readFolderStamps`、`detectRenames`、`withGitStatus`；`WorkspaceSnapshot.rootNotice` | 显式（I-014）。`nsh 0.4.0` 的 `fs/promises` 没有 `watch`，所以轮询：窗口 `active` 期间每 2 秒（`WORKSPACE_POLL_MS`）`stat` 一遍根目录和**已展开目录**的 `mtimeMs`（子项增删改名会改目录 mtime），有变化就整棵重扫（`refresh`），否则只跑一次 `git status` 并在结果变了时更新徽章与 `Changed` 列表（`withGitStatus`，不重扫）。比对不重叠（`serialize`），内部吞掉异常（避开 `serialize` 异常后 `again` 不复位的问题，I-017 修）。回到窗口（`lifecycle()` 再次变成 `active`）立即重扫一次。每次重扫（轮询、`⌘R`、保存后）与上一次同一根目录的扫描比对：同一父目录下恰好走了一个、来了一个同类条目即视为改名，`expandedIds`、`selectedPath`、`openTabs`、`activeFilePath` 与 `loadedFiles` 里该路径及其下的 key 一起迁移（`migratePath`），跨目录移动与多项同时变化不猜。根目录读不了时文件树换成一行说明（`id:workspace-notice`：`This folder was moved or deleted.` 或 `Cannot read this folder`），打开的 Tab 留着，各自显示 #3 的已移走横幅。已知缺口：两次重扫重叠时谁后完成谁生效（切换目录时旧扫描覆盖新目录由 I-017 的根目录代号修） |
 
 ---
 
@@ -195,6 +196,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 | 欢迎页是一张海报 | 3 个平面：右侧红色拱形、左下墨色块（纯粹几何色块，不放「Open Folder」文字或按钮以免破坏海报感或误触系统选目录弹窗）、两者交界处的石色 1/4 圆。标题 `Aed` 采用 `Helvetica Neue` 粗体、紧字距单行展示；标签采用 Sentence case（`Recent`）。窗口最小尺寸锁定为 `760×520pt`（`MIN_WINDOW_WIDTH` / `MIN_WINDOW_HEIGHT` + AppKit `NSWindow.minSize`），`posterGrid()` 对画布尺寸施加 `520×380pt` 结构下限并按列宽与顶栏净空约束字号，保证标题绝不拆词折行、文字不压到色块上 | `App.tsx` `PosterFields` / `WelcomePanel`、`scripts/finder_bridge.m` |
 | 颜色跟随主题重绘 | `Canvas` 只在 `draw` 内读到的 signal 变化时重绘，所以主题色必须在 `draw` 里读（`Icon` 的 `tint` 与 `AppLogo` 的 `ink` / `accent` 均支持传 accessor） | `src/icons.tsx` `Icon` / `AppLogo` |
 | 预览阅读排版与 TOC 强调 | Markdown 预览遵循同一套规则：阅读栏 `860px` 居中、4px 网格、无阴影/渐变；标题为 `foreground` 600 无彩色，标题下与表格用 `--border` 发丝线；行内代码 `card` 底、代码块 `sidebar` 底 + `editorFont`；引用/GFM Alerts 用 `2px` 左侧条（note→`syntax.property`、tip→`syntax.string`、important→`syntax.type`、warning→`syntax.number`、caution→`ui.accent`）；链接下划线用 `border`，悬停才升 `accent`；TOC（视口 ≥1120px 且 ≥2 个 H1–H3 才显示）唯一强调用法是当前小节 `foreground` + `2px accent` 左条 | `src/markdownPage.ts` `buildPreviewThemeCss` |
+| 只有图标的按钮有名字 | 每个只画图标的按钮都设 `accessibilityLabel`（读屏与测试的 `label:` 选择器用它）：Tab 关闭「Close <文件名>」、标题栏「Toggle sidebar」/「Toggle terminal」、侧栏「Show all files」/「Show changed files」、偏好设置「Close preferences」、图片 / PDF / Mermaid 缩放「Zoom out」/「Zoom in」、终端「New terminal tab」。新加图标按钮时同时补上并加进 `App.test.tsx` › every icon-only button has an accessible name。悬停提示（`tooltip`）尚未加，待视觉方向确定后统一做 | `App.tsx`、`src/Sidebar.tsx`、`src/PreviewPane.tsx`、`src/mermaid.tsx`、`src/TerminalPane.tsx` |
 
 **为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.3.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
 

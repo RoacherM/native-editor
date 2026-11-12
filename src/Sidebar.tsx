@@ -30,6 +30,8 @@ export interface SidebarProps {
   expandedIds: Signal<string[]>;
   selectedPath: Signal<string | null>;
   gitStatusMap: Accessor<Record<string, GitStatusCode>>;
+  /** Why the folder cannot be listed (moved, deleted, unreadable): shown instead of the tree. */
+  notice: Accessor<string | null>;
   theme?: Accessor<EditorTheme>;
   onSelectFile: (filePath: string, openInDiff?: boolean) => void;
 }
@@ -74,6 +76,16 @@ function renderTreeRow(
   root: Accessor<string>,
   theme: Accessor<EditorTheme>
 ): JSX.Element {
+  // A folder's notice row (unreadable, too deep, N more items): text only.
+  if (entry.disabled) {
+    return (
+      <View class="flex-row items-center h-7 pr-2 select-none" style={{ paddingLeft: entry.depth * 12 + 8 }}>
+        <Text style={{ color: theme().ui.mutedForeground }} class="truncate text-xs italic flex-1">
+          {entry.label}
+        </Text>
+      </View>
+    );
+  }
   const status = computed(() =>
     entry.folder ? undefined : lookupGitStatus(entry.id, root(), statusMap())
   );
@@ -169,6 +181,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         <View class="flex-row items-center gap-1 shrink-0">
           <Button
             testID="sidebar-filter-all"
+            accessibilityLabel="Show all files"
             selected={isAll()}
             onPress={() => props.filterMode.set("all")}
             style={{
@@ -187,6 +200,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
 
           <Button
             testID="sidebar-filter-changed"
+            accessibilityLabel="Show changed files"
             selected={isChanged()}
             onPress={() => props.filterMode.set("changed")}
             style={{
@@ -208,6 +222,15 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         </View>
       </View>
 
+      <If when={props.notice()}>
+        {(notice) => (
+          <View testID="workspace-notice" class="px-5 py-3">
+            <Text style={{ color: theme().ui.mutedForeground }} class="text-xs">
+              {notice()}
+            </Text>
+          </View>
+        )}
+      </If>
       <TreeView
         testID="workspace-tree"
         rowHeight={28}

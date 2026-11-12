@@ -8,6 +8,7 @@ import {
   effect,
   host,
   keymap,
+  lifecycle,
   mount,
   Scroll,
   setColorScheme,
@@ -67,6 +68,16 @@ import {
 import {
   allowsMode,
   consumeFinderOpenQueue,
+  detectRenames,
+  emptySnapshot,
+  migratePath,
+  pickSavePath,
+  readFolderStamps,
+  readGitStatus,
+  relocateFile,
+  sameGitStatus,
+  withGitStatus,
+  type Rename,
   getFileDiffPatch,
   getInitialOpenFile,
   getInitialWorkspaceRoot,
@@ -202,6 +213,7 @@ function TabItem(props: {
       </Button>
       <Button
         testID={`tab-close-${name()}`}
+        accessibilityLabel={`Close ${name()}`}
         onPress={props.onClose}
         class="h-4 w-4 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
       >
@@ -297,6 +309,7 @@ function WindowTitleBar(props: {
       <View class="flex-row items-center gap-1 shrink-0">
         <Button
           testID="titlebar-toggle-sidebar"
+          accessibilityLabel="Toggle sidebar"
           onPress={props.onToggleSidebar}
           class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
         >
@@ -312,6 +325,7 @@ function WindowTitleBar(props: {
         </Button>
         <Button
           testID="titlebar-toggle-terminal"
+          accessibilityLabel="Toggle terminal"
           onPress={props.onToggleTerminal}
           class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
         >
@@ -645,6 +659,7 @@ function FontSettingsDialog(props: {
             </Text>
             <Button
               testID="font-dialog-close"
+              accessibilityLabel="Close preferences"
               onPress={() => props.open.set(false)}
               class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
             >
@@ -1212,18 +1227,63 @@ function DiskConflictBanner(props: {
 }
 
 /**
- * Shown above the editor when the active copy cannot be saved: its last save
- * failed (reason and path; the tab stays dirty), or its bytes are not UTF-8.
+ * Shown above the editor when the active copy cannot be saved where it came
+ * from: its file was moved or deleted outside Aed (Save As or Close), its
+ * last save failed (reason and path; the tab stays dirty), or its bytes are
+ * not UTF-8.
  */
 function FileNoticeBanner(props: {
   file: Accessor<LoadedFile | undefined>;
   theme: Accessor<EditorTheme>;
+  onSaveAs: (filePath: string) => void;
+  onClose: (filePath: string) => void;
   onDismissSaveError: () => void;
 }): JSX.Element {
   const saveError = computed(() => props.file()?.saveError ?? null);
   const readOnly = computed(() => (saveError() ? null : props.file()?.readOnly ?? null));
+  const missing = computed(() => {
+    const file = props.file();
+    return file?.diskMissing ? file : null;
+  });
   return (
     <View>
+      <If when={missing()}>
+        {(file) => (
+          <View
+            testID="file-missing-banner"
+            style={{ backgroundColor: props.theme().ui.card }}
+            class="h-9 px-3 flex-row items-center gap-3 select-none"
+          >
+            <View
+              style={{ backgroundColor: props.theme().ui.accent }}
+              class="w-1.5 h-1.5 rounded-full"
+            />
+            <Text style={{ color: props.theme().ui.foreground }} class="flex-1 text-xs truncate">
+              {`${file().name} was moved or deleted.`}
+            </Text>
+            <Button
+              testID="file-missing-close-btn"
+              onPress={() => props.onClose(file().path)}
+              style={{ backgroundColor: props.theme().ui.sidebar }}
+              class="h-6 px-3 rounded border-none shadow-none"
+            >
+              <Text style={{ color: props.theme().ui.foreground }} class="text-xs">
+                Close
+              </Text>
+            </Button>
+            <Button
+              testID="file-missing-save-as-btn"
+              onPress={() => props.onSaveAs(file().path)}
+              style={{ backgroundColor: props.theme().ui.accent }}
+              class="h-6 px-3 rounded border-none shadow-none"
+            >
+              <Text style={{ color: "#ffffff" }} class="text-xs font-medium">
+                Save As…
+              </Text>
+            </Button>
+          </View>
+        )}
+      </If>
       <If when={saveError()}>
         {(message) => (
           <View
@@ -1582,12 +1642,30 @@ async function checkTabAgainstDisk(
 ): Promise<void> {
   const file = loadedFiles()[filePath];
   if (!file) return;
+  if (await markMissingInMap(loadedFiles, file)) return;
   if (!file.dirty) return revalidateTabInMap(loadedFiles, openTabs, filePath, root);
   if (file.diskChanged || !(await hasChangedOnDisk(file))) return;
   const latest = loadedFiles()[filePath];
   // Only the copy that was checked: not a newer read of the file.
   if (!latest?.dirty || latest.diskStamp !== file.diskStamp) return;
   loadedFiles.set({ ...loadedFiles(), [filePath]: { ...latest, diskChanged: true } });
+}
+
+/**
+ * Mark whether `file`'s source is gone (moved or deleted outside Aed): its
+ * tab then says so (FileNoticeBanner) and a save never recreates it. A copy
+ * never read from disk (`diskStamp` null) is not missing. True when gone.
+ */
+async function markMissingInMap(
+  loadedFiles: Signal<Record<string, LoadedFile>>,
+  file: LoadedFile
+): Promise<boolean> {
+  const missing = file.diskStamp !== null && (await readDiskStamp(file.path)) === null;
+  const latest = loadedFiles()[file.path];
+  if (latest && latest.diskMissing !== missing) {
+    loadedFiles.set({ ...loadedFiles(), [file.path]: { ...latest, diskMissing: missing } });
+  }
+  return missing;
 }
 
 /** The disk check of the active tab; it never overlaps itself (`serialize`). */
@@ -1602,6 +1680,121 @@ function createActiveTabDiskCheck(opts: {
     if (!filePath) return;
     await checkTabAgainstDisk(opts.loadedFiles, opts.openTabs, filePath, opts.workspaceRoot());
   });
+}
+
+/** How often the folders the tree shows, and git status, are compared with the disk. */
+const WORKSPACE_POLL_MS = 2000;
+
+/**
+ * The disk check of the workspace (DESIGN.md「状态机清单」#14): the root and
+ * the expanded folders are `stat`ed; when one changed (a child added,
+ * removed or renamed) the workspace is scanned again, else only git status
+ * is read. It never overlaps itself (`serialize`) and never throws.
+ */
+function createWorkspaceDiskCheck(opts: {
+  workspaceRoot: Accessor<string>;
+  expandedIds: Accessor<string[]>;
+  snapshot: Signal<WorkspaceSnapshot>;
+  refresh: () => Promise<void>;
+}): () => Promise<void> {
+  let lastStamp = "";
+  return serialize(async () => {
+    const root = opts.workspaceRoot();
+    if (!root) return;
+    try {
+      const stamp = await readFolderStamps([root, ...opts.expandedIds()]);
+      if (stamp !== lastStamp) {
+        lastStamp = stamp;
+        await opts.refresh();
+        return;
+      }
+      const gitStatusMap = await readGitStatus(root);
+      const current = opts.snapshot();
+      if (opts.workspaceRoot() !== root || current.root !== root) return;
+      if (!sameGitStatus(gitStatusMap, current.gitStatusMap)) {
+        opts.snapshot.set(withGitStatus(current, gitStatusMap));
+      }
+    } catch {
+      // The next poll tries again.
+    }
+  });
+}
+
+/**
+ * While the window is active, run `check` every WORKSPACE_POLL_MS; coming
+ * back to the window (`lifecycle()` active again) scans the workspace once.
+ */
+function watchWorkspaceDisk(check: () => Promise<void>, refresh: () => Promise<void>): void {
+  let runs = 0;
+  effect(() => {
+    const returning = (runs += 1) > 1;
+    if (lifecycle() !== "active") return;
+    // Out of the effect's run: its git processes would end when it runs again (DESIGN.md 踩坑 8).
+    const kick = setTimeout(() => {
+      if (returning) void refresh();
+    }, 0);
+    const timer = setInterval(() => void check(), WORKSPACE_POLL_MS);
+    cleanup(() => {
+      clearTimeout(kick);
+      clearInterval(timer);
+    });
+  });
+}
+
+/** What App keys by path: it all moves when a file or folder is renamed. */
+interface OpenPathState {
+  openTabs: Signal<string[]>;
+  activeFilePath: Signal<string | null>;
+  selectedPath: Signal<string | null>;
+  expandedIds: Signal<string[]>;
+  loadedFiles: Signal<Record<string, LoadedFile>>;
+}
+
+/** Move open tabs, their copies, the selection and expanded folders along `renames`. */
+function migrateOpenPaths(state: OpenPathState, renames: readonly Rename[], root: string): void {
+  if (renames.length === 0) return;
+  const move = (p: string) => migratePath(p, renames);
+  const moveOrNull = (p: string | null) => (p === null ? null : move(p));
+  const files: Record<string, LoadedFile> = {};
+  for (const [p, file] of Object.entries(state.loadedFiles())) {
+    const next = move(p);
+    files[next] = next === p ? file : { ...relocateFile(file, next, root), diskMissing: false };
+  }
+  state.loadedFiles.set(files);
+  state.openTabs.set(state.openTabs().map(move));
+  state.activeFilePath.set(moveOrNull(state.activeFilePath()));
+  state.selectedPath.set(moveOrNull(state.selectedPath()));
+  state.expandedIds.set(state.expandedIds().map(move));
+}
+
+/** A rename seen between two scans of the same folder moves what App keys by path. */
+function followRenames(state: OpenPathState, before: WorkspaceSnapshot, after: WorkspaceSnapshot): void {
+  if (before.root !== after.root) return;
+  migrateOpenPaths(state, detectRenames(after.root, before.entries, after.entries), after.root);
+}
+
+/**
+ * Save As for a tab whose file is gone: the tab moves to the path the user
+ * picks (as a rename would) and its whole text is written there.
+ */
+async function saveCopyAs(
+  state: OpenPathState,
+  filePath: string,
+  root: string,
+  save: (filePath: string) => Promise<SaveOutcome>
+): Promise<void> {
+  const file = state.loadedFiles()[filePath];
+  const target = file ? await pickSavePath(file) : null;
+  if (!target) return;
+  migrateOpenPaths(state, [[filePath, target]], root);
+  const moved = state.loadedFiles()[target];
+  if (!moved) return;
+  // Not read from `target`: no stamp to guard, and written even when clean.
+  state.loadedFiles.set({
+    ...state.loadedFiles(),
+    [target]: { ...moved, diskStamp: null, dirty: true, saveError: null },
+  });
+  await save(target);
 }
 
 /**
@@ -1832,16 +2025,7 @@ function App(): JSX.Element {
   const initialRoot = getInitialWorkspaceRoot();
   const workspaceRoot = signal<string>(initialRoot);
   const recentWorkspaces = signal<string[]>([]);
-  const snapshot = signal<WorkspaceSnapshot>({
-    root: "",
-    branch: "",
-    entries: [],
-    flatFiles: [],
-    gitStatusMap: {},
-    treeItemsAll: [],
-    treeItemsChanged: [],
-    commandItems: [],
-  });
+  const snapshot = signal<WorkspaceSnapshot>(emptySnapshot());
 
   const filterMode = signal<"all" | "changed">("all");
   const expandedIds = signal<string[]>([]);
@@ -1903,8 +2087,10 @@ function App(): JSX.Element {
     Storage.setItem("aed.fontSize", String(DEFAULT_FONT_SIZE));
   };
 
+  const openPaths: OpenPathState = { openTabs, activeFilePath, selectedPath, expandedIds, loadedFiles };
   const refresh = async () => {
     const scanned = await scanWorkspace(workspaceRoot());
+    followRenames(openPaths, snapshot(), scanned);
     snapshot.set(scanned);
     void warmWorkspaceFiles(scanned);
   };
@@ -1970,16 +2156,7 @@ function App(): JSX.Element {
   const clearWorkspaceTree = () => {
     if (workspaceRoot().length === 0) return;
     workspaceRoot.set("");
-    snapshot.set({
-      root: "",
-      branch: "",
-      entries: [],
-      flatFiles: [],
-      gitStatusMap: {},
-      treeItemsAll: [],
-      treeItemsChanged: [],
-      commandItems: [],
-    });
+    snapshot.set(emptySnapshot());
     expandedIds.set([]);
   };
 
@@ -2216,6 +2393,10 @@ function App(): JSX.Element {
     void activeFilePath();
     untracked(() => void checkActiveTabOnDisk());
   });
+  watchWorkspaceDisk(
+    createWorkspaceDiskCheck({ workspaceRoot, expandedIds, snapshot, refresh }),
+    refresh
+  );
 
   const changedCount = computed(() => Object.keys(snapshot().gitStatusMap).length);
   const treeItems = computed(() =>
@@ -2287,6 +2468,7 @@ function App(): JSX.Element {
               expandedIds={expandedIds}
               selectedPath={selectedPath}
               gitStatusMap={() => snapshot().gitStatusMap}
+              notice={() => snapshot().rootNotice}
               theme={activeTheme}
               onSelectFile={openFileInTab}
             />
@@ -2339,6 +2521,8 @@ function App(): JSX.Element {
                   <FileNoticeBanner
                     file={activeFile}
                     theme={activeTheme}
+                    onSaveAs={(p) => void saveCopyAs(openPaths, p, workspaceRoot(), handleSave)}
+                    onClose={closeTab}
                     onDismissSaveError={() => {
                       const cur = activeFile();
                       if (cur) fileStoreOf(loadedFiles).set(cur.path, { ...cur, saveError: null });

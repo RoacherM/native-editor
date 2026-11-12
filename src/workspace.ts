@@ -29,6 +29,8 @@ export interface WorkspaceEntry {
   isDirectory: boolean;
   gitStatus?: GitStatusCode;
   children?: WorkspaceEntry[];
+  /** A folder whose children are not all listed says why (FOLDER_NOTICES, moreItemsNotice). */
+  notice?: string;
 }
 
 export interface WorkspaceSnapshot {
@@ -40,6 +42,35 @@ export interface WorkspaceSnapshot {
   treeItemsAll: TreeItem[];
   treeItemsChanged: TreeItem[];
   commandItems: CommandItem[];
+  /** Why the root itself cannot be listed (moved, deleted, unreadable); the tree is empty then. */
+  rootNotice: string | null;
+}
+
+/** The snapshot of no workspace. */
+export function emptySnapshot(): WorkspaceSnapshot {
+  return {
+    root: "",
+    branch: "",
+    entries: [],
+    flatFiles: [],
+    gitStatusMap: {},
+    treeItemsAll: [],
+    treeItemsChanged: [],
+    commandItems: [],
+    rootNotice: null,
+  };
+}
+
+/** What a folder row shows instead of children Aed could not list. */
+export const FOLDER_NOTICES = {
+  unreadable: "Cannot read this folder",
+  tooDeep: "Too deep to list",
+  rootMissing: "This folder was moved or deleted.",
+} as const;
+
+/** The last row of a folder cut at MAX_DIR_ENTRIES. */
+export function moreItemsNotice(count: number): string {
+  return `${count} more ${count === 1 ? "item" : "items"} not shown`;
 }
 
 export interface LoadedFile {
@@ -67,6 +98,8 @@ export interface LoadedFile {
   diskStamp: string | null;
   /** The disk has a newer version than this copy's unsaved edits: a conflict the user resolves. */
   diskChanged: boolean;
+  /** The file this copy came from is gone (moved or deleted outside Aed); a save never recreates it. */
+  diskMissing: boolean;
   /** The bytes started with a UTF-8 byte order mark; a save writes it back. */
   bom: boolean;
   /** Why this copy can never be saved (its bytes are not UTF-8), or null. */
@@ -298,48 +331,53 @@ function isIgnored(name: string, isDirectory: boolean): boolean {
   return false;
 }
 
-/** Folders first, then files, each alphabetically. */
-function sortEntries(entries: WorkspaceEntry[]): WorkspaceEntry[] {
-  return entries.sort((a, b) => {
-    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
+/** A folder's listed entries, and why some are missing (a notice), if any are. */
+interface DirListing {
+  entries: WorkspaceEntry[];
+  notice: string | null;
 }
 
-/** Recursively list a directory in parallel across subdirectories. */
-async function scanDirectory(
-  root: string,
-  dir: string,
-  depth = 0,
-): Promise<WorkspaceEntry[]> {
-  if (depth > MAX_SCAN_DEPTH) return [];
+/** Folders first, then files, each alphabetically. */
+function compareDirents(a: Dirent, b: Dirent): number {
+  if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+/**
+ * Recursively list a directory in parallel across subdirectories. Ignored
+ * names are dropped before the MAX_DIR_ENTRIES cut, so they never take a
+ * place; a folder Aed cannot read, or did not descend into, says so.
+ */
+async function scanDirectory(root: string, dir: string, depth = 0): Promise<DirListing> {
+  if (depth > MAX_SCAN_DEPTH) return { entries: [], notice: FOLDER_NOTICES.tooDeep };
   let dirents: Dirent[];
   try {
     dirents = await fs.readdir(dir, { withFileTypes: true });
   } catch {
-    return [];
+    return { entries: [], notice: FOLDER_NOTICES.unreadable };
   }
   const visible = dirents
-    .slice(0, MAX_DIR_ENTRIES)
-    .filter((dirent) => !isIgnored(dirent.name, dirent.isDirectory()));
+    .filter((dirent) => !isIgnored(dirent.name, dirent.isDirectory()))
+    .sort(compareDirents);
+  const shown = visible.slice(0, MAX_DIR_ENTRIES);
   const entries = await Promise.all(
-    visible.map(async (dirent): Promise<WorkspaceEntry> => {
-      const isDirectory = dirent.isDirectory();
+    shown.map(async (dirent): Promise<WorkspaceEntry> => {
       const full = path.join(dir, dirent.name);
-      const relPath = relativePath(root, full);
-      const children = isDirectory
-        ? await scanDirectory(root, full, depth + 1)
-        : undefined;
-      return {
+      const entry: WorkspaceEntry = {
         path: full,
-        relPath,
+        relPath: relativePath(root, full),
         name: dirent.name,
-        isDirectory,
-        children,
+        isDirectory: dirent.isDirectory(),
       };
+      if (!entry.isDirectory) return entry;
+      const listing = await scanDirectory(root, full, depth + 1);
+      entry.children = listing.entries;
+      if (listing.notice) entry.notice = listing.notice;
+      return entry;
     })
   );
-  return sortEntries(entries);
+  const omitted = visible.length - shown.length;
+  return { entries, notice: omitted > 0 ? moreItemsNotice(omitted) : null };
 }
 
 /** Attach gitStatus to each entry and collect every file in display order. */
@@ -359,11 +397,23 @@ function collectFiles(
   return files;
 }
 
+/** Tree rows for `entries` of folder `dir`, ending with the folder's notice row (disabled), if any. */
+function toTreeItems(dir: string, entries: WorkspaceEntry[], notice: string | null | undefined): TreeItem[] {
+  const items = entries.map(toTreeItem);
+  if (notice) items.push({ id: noticeRowId(dir), label: notice, disabled: true });
+  return items;
+}
+
 /** A tree row for an entry, folders carrying their children. */
 function toTreeItem(entry: WorkspaceEntry): TreeItem {
   const item: TreeItem = { id: entry.path, label: entry.name };
-  if (entry.isDirectory) item.children = (entry.children ?? []).map(toTreeItem);
+  if (entry.isDirectory) item.children = toTreeItems(entry.path, entry.children ?? [], entry.notice);
   return item;
+}
+
+/** The id of a folder's notice row: never a path on disk (NUL cannot be in a name). */
+function noticeRowId(dir: string): string {
+  return `${dir}/\u0000notice`;
 }
 
 /** A flat tree of the files git reports as changed. */
@@ -404,7 +454,7 @@ function parseGitStatus(output: string): Record<string, GitStatusCode> {
 }
 
 /** Run `git status --porcelain=v1 -z -uall`; an empty map outside a repository. */
-async function readGitStatus(root: string): Promise<Record<string, GitStatusCode>> {
+export async function readGitStatus(root: string): Promise<Record<string, GitStatusCode>> {
   try {
     const result = await process.run(
       "git",
@@ -429,34 +479,122 @@ async function readGitBranch(root: string): Promise<string> {
 
 /** Scan workspace directory, git branch, and git status (-z). */
 export async function scanWorkspace(root: string): Promise<WorkspaceSnapshot> {
-  if (!root || root.trim().length === 0) {
-    return {
-      root: "",
-      branch: "",
-      entries: [],
-      flatFiles: [],
-      gitStatusMap: {},
-      treeItemsAll: [],
-      treeItemsChanged: [],
-      commandItems: [],
-    };
-  }
-  const [gitStatusMap, branch, entries] = await Promise.all([
+  if (!root || root.trim().length === 0) return emptySnapshot();
+  const [gitStatusMap, branch, listing] = await Promise.all([
     readGitStatus(root),
     readGitBranch(root),
     scanDirectory(root, root),
   ]);
-  const flatFiles = collectFiles(entries, gitStatusMap);
-  return {
+  const unlisted = listing.notice === FOLDER_NOTICES.unreadable;
+  const rootNotice = !unlisted
+    ? null
+    : (await isDirectoryPath(root))
+      ? FOLDER_NOTICES.unreadable
+      : FOLDER_NOTICES.rootMissing;
+  const base: WorkspaceSnapshot = {
+    ...emptySnapshot(),
     root,
     branch,
-    entries,
+    entries: listing.entries,
+    treeItemsAll: unlisted ? [] : toTreeItems(root, listing.entries, listing.notice),
+    rootNotice,
+  };
+  return withGitStatus(base, gitStatusMap);
+}
+
+/** `snapshot` with a new git status: the badges, the Changed list and quick open follow it. */
+export function withGitStatus(
+  snapshot: WorkspaceSnapshot,
+  gitStatusMap: Record<string, GitStatusCode>
+): WorkspaceSnapshot {
+  const flatFiles = collectFiles(snapshot.entries, gitStatusMap);
+  return {
+    ...snapshot,
     flatFiles,
     gitStatusMap,
-    treeItemsAll: entries.map(toTreeItem),
     treeItemsChanged: toChangedItems(flatFiles),
     commandItems: flatFiles.map(toCommandItem),
   };
+}
+
+/** Whether two git status maps say the same. */
+export function sameGitStatus(
+  a: Record<string, GitStatusCode>,
+  b: Record<string, GitStatusCode>
+): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+}
+
+/**
+ * The disk stamp of the folders the tree shows: each one's `mtimeMs` (a
+ * child added, removed or renamed changes it), `-` when it cannot be read.
+ */
+export async function readFolderStamps(dirs: readonly string[]): Promise<string> {
+  const stamps = await Promise.all(
+    dirs.map(async (dir) => {
+      try {
+        return `${dir}:${(await fs.stat(dir)).mtimeMs}`;
+      } catch {
+        return `${dir}:-`;
+      }
+    })
+  );
+  return stamps.join("\n");
+}
+
+/** A path moved by a rename: `[from, to]`, absolute. */
+export type Rename = readonly [string, string];
+
+function childrenByFolder(
+  dir: string,
+  entries: WorkspaceEntry[],
+  out: Map<string, WorkspaceEntry[]>
+): Map<string, WorkspaceEntry[]> {
+  out.set(dir, entries);
+  for (const entry of entries) {
+    if (entry.isDirectory) childrenByFolder(entry.path, entry.children ?? [], out);
+  }
+  return out;
+}
+
+/**
+ * The renames between two scans of `root`: in a folder both scans list, one
+ * entry went and one of the same kind came. Anything else (several at once,
+ * a move to another folder) is not guessed.
+ */
+export function detectRenames(
+  root: string,
+  before: WorkspaceEntry[],
+  after: WorkspaceEntry[]
+): Rename[] {
+  const old = childrenByFolder(root, before, new Map());
+  const fresh = childrenByFolder(root, after, new Map());
+  const renames: Rename[] = [];
+  for (const [dir, oldChildren] of old) {
+    const newChildren = fresh.get(dir);
+    if (!newChildren) continue;
+    const went = oldChildren.filter((e) => !newChildren.some((n) => n.path === e.path));
+    const came = newChildren.filter((n) => !oldChildren.some((e) => e.path === n.path));
+    if (went.length === 1 && came.length === 1 && went[0].isDirectory === came[0].isDirectory) {
+      renames.push([went[0].path, came[0].path]);
+    }
+  }
+  return renames;
+}
+
+/** `filePath` after `renames`: the path itself or anything under it moves. */
+export function migratePath(filePath: string, renames: readonly Rename[]): string {
+  for (const [from, to] of renames) {
+    if (filePath === from) return to;
+    if (filePath.startsWith(`${from}/`)) return to + filePath.slice(from.length);
+  }
+  return filePath;
+}
+
+/** `file` at `filePath`: its names follow, its text and state stay. */
+export function relocateFile(file: LoadedFile, filePath: string, root: string): LoadedFile {
+  return { ...file, path: filePath, name: path.basename(filePath), relPath: relativePath(root, filePath) };
 }
 
 /** Fetch git diff patch for a specific file (staged + unstaged vs HEAD, or unstaged). */
@@ -671,6 +809,7 @@ export async function loadFile(
     diffPatch,
     diskStamp,
     diskChanged: false,
+    diskMissing: false,
     bom,
     readOnly,
     saveError: null,
@@ -692,6 +831,10 @@ export async function saveFileText(
   newText: string,
   root: string,
 ): Promise<LoadedFile> {
+  // A copy read from disk whose file is gone is never written back there (Save As instead).
+  if (file.diskStamp !== null && (await readDiskStamp(file.path)) === null) {
+    throw new Error(FILE_MISSING_REASON);
+  }
   const bytes = encodeUtf8(newText, file.bom);
   await fs.writeFile(file.path, bytes);
   const kind = file.classification.kind;
@@ -709,10 +852,32 @@ export async function saveFileText(
     relPath: relativePath(root, file.path),
     diskStamp: await readDiskStamp(file.path),
     diskChanged: false,
+    diskMissing: false,
     saveError: null,
   };
   preloadedFiles.set(file.path, updated);
   return updated;
+}
+
+/** Why a save of a copy whose file is gone fails. */
+export const FILE_MISSING_REASON = "the file was moved or deleted";
+
+/** Ask for a path to save `file` at (macOS save panel via osascript); null when cancelled. */
+export async function pickSavePath(file: LoadedFile): Promise<string | null> {
+  const script = [
+    "on run argv",
+    'POSIX path of (choose file name with prompt "Save As" default name (item 1 of argv) default location (POSIX file (item 2 of argv)))',
+    "end run",
+  ];
+  const args = script.flatMap((line) => ["-e", line]);
+  const dir = path.dirname(file.path);
+  try {
+    const result = await process.run("osascript", [...args, file.name, dir], { cwd: execCwd(dir) });
+    const picked = result.stdout.trim();
+    return picked.length > 0 ? picked : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Open macOS folder picker dialog via osascript and return selected folder path or null. */

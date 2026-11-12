@@ -455,6 +455,8 @@ interface Scratch {
   app: TestApp;
   dir: string;
   write: (name: string, content: string) => Promise<void>;
+  /** Run a shell command in the window's terminal and wait for it to succeed. */
+  run: (cmd: string) => Promise<void>;
 }
 
 /**
@@ -483,14 +485,16 @@ async function withScratch(
   let step = 0;
   const write = (name: string, content: string) =>
     runInTerminal(app, `printf '${content}\\n' > ${dir}/${name}`, `WRITE_DONE_${(step += 1)}`);
+  const run = (cmd: string) => runInTerminal(app, cmd, `RUN_DONE_${(step += 1)}`);
   try {
     const [first, content] = Object.entries(files)[0];
     await app.waitFor(`text:${first}`);
     await app.press(`text:${first}`);
     await app.waitUntil(() => showsText(app, content), { timeout: 5000 });
-    await body({ app, dir, write });
+    await body({ app, dir, write, run });
   } finally {
-    await runInTerminal(setup, `rm -rf ${dir}`, "CLEAN_DONE");
+    // u+rwx first: a test may lock a folder (chmod 000).
+    await runInTerminal(setup, `chmod -R u+rwx ${dir} 2>/dev/null; rm -rf ${dir}`, "CLEAN_DONE");
   }
 }
 
@@ -1028,6 +1032,7 @@ function textCopy(filePath: string, text: string): LoadedFile {
     diffPatch: "",
     diskStamp: "1:1",
     diskChanged: false,
+    diskMissing: false,
     bom: false,
     readOnly: null,
     saveError: null,
@@ -1281,6 +1286,130 @@ describe("quit guard (I-016)", () => {
     await app.waitFor("text:main.ts");
     await runCommand(app, "File: Quit Aed");
     await quitLeaves(app);
+  });
+});
+
+describe("workspace follows the disk (I-014)", () => {
+  /** Longer than two workspace polls (WORKSPACE_POLL_MS = 2000). */
+  const pastPolls = { timeout: 7000 };
+  const shown = (app: TestApp, text: string) => app.waitUntil(() => showsText(app, text), pastPolls);
+  const gone = (app: TestApp, text: string) => app.waitUntil(() => !showsText(app, text), pastPolls);
+
+  test("a folder renamed outside Aed shows its new name in the tree", async () => {
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app, dir, run }) => {
+        await app.press("text:old-name");
+        await shown(app, "a.txt");
+        await app.press("text:a.txt");
+        await app.waitFor("id:tab-select-a.txt");
+        const rows = app.count("text:a.txt");
+        await run(`mv ${dir}/old-name ${dir}/new-name`);
+        await shown(app, "new-name");
+        await gone(app, "old-name");
+        // Still expanded, still selected, and the tab follows: the save lands at the new path.
+        expect(app.count("text:a.txt")).toBe(rows);
+        expect(app.shows("id:file-missing-banner")).toBe(false);
+        await editTab(app, "EDITED");
+        await app.keyboard.press("mod+s");
+        await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
+        await run(`grep -q EDITED ${dir}/new-name/a.txt && test ! -e ${dir}/old-name`);
+      },
+      (dir) => [`mkdir -p ${dir}/old-name`, `printf 'hello\\n' > ${dir}/old-name/a.txt`]
+    );
+  });
+
+  test("an open tab whose file was moved or deleted says so and does not recreate it on save", async () => {
+    await withScratch({ "note.txt": "NOTE_V1" }, async ({ app, dir, run }) => {
+      await editTab(app, "MINE");
+      await run(`rm ${dir}/note.txt`);
+      await app.waitFor("id:file-missing-banner", pastPolls);
+      await app.keyboard.press("mod+s");
+      await app.waitFor("id:save-error-banner");
+      await run(`test ! -e ${dir}/note.txt`);
+      expect(showsText(app, "•")).toBe(true);
+    });
+  });
+
+  test("the Changed list follows git status changes made outside Aed", async () => {
+    const git = (dir: string) => `git -C ${dir} -c user.name=t -c user.email=t@t`;
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app, dir, run }) => {
+        await app.press("id:sidebar-filter-changed");
+        expect(showsText(app, "other.txt")).toBe(false);
+        await run(`printf 'more\\n' >> ${dir}/other.txt`);
+        await shown(app, "other.txt");
+        await run(`${git(dir)} commit -qam next`);
+        await gone(app, "other.txt");
+      },
+      (dir) => [
+        `printf 'o\\n' > ${dir}/other.txt`,
+        `${git(dir)} init -q`,
+        `${git(dir)} add .`,
+        `${git(dir)} commit -qm init`,
+      ]
+    );
+  });
+
+  test("an unreadable folder is shown as unreadable, not empty", async () => {
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app }) => {
+        await app.press("text:locked");
+        await shown(app, "Cannot read this folder");
+      },
+      (dir) => [`mkdir ${dir}/locked`, `printf 'x\\n' > ${dir}/locked/f.txt`, `chmod 000 ${dir}/locked`]
+    );
+  });
+
+  test("ignored entries do not count toward the per-folder limit, and truncation is shown", async () => {
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app }) => {
+        await app.press("text:big");
+        await shown(app, "f001.txt");
+        await app.scroll("id:workspace-tree", 6000);
+        await shown(app, "5 more items not shown");
+        expect(showsText(app, "f200.txt")).toBe(true);
+        expect(showsText(app, "f201.txt")).toBe(false);
+      },
+      (dir) => [
+        `mkdir ${dir}/big`,
+        `mkdir ${dir}/big/.h{1..300}`,
+        `touch ${dir}/big/f{001..205}.txt`,
+      ]
+    );
+  });
+
+  test("a workspace folder deleted outside Aed says so", async () => {
+    await withScratch({ "note.txt": "NOTE_V1" }, async ({ app, dir, run }) => {
+      await run(`rm -rf ${dir}`);
+      await shown(app, "This folder was moved or deleted.");
+      expect(app.shows("text:note.txt")).toBe(true); // the tab stays, with its own banner
+    });
+  });
+
+  test("every icon-only button has an accessible name", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.press("text:main.ts");
+    await app.waitFor("id:tab-select-main.ts");
+    const named = (labels: string[]) => {
+      for (const label of labels) expect(`${label}: ${app.shows(`label:${label}`)}`).toBe(`${label}: true`);
+    };
+    named(["Close main.ts", "Toggle sidebar", "Toggle terminal", "Show all files", "Show changed files"]);
+    await app.press("text:poster.png");
+    await app.waitFor("id:image-zoom-in");
+    named(["Zoom out", "Zoom in"]);
+    await app.keyboard.press("mod+,");
+    await app.waitFor("id:font-settings-dialog");
+    named(["Close preferences"]);
   });
 });
 

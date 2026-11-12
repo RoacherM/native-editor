@@ -377,6 +377,7 @@ function QuickLookBody(props: {
             >
               <Button
                 testID="quicklook-zoom-out"
+                accessibilityLabel="Zoom out"
                 onPress={() => zoom.update((z) => Math.max(50, z - 25))}
                 class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
               >
@@ -400,6 +401,7 @@ function QuickLookBody(props: {
               </Button>
               <Button
                 testID="quicklook-zoom-in"
+                accessibilityLabel="Zoom in"
                 onPress={() => zoom.update((z) => Math.min(300, z + 25))}
                 class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0"
               >
@@ -486,6 +488,7 @@ function ImageBody(props: {
         </Text>
         <Button
           testID="image-zoom-out"
+          accessibilityLabel="Zoom out"
           onPress={() => zoom.update((z) => clampZoom(z - 25))}
           style={{ backgroundColor: props.theme().ui.sidebar }}
           class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
@@ -511,6 +514,7 @@ function ImageBody(props: {
         </Button>
         <Button
           testID="image-zoom-in"
+          accessibilityLabel="Zoom in"
           onPress={() => zoom.update((z) => clampZoom(z + 25))}
           style={{ backgroundColor: props.theme().ui.sidebar }}
           class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
