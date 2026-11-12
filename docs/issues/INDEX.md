@@ -15,7 +15,6 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 | [I-015](./I-015.md) | P0 | `App.tsx` · `src/workspace.ts` | 保存会损坏文件：⌘S 清空图片/二进制、非 UTF-8 被改写、保存期间输入丢失、保存失败不提示、SVG/Diff 保存后不刷新（8 项） | `nsh check && nsh test --trace` |
 | [I-016](./I-016.md) | P0 | `App.tsx` · `scripts/finder_bridge.m` | ⌘Q 与窗口关闭按钮不检查未保存修改 | `nsh check && nsh test --trace` |
 | [I-017](./I-017.md) | P1 | `App.tsx` · `src/mermaid.tsx` · `src/classify.ts` | 状态竞态与静默失败：Recent 被清空、旧扫描覆盖新目录、Mermaid 串图、打不开的文件没反应、表格解析、大文件（11 项） | `nsh check && nsh test --trace` |
-| [I-018](./I-018.md) | P1 | `scripts/` · `src/workspace.ts` · `nsh.json` | `/tmp` 固定路径可被注入、外部打开路径解析错误、每个文件一个进程、权限过宽（9 项） | `nsh check && nsh test --trace` + 打包 |
 | [I-019](./I-019.md) | P1 | `src/TerminalPane.tsx` · `vendor/` | 内置终端改成真正的 TTY：xterm.js + 帧协议 PTY 桥（键盘直通、全屏程序、颜色、尺寸跟随） | `nsh check && nsh test --trace` |
 
 ## 2. Needs Decision（等用户拍板）
@@ -32,6 +31,7 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 
 | ID | 子系统 | 标题 | Commit | 回归测试 |
 |---|---|---|---|---|
+| [I-018](./I-018.md) | `scripts/` · `src/workspace.ts` · `nsh.json` | 打开队列改为每进程 0700 目录、外部路径解析与行号跳转、Finder 多选一个窗口、Mermaid 包不落 /tmp 且 strict、QuickLook PNG 与 blob 回收、`.html` CSP、network/webview hosts 收为 `[]`、public.data 仅 Viewer 且默认打开方式改为 `--set-default` 显式启用（9 项全修）；**待核验**：`sh scripts/package-macos.sh` 构建、真机 Finder 多选与 Mermaid strict 渲染、第 6 条独立审查 | `ff3b364` | `App.test.tsx` › I-018 per-user temp files, external open & capabilities 9 项（Finder queue 目录与 symlink、file:// 解码、:line:col 跳转与 `odd:2` 字面名、PDF 预览缓存与删除、.mmd strict、Mermaid 渲染缓存回收、.html CSP、nsh.json 权限、Info.plist 角色与不自动接管） |
 
 ## 5. Done（已闭环，单卡已删）
 
