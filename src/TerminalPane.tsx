@@ -2,55 +2,31 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import process from "process";
-import type { ChildProcess } from "process";
-import type { Accessor, JSX, Signal, WebViewRef } from "nsh";
+import { type SessionEvent, TerminalSession } from "aed/native";
+import type { Accessor, JSX, NativeComponentRef, Signal } from "nsh";
 import {
   cleanup,
   computed,
   effect,
   host,
   keymap,
+  nativeComponent,
   openUrl,
   Scroll,
   signal,
   Text,
   untracked,
   View,
-  WebView,
 } from "nsh";
 import { Button, Select, type SelectItem } from "nsh/base";
 import { Icon } from "./icons";
-import {
-  binaryStringBytes,
-  buildTerminalOptions,
-  buildTerminalShellHtml,
-  createLineSplitter,
-  createOutputHistory,
-  createTextMirror,
-  createUtf8Stream,
-  decodeBase64,
-  DEFAULT_COLS,
-  DEFAULT_ROWS,
-  encodeInputFrame,
-  encodeResizeFrame,
-  isTerminalReport,
-  type LineSplitter,
-  type OutputHistory,
-  pageCall,
-  parseBridgeLine,
-  parseTerminalPageMessage,
-  PTY_BRIDGE_PY,
-  type TerminalPageMessage,
-  type TextMirror,
-  textChunk,
-  type Utf8Stream,
-} from "./terminalPage";
+import { buildTerminalTheme, type TerminalTheme } from "./terminalTheme";
 import { EDITOR_THEMES, type EditorTheme } from "./themes";
-import { XTERM_RUNTIME_JS } from "./xtermVendor.generated";
 
-// DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」. The I/O shell of the
-// terminal: PTY bridge processes, the xterm WebView and the test channel.
-// The protocol itself is src/terminalPage.ts.
+// DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」. The terminal's tabs: a
+// `TerminalSession` each (libghostty-vt and the shell on its PTY, native/),
+// the native `aed.terminal` view that shows the active one, and the test
+// channel.
 
 export interface TerminalPaneProps {
   cwd: Accessor<string>;
@@ -91,42 +67,22 @@ export interface TerminalEnvironment {
   ghostty: GhosttyConfig;
 }
 
-interface TermSize {
-  rows: number;
-  cols: number;
-}
-
-/** The test channel's plain-text copy of a tab's output (fed only once the channel is used). */
-interface TabMirror {
-  text: TextMirror;
-  utf8: Utf8Stream;
-  lines: Signal<string[]>;
-}
-
 interface TermTab {
   id: number;
   shell: Signal<ShellProfile>;
   /** The title the program set (OSC 0/2), "" for none. */
   programTitle: Signal<string>;
   title: Accessor<string>;
-  /** What the page shows; replayed when the page becomes ready. */
-  history: OutputHistory;
-  mirror: TabMirror;
-  /** The size the page last measured for this tab. */
-  size: TermSize | null;
-}
-
-interface PtySession {
-  child: ChildProcess;
-  /** The directory the shell started in. */
-  cwd: string;
-  /** Whether the user has sent the shell any input (typing, not terminal answers). */
-  used: boolean;
-  /** Holds input until the shell has drawn its first prompt. */
-  gate: InputGate;
-  frames: LineSplitter;
-  /** The shell's exit code, from the bridge's `X` frame. */
-  exitCode: number | null;
+  /** The tab's terminal and the shell running in it. */
+  session: TerminalSession;
+  /** The directory the running shell started in; null while none runs. */
+  startedIn: string | null;
+  /** Holds the test channel's input until the running shell has drawn its first prompt. */
+  gate: InputGate<Uint8Array> | null;
+  /** The test channel typed into the running shell (perhaps still held by the gate). */
+  typed: boolean;
+  /** The test channel's plain-text copy of the screen (kept once the channel is used). */
+  mirror: Signal<string[]>;
 }
 
 /** Quiet time after the shell's first output that means its prompt is drawn. */
@@ -134,9 +90,9 @@ const SHELL_QUIET_MS = 200;
 /** Input is let through after this long even if the shell stays silent. */
 const SHELL_READY_MAX_MS = 3000;
 
-export interface InputGate {
-  /** Write `text` now if the shell is ready, else queue it. */
-  send(text: string): void;
+export interface InputGate<T> {
+  /** Write `data` now if the shell is ready, else queue it. */
+  send(data: T): void;
   /** The shell printed something. */
   output(): void;
   /** Let queued and later input through. */
@@ -150,24 +106,24 @@ export interface InputGate {
  * SHELL_READY_MAX_MS passed. `schedule` / `cancel` are injectable for tests.
  * Opening again is harmless: the queue is already empty.
  */
-export function createInputGate(
-  write: (text: string) => void,
+export function createInputGate<T>(
+  write: (data: T) => void,
   schedule: (fn: () => void, ms: number) => unknown = setTimeout,
   cancel: (handle: unknown) => void = (h) => clearTimeout(h as ReturnType<typeof setTimeout>)
-): InputGate {
+): InputGate<T> {
   let ready = false;
   let quiet: unknown;
-  const queued: string[] = [];
+  const queued: T[] = [];
   const open = () => {
     ready = true;
     cancel(quiet);
     cancel(fallback);
-    for (const text of queued.splice(0)) write(text);
+    for (const data of queued.splice(0)) write(data);
   };
   // A shell that stays silent still gets its input.
   const fallback = schedule(open, SHELL_READY_MAX_MS);
   return {
-    send: (text) => (ready ? write(text) : void queued.push(text)),
+    send: (data) => (ready ? write(data) : void queued.push(data)),
     output: () => {
       if (ready) return;
       cancel(quiet);
@@ -375,169 +331,115 @@ export async function discoverTerminalEnvironment(): Promise<TerminalEnvironment
   return { externalApps, shells, ghostty };
 }
 
+/** A shell's size until the view has measured the terminal. */
+const DEFAULT_ROWS = 32;
+const DEFAULT_COLS = 140;
 /** Lines the test channel's mirror shows (the newest). */
 const MIRROR_ROWS = 14;
 
 /** What a tab's shell needs from the pane. */
 interface SessionDeps {
-  sessions: Map<number, PtySession>;
   cwd: Accessor<string>;
   app: Accessor<ExternalTerminalApp | undefined>;
-  /** The size a shell starts with when the page has not measured its tab yet. */
-  lastSize: () => TermSize;
-  /** New output for a tab, as base64 chunks. */
-  output: (tab: TermTab, chunks: string[]) => void;
-  /** A tab starts over: its screen, scrollback and title go. */
-  reset: (tab: TermTab) => void;
+  /** The test channel is in use: mirrors are kept current. */
+  mirrorOn: Accessor<boolean>;
 }
 
-function createMirror(lines: Signal<string[]>): TabMirror {
-  return { text: createTextMirror(), utf8: createUtf8Stream(), lines };
-}
-
-function createTermTab(id: number, initialShell: ShellProfile): TermTab {
+function createTermTab(id: number, initialShell: ShellProfile, deps: SessionDeps): TermTab {
   const shell = signal<ShellProfile>(initialShell);
   const programTitle = signal("");
-  return {
+  const tab: TermTab = {
     id,
     shell,
     programTitle,
     title: computed(() => `${id}: ${programTitle() || shell().name}`),
-    history: createOutputHistory(),
-    mirror: createMirror(signal<string[]>([])),
-    size: null,
+    session: new TerminalSession(DEFAULT_ROWS, DEFAULT_COLS),
+    startedIn: null,
+    gate: null,
+    typed: false,
+    mirror: signal<string[]>([]),
   };
+  void listen(tab, deps);
+  return tab;
 }
 
-/** Write a frame to a bridge; one that already exited (EPIPE) drops it. */
-function writeToChild(child: ChildProcess, frame: string): void {
-  try {
-    child.write(frame);
-  } catch {
-    // The bridge is gone; its exit line says so.
+/** The screen and scrollback as lines, for the mirror. */
+function refreshMirror(tab: TermTab, deps: SessionDeps): void {
+  if (!untracked(() => deps.mirrorOn())) return;
+  const lines = tab.session.screenText().split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  tab.mirror.set(lines);
+}
+
+/** A tab's events, until it closes. */
+async function listen(tab: TermTab, deps: SessionDeps): Promise<void> {
+  for (;;) {
+    const event = await tab.session.nextEvent();
+    if (event.kind === "closed") return;
+    onSessionEvent(tab, event, deps);
   }
 }
 
-/** The bridge's stdout: output frames go to the tab, the exit frame is kept for the exit line. */
-function readBridge(tab: TermTab, session: PtySession, text: string, deps: SessionDeps): void {
-  if (deps.sessions.get(tab.id) !== session) return;
-  const chunks: string[] = [];
-  for (const line of session.frames.push(text)) {
-    const event = parseBridgeLine(line);
-    if (event?.kind === "output") chunks.push(event.data);
-    else if (event?.kind === "exit") session.exitCode = event.code;
+function onSessionEvent(tab: TermTab, event: SessionEvent, deps: SessionDeps): void {
+  if (event.kind === "output") {
+    tab.gate?.output();
+    refreshMirror(tab, deps);
+  } else if (event.kind === "title") {
+    tab.programTitle.set(event.title ?? "");
+  } else if (event.kind === "exit") {
+    endSession(tab, event.code, deps);
+  } else if (event.kind === "input") {
+    // A key in a tab whose shell ended starts a new one.
+    startSession(tab, deps);
   }
-  if (chunks.length === 0) return;
-  session.gate.output();
-  deps.output(tab, chunks);
 }
 
 /**
- * A shell exited. A restarted tab (new folder or shell) already runs a new
- * session; the old shell's late exit must not end it.
+ * The shell exited: its screen stays, with a line saying so. A late exit of
+ * a shell already replaced (new folder or shell) ends nothing.
  */
-function endSession(tab: TermTab, session: PtySession, code: number | null | undefined, deps: SessionDeps): void {
-  if (deps.sessions.get(tab.id) !== session) return;
-  deps.sessions.delete(tab.id);
-  const exit = session.exitCode ?? code;
-  const status = exit === null || exit === undefined ? "" : ` (exit ${exit})`;
-  deps.output(tab, [textChunk(`\r\n[${untracked(() => tab.title())}] session ended${status}\r\n`)]);
+function endSession(tab: TermTab, code: number | null | undefined, deps: SessionDeps): void {
+  if (tab.session.running) return;
+  tab.startedIn = null;
+  tab.gate = null;
+  const status = code === null || code === undefined ? "" : ` (exit ${code})`;
+  tab.session.feed(`\r\n[${untracked(() => tab.title())}] session ended${status}\r\n`);
+  refreshMirror(tab, deps);
 }
 
-/** The bridge's arguments: the shell, TERM_PROGRAM, Ghostty's resources and the start size. */
-function bridgeArgs(tab: TermTab, deps: SessionDeps): string[] {
-  const app = untracked(() => deps.app());
-  const size = tab.size ?? deps.lastSize();
-  return [
-    "-u",
-    "-c",
-    PTY_BRIDGE_PY,
-    untracked(() => tab.shell().path),
-    app?.termProgram || process.env.TERM_PROGRAM || "Aed",
-    app?.resourcesDir || "",
-    String(size.rows),
-    String(size.cols),
-  ];
-}
-
-function watchBridge(tab: TermTab, session: PtySession, deps: SessionDeps): void {
-  const { child } = session;
-  child.on("stdout", (text) => readBridge(tab, session, text, deps));
-  child.on("stderr", (text) => {
-    if (deps.sessions.get(tab.id) === session) deps.output(tab, [textChunk(text.replace(/\r?\n/g, "\r\n"))]);
-  });
-  child.on("exit", (result) => endSession(tab, session, result.code, deps));
-}
-
-/** Start the PTY for a tab once; a failure shows in the terminal, not as a crash. */
+/** Start a tab's shell (once); a failure shows in the terminal, not as a crash. */
 function startSession(tab: TermTab, deps: SessionDeps): void {
-  if (deps.sessions.has(tab.id)) return;
+  if (tab.session.running) return;
   const cwd = untracked(() => deps.cwd()) || os.homedir();
+  const app = untracked(() => deps.app());
   try {
-    const child = process.spawn("python3", bridgeArgs(tab, deps), { cwd, stdin: "pipe" });
-    const session: PtySession = {
-      child,
+    tab.session.start({
+      shell: untracked(() => tab.shell().path),
       cwd,
-      used: false,
-      gate: createInputGate((frame) => writeToChild(child, frame)),
-      frames: createLineSplitter(),
-      exitCode: null,
-    };
-    deps.sessions.set(tab.id, session);
-    watchBridge(tab, session, deps);
+      termProgram: app?.termProgram || process.env.TERM_PROGRAM || "Aed",
+      resourcesDir: app?.resourcesDir || "",
+    });
+    tab.startedIn = cwd;
+    tab.typed = false;
+    tab.gate = createInputGate((data: Uint8Array) => tab.session.write(data));
   } catch (error) {
-    deps.output(tab, [textChunk(`[error] ${String(error)}\r\n`)]);
+    tab.session.feed(`[error] ${String(error)}\r\n`);
   }
-}
-
-function disposeSession(id: number, sessions: Map<number, PtySession>): void {
-  const session = sessions.get(id);
-  if (!session) return;
-  sessions.delete(id);
-  try {
-    session.child.kill();
-  } catch {
-    // The bridge already exited.
-  }
-  session.child.dispose();
-}
-
-function disposeAllSessions(sessions: Map<number, PtySession>): void {
-  for (const id of [...sessions.keys()]) disposeSession(id, sessions);
 }
 
 /** Replace a tab's shell with a fresh one, on a clean screen. */
 function restartSession(tab: TermTab, deps: SessionDeps): void {
-  disposeSession(tab.id, deps.sessions);
-  deps.reset(tab);
+  tab.session.stop();
+  tab.session.reset();
+  tab.programTitle.set("");
+  tab.startedIn = null;
   startSession(tab, deps);
+  refreshMirror(tab, deps);
 }
 
-/**
- * Keys from the page for a tab's shell. A key in a tab whose shell ended
- * starts a new one. Terminal answers (`isTerminalReport`) go straight to the
- * shell that asked, past the start-up gate, and do not make it "used".
- */
-function sendInput(tab: TermTab, msg: { data: string; binary: boolean }, deps: SessionDeps): void {
-  const report = isTerminalReport(msg.data);
-  if (!report) startSession(tab, deps);
-  const session = deps.sessions.get(tab.id);
-  if (!session) return;
-  const frame = encodeInputFrame(msg.binary ? binaryStringBytes(msg.data) : msg.data);
-  if (report) {
-    writeToChild(session.child, frame);
-    return;
-  }
-  session.used = true;
-  session.gate.send(frame);
-}
-
-/** The page measured a tab: its shell gets the size (TIOCSWINSZ, then SIGWINCH). */
-function resizeSession(tab: TermTab, size: TermSize, deps: SessionDeps): void {
-  tab.size = size;
-  const frame = encodeResizeFrame(size.rows, size.cols);
-  const session = deps.sessions.get(tab.id);
-  if (frame && session) writeToChild(session.child, frame);
+/** Whether the user typed into the tab's running shell. */
+function typedInto(tab: TermTab): boolean {
+  return tab.session.running && (tab.session.used || tab.typed);
 }
 
 /**
@@ -546,10 +448,9 @@ function resizeSession(tab: TermTab, size: TermSize, deps: SessionDeps): void {
  */
 function adoptShell(tabs: TermTab[], shell: ShellProfile, deps: SessionDeps): void {
   for (const tab of tabs) {
-    const session = deps.sessions.get(tab.id);
-    if (session?.used || untracked(() => tab.shell().path) === shell.path) continue;
+    if (typedInto(tab) || untracked(() => tab.shell().path) === shell.path) continue;
     tab.shell.set(shell);
-    if (session) restartSession(tab, deps);
+    if (tab.session.running) restartSession(tab, deps);
   }
 }
 
@@ -557,16 +458,38 @@ function adoptShell(tabs: TermTab[], shell: ShellProfile, deps: SessionDeps): vo
 function followFolder(tabs: TermTab[], deps: SessionDeps): void {
   const dir = untracked(() => deps.cwd()) || os.homedir();
   for (const tab of tabs) {
-    if (shouldFollowCwd(deps.sessions.get(tab.id), dir)) restartSession(tab, deps);
+    // `used`, not `typedInto`: a used shell that just ended (its exit not handled yet) keeps its screen.
+    const shell = tab.startedIn === null ? undefined : { cwd: tab.startedIn, used: tab.session.used || tab.typed };
+    if (shouldFollowCwd(shell, dir)) restartSession(tab, deps);
   }
 }
 
-type PageHandlers = {
-  [K in TerminalPageMessage["type"]]: (msg: Extract<TerminalPageMessage, { type: K }>) => void;
-};
+/**
+ * What a ⌘-clicked word opens: a web link, or a file (`src/a.ts:12:3`, its
+ * line and column dropped) relative to `dir`, the shell's start directory.
+ */
+export function linkTarget(text: string, dir: string, home: string): { url: string } | { file: string } | null {
+  if (/^https?:\/\/\S+$/i.test(text)) return { url: text };
+  const file = text.replace(/:\d+(:\d+)?$/, "").replace(/^~(?=\/|$)/, home);
+  return file ? { file: path.resolve(dir, file) } : null;
+}
 
-function routePageMessage(msg: TerminalPageMessage, handlers: PageHandlers): void {
-  (handlers[msg.type] as (m: TerminalPageMessage) => void)(msg);
+/**
+ * ⌘-click in the terminal: a web link opens in the browser, an existing file
+ * in a tab. Paths are relative to where the tab's shell started (else `cwd`).
+ */
+async function openLink(text: string, tab: TermTab, cwd: string, onFileOpen?: (filePath: string) => void): Promise<void> {
+  const target = linkTarget(text, tab.startedIn ?? (cwd || os.homedir()), os.homedir());
+  if (!target) return;
+  if ("url" in target) {
+    void openUrl(target.url);
+    return;
+  }
+  try {
+    if ((await fs.stat(target.file)).isFile()) onFileOpen?.(target.file);
+  } catch {
+    // Not a file: the word was not a path.
+  }
 }
 
 function resolveShellByPath(
@@ -680,67 +603,25 @@ function ShellSelectOptionRow(props: {
   );
 }
 
-/** The terminal WebView: its ref, and whether the injected runtime said `ready`. */
-interface TerminalPage {
-  view: WebViewRef | null;
-  ready: boolean;
-}
-
 /** A pane's state, shared by the functions below and its component. */
 interface TerminalModel {
-  sessions: Map<number, PtySession>;
   tabs: Signal<TermTab[]>;
   activeId: Signal<number>;
   selectedShell: Signal<ShellProfile>;
-  page: TerminalPage;
-  /** Whether the terminal has the keyboard (the page says so). */
+  /** The native view, once mounted. */
+  view: NativeComponentRef | null;
+  /** Whether the terminal has the keyboard (the view says so). */
   focused: Signal<boolean>;
   /** The test channel is in use: the plain-text mirror is fed and shown. */
   mirrorOn: Signal<boolean>;
-  /** The size the page last measured; new shells start with it. */
-  lastSize: TermSize;
   nextId: () => number;
   deps: SessionDeps;
-}
-
-/** JS for the page, dropped while it is not ready (its `ready` replays everything). */
-function inject(page: TerminalPage, js: string): void {
-  if (page.ready) page.view?.injectJavaScript(js);
 }
 
 function activeTabOf(model: TerminalModel): TermTab {
   const list = untracked(() => model.tabs());
   const id = untracked(() => model.activeId());
   return list.find((tab) => tab.id === id) ?? list[0];
-}
-
-function tabOf(model: TerminalModel, id: number): TermTab | undefined {
-  return untracked(() => model.tabs()).find((tab) => tab.id === id);
-}
-
-function feedMirror(tab: TermTab, chunks: string[]): void {
-  const { text, utf8, lines } = tab.mirror;
-  for (const chunk of chunks) text.push(utf8.push(decodeBase64(chunk)));
-  lines.set([...text.lines(), text.current()]);
-}
-
-function clearMirror(tab: TermTab): void {
-  tab.mirror = createMirror(tab.mirror.lines);
-  tab.mirror.lines.set([]);
-}
-
-/** Output for a tab: kept for replay, mirrored for tests, and written to the page. */
-function showOutput(model: TerminalModel, tab: TermTab, chunks: string[]): void {
-  for (const chunk of chunks) tab.history.push(chunk);
-  if (untracked(() => model.mirrorOn())) feedMirror(tab, chunks);
-  inject(model.page, pageCall("write", tab.id, chunks));
-}
-
-function resetTab(model: TerminalModel, tab: TermTab): void {
-  tab.history.clear();
-  clearMirror(tab);
-  tab.programTitle.set("");
-  inject(model.page, pageCall("reset", tab.id));
 }
 
 function createTerminalModel(
@@ -750,44 +631,34 @@ function createTerminalModel(
   app: Accessor<ExternalTerminalApp | undefined>
 ): TerminalModel {
   let counter = 1;
-  const firstTab = createTermTab(counter, firstShell);
-  const model: TerminalModel = {
-    sessions: new Map(),
+  const mirrorOn = signal(false);
+  const deps: SessionDeps = { cwd, app, mirrorOn };
+  const firstTab = createTermTab(counter, firstShell, deps);
+  return {
     tabs: signal<TermTab[]>([firstTab]),
     activeId: signal(firstTab.id),
     selectedShell,
-    page: { view: null, ready: false },
+    view: null,
     focused: signal(false),
-    mirrorOn: signal(false),
-    lastSize: { rows: DEFAULT_ROWS, cols: DEFAULT_COLS },
+    mirrorOn,
     nextId: () => ++counter,
-    deps: undefined as unknown as SessionDeps,
+    deps,
   };
-  model.deps = {
-    sessions: model.sessions,
-    cwd,
-    app,
-    lastSize: () => model.lastSize,
-    output: (tab, chunks) => showOutput(model, tab, chunks),
-    reset: (tab) => resetTab(model, tab),
-  };
-  return model;
 }
 
 function focusTerminal(model: TerminalModel): void {
-  model.page.view?.focus();
-  inject(model.page, pageCall("focus"));
+  model.view?.command("focus");
 }
 
 /** ⌘K while the terminal has the keyboard. */
 function clearActive(model: TerminalModel): void {
   const tab = activeTabOf(model);
-  clearMirror(tab);
-  inject(model.page, pageCall("clear", tab.id));
+  tab.session.clear();
+  refreshMirror(tab, model.deps);
 }
 
 function addTab(model: TerminalModel, shell: ShellProfile): void {
-  const tab = createTermTab(model.nextId(), shell);
+  const tab = createTermTab(model.nextId(), shell, model.deps);
   model.tabs.update((previous) => previous.concat([tab]));
   model.activeId.set(tab.id);
   startSession(tab, model.deps);
@@ -796,9 +667,9 @@ function addTab(model: TerminalModel, shell: ShellProfile): void {
 
 /** Close a tab and its shell; the last tab closing opens a new one at once. */
 function closeTab(model: TerminalModel, id: number): void {
-  disposeSession(id, model.sessions);
-  inject(model.page, pageCall("close", id));
-  const remaining = untracked(() => model.tabs()).filter((tab) => tab.id !== id);
+  const all = untracked(() => model.tabs());
+  all.find((tab) => tab.id === id)?.session.close();
+  const remaining = all.filter((tab) => tab.id !== id);
   model.tabs.set(remaining);
   if (untracked(() => model.activeId()) !== id) return;
   if (remaining.length === 0) {
@@ -817,7 +688,7 @@ function closeTab(model: TerminalModel, id: number): void {
 function pickShell(model: TerminalModel, shell: ShellProfile): void {
   model.selectedShell.set(shell);
   const tab = activeTabOf(model);
-  if (model.sessions.get(tab.id)?.used) {
+  if (typedInto(tab)) {
     addTab(model, shell);
     return;
   }
@@ -826,52 +697,42 @@ function pickShell(model: TerminalModel, shell: ShellProfile): void {
   focusTerminal(model);
 }
 
-/** The page became ready: options, every tab's output so far, the active tab. */
-function replayToPage(model: TerminalModel, options: unknown): void {
-  model.page.ready = true;
-  inject(model.page, pageCall("configure", options));
-  for (const tab of untracked(() => model.tabs())) inject(model.page, pageCall("write", tab.id, tab.history.chunks()));
-  inject(model.page, pageCall("select", untracked(() => model.activeId())));
-}
-
-function createPageHandlers(model: TerminalModel, onReady: () => void): PageHandlers {
-  return {
-    ready: onReady,
-    input: (msg) => {
-      const tab = tabOf(model, msg.tab);
-      if (tab) sendInput(tab, msg, model.deps);
-    },
-    resize: (msg) => {
-      const tab = tabOf(model, msg.tab);
-      if (!tab) return;
-      model.lastSize = { rows: msg.rows, cols: msg.cols };
-      resizeSession(tab, model.lastSize, model.deps);
-    },
-    title: (msg) => tabOf(model, msg.tab)?.programTitle.set(msg.title),
-    link: (msg) => void openUrl(msg.url),
-    focus: (msg) => model.focused.set(msg.focused),
-  };
-}
-
-function onPageMessage(handlers: PageHandlers, raw: string): void {
-  const msg = parseTerminalPageMessage(raw);
-  if (msg) routePageMessage(msg, handlers);
+/** Test-channel input as bytes: `binary` gives one byte per character. */
+function inputBytes(data: string, binary: boolean): Uint8Array {
+  return binary ? Uint8Array.from(data, (c) => c.charCodeAt(0)) : new TextEncoder().encode(data);
 }
 
 /**
- * Test channel; the packaged app's host never sends it. `aed.terminal.page`
- * delivers a page message as if the page posted it (`tab` defaults to the
- * active tab; headless tests run no page JS, DESIGN.md trap #10) and turns on
- * the plain-text mirror (`id:terminal-mirror`) that tests read.
+ * Test channel; the packaged app's host never sends it. `aed.terminal.test`
+ * does what the native view would for the active tab (headless tests have
+ * none): `input` (typed keys, through the start-up gate), `resize` and
+ * `focus`; and it turns on the plain-text mirror (`id:terminal-mirror`) that
+ * tests read.
  */
-function onTestMessage(model: TerminalModel, handlers: PageHandlers, data: unknown): void {
+function onTestMessage(model: TerminalModel, data: unknown): void {
   if (!data || typeof data !== "object" || Array.isArray(data)) return;
   if (!untracked(() => model.mirrorOn())) {
     model.mirrorOn.set(true);
-    for (const tab of untracked(() => model.tabs())) feedMirror(tab, tab.history.chunks());
+    for (const tab of untracked(() => model.tabs())) refreshMirror(tab, model.deps);
   }
-  onPageMessage(handlers, JSON.stringify({ tab: untracked(() => model.activeId()), ...data }));
+  const msg = data as Record<string, unknown>;
+  TEST_MESSAGES[String(msg.type)]?.(model, activeTabOf(model), msg);
 }
+
+const TEST_MESSAGES: Record<string, (model: TerminalModel, tab: TermTab, msg: Record<string, unknown>) => void> = {
+  input: (model, tab, msg) => {
+    if (typeof msg.data !== "string") return;
+    startSession(tab, model.deps);
+    tab.typed = true;
+    tab.gate?.send(inputBytes(msg.data, msg.binary === true));
+  },
+  resize: (_model, tab, msg) => {
+    if (typeof msg.rows === "number" && typeof msg.cols === "number") tab.session.resize(msg.rows, msg.cols);
+  },
+  focus: (model, _tab, msg) => {
+    if (typeof msg.focused === "boolean") model.focused.set(msg.focused);
+  },
+};
 
 /** What `discoverTerminalEnvironment` found, into the pane's signals; the preferred shell is selected. */
 function applyEnvironment(
@@ -986,11 +847,17 @@ function TerminalToolbar(props: {
   );
 }
 
+/** The native terminal view (native/src/view.rs). */
+const Terminal = nativeComponent<
+  { session: number; fontFamily?: string; fontSize: number; theme: TerminalTheme },
+  { focused: { focused: boolean }; link: { text: string } }
+>("aed.terminal", { props: ["session", "fontFamily", "fontSize", "theme"], events: ["focused", "link"] });
+
 /**
- * A bottom-dock terminal: one xterm per tab in one WebView, each on a PTY
- * bridge process; discovers local terminal apps (Ghostty, iTerm2, Warp,
- * kitty, WezTerm, Alacritty, Terminal) and installed shells, and applies
- * local Ghostty font settings.
+ * A bottom-dock terminal: a libghostty-vt terminal per tab, drawn by a
+ * native view; discovers local terminal apps (Ghostty, iTerm2, Warp, kitty,
+ * WezTerm, Alacritty, Terminal) and installed shells, and applies local
+ * Ghostty font settings.
  */
 export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   const fallbackShell = defaultShellProfile();
@@ -1003,20 +870,13 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   const primaryExternal = computed(() => externalApps()[0]);
   const model = createTerminalModel(untracked(() => selectedShell()), selectedShell, props.cwd, primaryExternal);
   const { tabs, activeId, focused, mirrorOn } = model;
-  /** The page is mounted the first time the panel shows, then kept. */
-  const pageMounted = signal(false);
 
   const activeTab = computed(() => tabs().find((tab) => tab.id === activeId()) ?? tabs()[0]);
   const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
-  const termOptions = computed(() => buildTerminalOptions(activeTheme(), terminalFont(props, ghosttyCfg())));
-  /** Built once: a new `html` value would reload the page. */
-  const shellHtml = buildTerminalShellHtml(untracked(() => activeTheme().ui.background));
+  const font = computed(() => terminalFont(props, ghosttyCfg()));
+  const termTheme = computed(() => buildTerminalTheme(activeTheme()));
 
-  const handlers = createPageHandlers(model, () => {
-    replayToPage(model, untracked(() => termOptions()));
-    if (untracked(() => props.visible())) focusTerminal(model);
-  });
-  host.on("aed.terminal.page", (data) => onTestMessage(model, handlers, data));
+  host.on("aed.terminal.test", (data) => onTestMessage(model, data));
 
   effect(() => {
     discoverTerminalEnvironment().then((env) => {
@@ -1031,7 +891,6 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
     if (!extPath) return;
     const resolved = resolveShellByPath(untracked(() => shells()), extPath, fallbackShell);
     selectedShell.set(resolved);
-    // Outside this effect's run: a shell spawned inside it ends when the effect runs again.
     setTimeout(() => adoptShell(untracked(() => tabs()), resolved, model.deps), 0);
   });
 
@@ -1042,23 +901,17 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       focused.set(false);
       return;
     }
-    pageMounted.set(true);
     setTimeout(() => startShown(model), 0);
   });
   effect(() => {
-    cleanup(() => disposeAllSessions(model.sessions));
+    cleanup(() => {
+      for (const tab of untracked(() => tabs())) tab.session.close();
+    });
   });
 
   effect(() => {
     void props.cwd();
     setTimeout(() => followFolder(untracked(() => tabs()), model.deps), 0);
-  });
-
-  effect(() => {
-    inject(model.page, pageCall("select", activeId()));
-  });
-  effect(() => {
-    inject(model.page, pageCall("configure", termOptions()));
   });
 
   // While the terminal has the keyboard its bindings are the newest, so they
@@ -1091,27 +944,25 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       />
 
       <View style={{ backgroundColor: activeTheme().ui.background }} class="flex-1">
-        <If when={pageMounted()}>
-          <WebView
-            ref={(r) => {
-              model.page.view = r;
-            }}
-            testID="terminal-view"
-            html={shellHtml}
-            class="flex-1"
-            onLoad={() => {
-              // A (re)loaded page knows nothing: runtime first, then its `ready` replays the tabs.
-              model.page.ready = false;
-              model.page.view?.injectJavaScript(XTERM_RUNTIME_JS);
-            }}
-            onMessage={({ data }) => onPageMessage(handlers, data)}
-            onBlur={() => focused.set(false)}
-          />
-        </If>
+        <Terminal
+          ref={(view: NativeComponentRef) => {
+            model.view = view;
+          }}
+          testID="terminal-view"
+          class="flex-1"
+          session={activeTab().session.id}
+          fontFamily={font().fontFamily}
+          fontSize={font().fontSize}
+          theme={termTheme()}
+          onFocused={(event: { focused: boolean }) => focused.set(event.focused)}
+          onLink={(event: { text: string }) =>
+            void openLink(event.text, untracked(() => activeTab()), untracked(() => props.cwd()), props.onFileOpen)
+          }
+        />
         <If when={mirrorOn()}>
           <View testID="terminal-mirror" class="absolute inset-0 flex-col overflow-hidden">
             {/* The newest lines, one row each, so all of them stay on screen for `app.texts()`. */}
-            <Each of={activeTab().mirror.lines().slice(-MIRROR_ROWS)} key="index">
+            <Each of={activeTab().mirror().slice(-MIRROR_ROWS)} key="index">
               {(line) => (
                 <Text style={{ color: activeTheme().ui.foreground }} class="font-mono text-[8px] leading-none line-clamp-1">
                   {line()}

@@ -17,6 +17,7 @@ fi
 
 echo "==> 1. Running nsh check, nsh test & nsh package..."
 rm -rf .nsh/out
+sh scripts/fetch-ghostty-vt.sh
 nsh check
 nsh test
 nsh package --target macos

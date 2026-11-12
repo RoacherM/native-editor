@@ -4,3 +4,4 @@ target/
 .scratch/
 node_modules/
 .DS_Store
+vendor/ghostty-vt/

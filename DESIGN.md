@@ -7,24 +7,24 @@ description: 基于 Native Shell (nsh 0.3.0) 的 macOS 原生多格式预览器�
 
 ## 术语与边界
 
-Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建的轻量级 macOS 原生文件预览器、编辑器与终端工作区。
+Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文件预览器、编辑器与终端工作区：界面与业务是 TSX，终端是一个小 Rust crate（`native/`，`nsh.json` `"rust": "native"`）。
 
 - **拥有边界**：
   - 工作区目录扫描（深度 ≤ 4，单目录上限 200 项，先去掉忽略项再截断；读不了的目录、超深目录与被截断的目录在文件树里各有一行说明，不显示成空目录）、Git 变更状态解析（`git status --porcelain=v1 -z -uall`）与单文件 Diff 预览。
   - 10 类文件路由与渲染：`code`、`markdown`、`mermaid`、`html`、`table`（CSV/TSV/JSONL）、`diff`、`image`（PNG/JPG/GIF/WebP/AVIF/SVG）、`video`、`audio`、`quicklook`（PDF）、`binary`（4 KB Hex + ASCII）。
-  - 内置多标签真 TTY 终端（xterm.js 6.0.0 跑在 WebView 里，`python3` `pty.fork()` 帧协议桥接）与本机 Ghostty 字体/Shell 自动探测。
+  - 内置多标签真 TTY 终端（libghostty-vt 1.0.1 解析终端流，原生 AppKit 视图画屏收键，Rust `forkpty` 起 Shell）与本机 Ghostty 字体/Shell 自动探测。
   - macOS Finder 双击/拖拽打开文件桥接（`libFinderBridge.dylib` + `launcher.c`）与 UTI 默认处理程序注册（`set_default_handlers.m`）。
 - **不拥有边界**：不做插件市场/扩展宿主，不做 LSP 语言服务器客户端，不自带网络后端服务。
 
 ### 进程权限白名单（`nsh.json` `capabilities.process.execute`）
 
-只放 app 自己 `process.run` / `process.spawn` 的 4 个二进制：`git`（状态与 diff）、`python3`（PTY 桥；读大文件开头的字节，见「文件大小上限」）、`sips`（PDF 预览图）、`osascript`（选目录）。终端里的 Shell 由 `python3` 的 `execvp` 拉起，不经过 nsh 的白名单，所以不需要列 `zsh` / `bash` / `sh`。新增一个 `process.run` 调用时，同时改这个列表和 `App.test.tsx` 里的最小权限断言。
+只放 app 自己 `process.run` / `process.spawn` 的 4 个二进制：`git`（状态与 diff）、`python3`（读大文件开头的字节，见「文件大小上限」）、`sips`（PDF 预览图）、`osascript`（选目录）。终端里的 Shell 由 `native/` 的 Rust 代码 `forkpty` + `execve`（绝对路径）拉起，不经过 nsh 的白名单，所以不需要列 `zsh` / `bash` / `sh`。新增一个 `process.run` 调用时，同时改这个列表和 `App.test.tsx` 里的最小权限断言。
 
 ### 网络与网页权限（`nsh.json` `capabilities.network` / `webview`，I-018）
 
 两项都是 `{ "hosts": [] }`：App 不联网，也不显示任何远程网页。依据（`nsh 0.4.0` 文档「Sandbox and capabilities」与 `nsh-core` `access.rs`，并用整套 `nsh test --trace` 核对没有任何 `is not granted` 拒绝）：
 
-- `webview.hosts` 只管 WebView 的 `src` 与顶层跳转。`"webview": { "hosts": [] }` 仍允许 `html` 内联页面与 `about:blank`，所以 Markdown 预览、Mermaid 离屏渲染器和以后的本地 HTML 终端 WebView（xterm.js）都不受影响；去掉整个 `webview` 键才会让 `html` 也被拒。页面自己的子资源（脚本、图片、XHR）不归它管，由各页面的 CSP 管。
+- `webview.hosts` 只管 WebView 的 `src` 与顶层跳转。`"webview": { "hosts": [] }` 仍允许 `html` 内联页面与 `about:blank`，所以 Markdown 预览与 Mermaid 离屏渲染器都不受影响（终端不用 WebView）；去掉整个 `webview` 键才会让 `html` 也被拒。页面自己的子资源（脚本、图片、XHR）不归它管，由各页面的 CSP 管。
 - `network.hosts` 管 `fetch`、WebSocket、远程图片与视频源。`<Image>` 的 `blob:` URL 在进核心前已换成 `data:` 源（trace 里是 `data:image/png;nsh-key=…`），`<Video src={绝对路径}>` 不含 `://`，两者都按「app 自己的文件」放行（`allows_media`）。App 里没有 `fetch` / `WebSocket` / `net`。
 - 需要联网的新功能（例如远程图片预览）要在这里写明原因，再把具体主机加进 `network.hosts`，不要再写 `*`。
 
@@ -46,7 +46,8 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | Finder 队列 | `<缓存目录>/open-<pid>/<seq>.path` | 每个 Aed 进程一个目录，每个待打开路径一个文件（原样路径字节，无换行）。写入方先用 `O_CREAT\|O_EXCL\|O_NOFOLLOW`、`0600` 建 `.<seq>.tmp`，写完再 `renameatx_np(RENAME_EXCL)` 成 `<seq>.path`，所以读方看不到半截文件。写入方：`launcher`（命令行第 2 个起的文件）、`finder_bridge.m`（冷启动阶段收到的 AppleEvent，一批文件全部写入）。读方：`consumeFinderOpenQueue()` 只认 `<数字>.path`，按数字（不是字典序）排序，逐个 `lstat`：普通文件读出内容，其它（符号链接等）不读，两者都删除（`unlink` 只删链接本身）；`.<seq>.tmp` 不碰。`launcher` 启动时清空本 pid 的旧目录，并删除进程已不存在的 `open-<pid>` 目录（是符号链接时只删链接） |
 | QuickLook 临时图 | `<缓存目录>/ql/<随机 UUID>.png` | `generateQuickLookUrl()` 让 `sips` 把 PDF 首页写成 PNG，读进内存转成 `blob:` URL 后立即删除 PNG（`sips` 失败也删）。内存里每个文件只留最新版本（`mtimeMs:size`）的 URL，新版本生成后 `revokeObjectURL` 旧的 |
 | Mermaid bundle | 无磁盘缓存 | `loadMermaidBundleJs()` 每个进程直接从 VS Code / Cursor / Antigravity 扩展目录提取一次，结果只缓存在内存（没找到不缓存，下次渲染器启动再找） |
-| 宿主事件（仅测试） | `aed.terminal.page` | `TerminalPane` 的测试通道：数据是一条终端页面消息（同 `window.nsh.postMessage` 的 JSON 对象，`tab` 缺省为当前 Tab），按页面发来的同一条路径校验和处理；第一次收到时打开纯文本镜像 `id:terminal-mirror`（最新 14 行）。打包宿主不发送；与 `aed.preview.eval` 同级。I-019 新增，无旧版本兼容问题 |
+| Rust crate / 原生模块 | `nsh.json` `"rust": "native"`；模块 `aed/native`（`TerminalSession` 类）；原生组件 `aed.terminal`（props `session` / `fontFamily` / `fontSize` / `theme`，事件 `focused` / `link`，命令 `focus`） | TSX 与 `native/src/lib.rs` 两边的字面量必须一致。原生组件只在 macOS 宿主注册，无头 `nsh test` 里是一个空视图。终端改原生时新增，没有旧缓存或配置要兼容 |
+| 宿主事件（仅测试） | `aed.terminal.test` | `TerminalPane` 的测试通道，替代原生视图对当前 Tab 做的事（无头测试没有原生视图）：`{type:"input", data, binary?}`（当作键入，经启动闸门）、`{type:"resize", rows, cols}`、`{type:"focus", focused}`；第一次收到时打开纯文本镜像 `id:terminal-mirror`（最新 14 行）。打包宿主不发送；与 `aed.preview.eval` 同级。原名 `aed.terminal.page`（xterm 页面消息），只有测试用，改名无兼容问题 |
 
 **旧 `/tmp` 路径（I-018 起废弃）**：`/tmp/aed-open.queue`、`/tmp/aed-ql/`、`/tmp/aed-mermaid/` 不再读也不再写。`/tmp` 所有人可写，其他本机用户可以预先放好符号链接或伪造内容，所以 Aed 也不去删除它们（删除本身会跟随别人放的链接）。升级后旧文件留在原处，用户可以手动 `rm`。新旧版本同时运行时互不影响：旧版本仍读写 `/tmp`，新版本只用每用户缓存目录。
 
@@ -67,7 +68,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 |     workspace.ts   |   Image (Zoom+Grid) / Video / Audio / QuickLook / Hex        |
 |                    +--------------------------------------------------------------+
 |                    | [1: zsh ×] [+]                                       [zsh ▾] | <- TerminalPane (ResizablePanel)
-|                    | ➜ ~ echo NSH_PTY_OK_2026                                     |    xterm.js WebView, one xterm per Tab
+|                    | ➜ ~ echo NSH_PTY_OK_2026                                     |    native aed.terminal view, libghostty-vt per Tab
 |                    | NSH_PTY_OK_2026                                              |
 |                    | ➜ ~ █                                                        |
 +--------------------+--------------------------------------------------------------+
@@ -90,9 +91,10 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `src/MarkdownPreview.tsx` | `MarkdownPreview` | Markdown WebView 的 I/O 外壳：注入运行时与 `render`/`setTheme`/`setImages` 载荷、图片按 `classify` MIME 读为 `data:`（≤20 MB）、`openUrl`/已解析路径回传、进程内滚动记忆、测试调试通道 |
 | `vendor/markdown/` | `entry.mjs`, `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的第三方运行时源码（markdown-it 插件组 + KaTeX + hljs + github-markdown-css + DOMPurify），仅由 `scripts/build-markdown-vendor.sh` 构建为 `src/markdownVendor.generated.ts` |
 | `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
-| `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig`, `createInputGate`, `shouldFollowCwd` | 终端的 I/O 外壳：每个 Tab 一个 PTY 桥进程、xterm WebView 的注入与页面消息路由、回放缓冲、焦点期间的 ⌘K/⌘F 绑定、Shell 切换规则、测试通道 `aed.terminal.page`、本机 Shell 与 Ghostty 配置探测 |
-| `src/terminalPage.ts` | `PTY_BRIDGE_PY`, `encodeInputFrame`, `encodeResizeFrame`, `parseBridgeLine`, `createLineSplitter`, `createUtf8Stream`, `parseTerminalPageMessage`, `isTerminalReport`, `buildTerminalShellHtml`, `pageCall`, `buildXtermTheme`, `buildTerminalOptions`, `createOutputHistory`, `createTextMirror` | 终端的纯协议（无 I/O）：PTY 桥 Python 源码与行帧编解码、页面上行消息校验、终端应答识别、严格 CSP 壳页、主题到 xterm `ITheme`（16 色 ANSI）映射、回放缓冲、测试用纯文本镜像 |
-| `vendor/xterm/` | `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的 `@xterm/xterm` 6.0.0 与 `addon-fit` 0.11.0 / `addon-web-links` 0.12.0 / `addon-unicode11` 0.9.0，加页面运行时 `window.__aedTerm`；仅由 `scripts/build-xterm-vendor.sh` 构建为 `src/xtermVendor.generated.ts` |
+| `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig`, `createInputGate`, `shouldFollowCwd`, `linkTarget` | 终端的 Tab 编排：每个 Tab 一个 `TerminalSession`，事件循环（`nextEvent`）、Shell 启动/重启/跟随目录与切换规则、⌘-点击链接的打开、焦点期间的 ⌘K/⌘F 绑定、测试通道 `aed.terminal.test`、本机 Shell 与 Ghostty 配置探测 |
+| `src/terminalTheme.ts` | `buildTerminalTheme`, `ANSI_PALETTES`, `ANSI_NAMES` | 主题到终端颜色（背景、前景、光标、选区、16 色 ANSI）的纯映射，交给原生视图的 `theme` prop |
+| `native/` | `TerminalSession`（`src/session.rs`）、`aed.terminal` 视图（`src/view.rs`）、`src/grid.rs`、`src/keys.rs`、`src/pty.rs`、`src/ffi.rs` | Rust crate：libghostty-vt 终端与 PTY 会话、AppKit 视图的绘制与输入（键盘/IME/鼠标/滚轮/剪贴板）、按键表、`forkpty`；`ffi.rs` 是 bindgen 从 libghostty-vt 头文件生成的绑定（命令见 `scripts/fetch-ghostty-vt.sh`） |
+| `vendor/ghostty-vt/` | `libghostty-vt.a`, `Headers/` | 不入库（27 MB）：`scripts/fetch-ghostty-vt.sh` 下载官方 1.0.1 xcframework，校验 zip 与静态库的 SHA-256 后拷入；`native/build.rs` 静态链接它 |
 | `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 8 套配色主题（默认 Industrial Paper / Industrial Carbon，另有 Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、One Dark、Rose Pine、GitHub Light）及带 LRU 缓存的预编译正则语法高亮装饰器 |
 | `src/icons.tsx` | `Icon`, `FileBadge`, `AppLogo` | 内联矢量图标与按文件扩展名着色的类型徽章 |
 
@@ -173,19 +175,21 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 
 ## 内置 PTY 终端与 Ghostty 配置探测
 
-I-019 起终端是真正的 TTY：xterm.js 在 WebView 里画屏、收键盘，`python3` 的 `pty.fork()` 给 Shell 一个真终端，两者之间是有帧格式的双向协议。纯协议在 `src/terminalPage.ts`（无 I/O，可单测），`src/TerminalPane.tsx` 只做 I/O 外壳。
+终端是原生的：libghostty-vt 1.0.1（Ghostty 的终端解析库，C API）维护屏幕、滚动记录与模式，`native/` 的 AppKit 视图画屏、收键盘，Rust `forkpty` 给 Shell 一个真终端。中间没有 WebView、页面 JS 或桥接进程；TSX 只管 Tab 与规则（`src/TerminalPane.tsx`）。
 
-- **PTY 桥（`PTY_BRIDGE_PY`）**：`process.spawn("python3", ["-u", "-c", PTY_BRIDGE_PY, shellPath, termProgram, ghosttyResourcesDir, rows, cols], { cwd, stdin: "pipe" })`。子进程设 `TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM`、`DISABLE_AUTO_TITLE=true`、`PROMPT_EOL_MARK=""`（有 Ghostty 时加 `GHOSTTY_RESOURCES_DIR`），再 `execvp(shell, [shell, "-l"])`。起始尺寸取该 Tab 页面量过的尺寸，没量过取最近一次量到的，都没有用 32×140（`DEFAULT_ROWS` × `DEFAULT_COLS`）。本机 `/usr/bin/python3` 3.9.6 与 Homebrew 3.15.0 实测都能跑。
-  - stdin 每行一帧：`D<base64>` 是给 Shell 的字节；`R<rows> <cols>` 改尺寸（`TIOCSWINSZ`，内核随即给前台进程组发 `SIGWINCH`；行 1–500、列 1–1000，越界丢弃）。输入先进桥内队列，PTY 可写时才写，所以不读输入的程序不会卡住输出。stdin EOF 时给 Shell 发 `SIGHUP`。
-  - stdout 每行一帧：`O<base64>` 是 PTY 输出原始字节（一次最多读 64 KB），Shell 结束后发一次 `X<退出码>`（被信号结束为 128+n）再退出。base64 让 UTF-8 永远不会在 chunk 边界被切断；宿主用 `createLineSplitter` 自己切行，不用 `spawn` 的 `lines: true`（运行时遇到超长行会结束子进程）。桥自己的 stderr（如 Python 报错）原样显示在该 Tab 里。
-- **页面（`vendor/xterm/page.mjs` → `XTERM_RUNTIME_JS`）**：壳页 `buildTerminalShellHtml(background)` 只有 CSP（`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`）、xterm 的 CSS 与一个空根节点，0 个 `<script>`，不加载任何远程资源；运行时在 `onLoad` 用 `injectJavaScript` 注入（踩坑 #10），`!window.__aedTerm` 守卫防重复注入。`html` 只在挂载时生成一次（换值会重载页面），底色取挂载时的主题，防白闪。
-  - 宿主调用 `window.__aedTerm.*`（`pageCall` 生成 JS）：`configure(options)`（主题、字体、字号，改了热更新）、`select(tab)`（显示该 Tab 并 fit）、`write(tab, base64[])`、`clear(tab)`、`reset(tab)`、`close(tab)`、`focus()`。
-  - 页面上行（`parseTerminalPageMessage` 严格校验，未知 `type` 与原型链名一律丢弃）：`ready`；`input`（`term.onData` / `onBinary`，`binary: true` 表示一字符一字节；大段粘贴在页面切成 ≤32768 字符一条，不切开代理对，宿主上限 192 KB 字符）；`resize`（fit addon 算出的行列，变了才发）；`title`（OSC 0/2，去控制字符、≤200 字符，显示为 Tab 名 `<id>: <title>`）；`link`（仅 `http(s)://`，经 `openUrl` 打开）；`focus`（textarea 获得焦点且 `document.hasFocus()` 时为真，失焦或窗口 `blur` 为假）。
-  - 主题：`buildXtermTheme(theme)` 取 `theme.ui` 的背景、前景、强调色（光标）、选区色，加每套内置主题的 16 色 ANSI 调色板（`ANSI_PALETTES`，按上游配色，过淡的颜色调到在本主题背景上对比度 ≥3，前景 ≥4.5）；没有自带调色板的主题从语法色推出。字体：偏好设置 → Ghostty `font-family` → `ui-monospace, Menlo, monospace`；字号：偏好设置 → Ghostty `font-size` → 12。
-- **多 Tab 与回放**：一个 WebView，每个终端 Tab 一个 xterm 实例（`select` 只切显示），所以切 Tab 保留滚动记录（xterm `scrollback: 5000`）。宿主每个 Tab 另存一份输出（`createOutputHistory`，约 1 MB 字节的 base64，超出丢最旧的 chunk、最新的总保留）；页面 `ready` 之前的输出只进这份缓冲，`ready` 后按 `configure` → 每个 Tab `write` 缓冲 → `select` 当前 Tab 的顺序补发。页面重载（`onLoad` 再次触发）同样重新补发。重启会话（换目录、换 Shell）清空这份缓冲并 `reset` 该 xterm。
-- **键盘**：WebView 有焦点时，Ctrl-C、Tab、方向键、Esc 等全部由 xterm 编码后经 `input` 发给 Shell。`⌘` 组合键 xterm 不处理（`attachCustomKeyEventHandler` 返回 `false`），交还给 App 的菜单与 `keymap`。终端有键盘焦点时（页面 `focus` 消息为真），`TerminalPane` 绑定 `mod+k`（清屏）与 `mod+f`（不做事）；`keymap` 同一按键只跑最新的那个绑定，所以此时 ⌘K 不打开 Quick Open、⌘F 不打开编辑器查找栏；失焦即解绑，快捷键还给 App。页面里 ⌘K 也会自己 `term.clear()`，两边都清是幂等的。复制粘贴走菜单的 `copy` / `paste` 角色到 WebView，由 xterm 的选区与剪贴板事件处理。
-- **工作目录与启动**：见「状态机清单」#9。新终端 Tab 在当前工作区启动（无工作区时 `~`）。
-- **测试通道**：无头 `nsh test` 不执行页面 JS，所以宿主事件 `aed.terminal.page` 把一条页面消息当作页面发来的处理（同一个 `parseTerminalPageMessage` 与路由），并打开纯文本镜像 `id:terminal-mirror`：输出经 `createUtf8Stream` 解码、`createTextMirror` 去 ANSI（只认 CR、LF、退格与 CSI `D`/`C`/`G`/`K`，`J` 2/3 清空），显示最新 14 行（每行一行高，保证都在屏幕内、`app.texts()` 读得到）。镜像只在通道用过后才喂，打包后的 App 不付这份开销。`App.test.tsx` 的 `runInTerminal(app, cmd, marker)` 签名与语义不变，改走这个通道。
+- **会话（`native/src/session.rs` `TerminalSession`）**：一个 Tab 一个，`new TerminalSession(rows, cols)` 建一个 libghostty-vt 终端（滚动记录 10000 行，`TERM=xterm-256color`）。`start({shell, cwd, termProgram, resourcesDir})` 用 `forkpty` 以登录 Shell（`-l`）起进程：子进程先把信号恢复默认、清空信号屏蔽（App 是 Rust 程序，忽略 SIGPIPE，忽略状态会被 Shell 和它跑的每个程序继承，`yes | head` 会报 Broken pipe），给 TTY 打开 `IUTF8`（退格删整个汉字），`chdir` 或 `execve` 失败时经 close-on-exec 管道把 errno 交回，`start` 抛错（TSX 显示 `[error] …`），不会变成一个 exit 127 的会话；环境加 `TERM`、`COLORTERM=truecolor`、`TERM_PROGRAM`、`DISABLE_AUTO_TITLE=true`、`PROMPT_EOL_MARK=""`（有 Ghostty 时加 `GHOSTTY_RESOURCES_DIR`）；新 Shell 保留屏幕。读线程把 PTY 输出喂给终端，写线程把输入写进 PTY（不读输入的程序不会卡住输出）；终端要回给程序的应答（DA、光标位置等）由 libghostty-vt 的 `write_pty` 回调送回 PTY。
+  - `nextEvent()` 依次给出 `output`（有新输出，合并）、`title`（OSC 0/2，显示为 Tab 名 `<id>: <title>`）、`exit`（退出码，信号为 128+n）、`input`（没有 Shell 时有键入：TSX 起一个新 Shell，这次的键丢弃）、`closed`（`close()` 后，不再有事件）。`stop()` 挂断 Shell，不发 `exit`。
+  - `write(bytes)` 是用户键入：有 Shell 时写入并把会话标为 `used`（`start` 时清零）。`feed(text)` 把状态行（`session ended (exit n)`、`[error] …`）直接写到屏幕，不进 Shell。`resize(rows, cols)`（行 1–500、列 1–1000）改 PTY 尺寸，Shell 收到 `SIGWINCH`；视图量出尺寸前是 32×140（`DEFAULT_ROWS` × `DEFAULT_COLS`）。`clear()` 是 ⌘K：去掉滚动记录与提示符以上的行。`reset()` 是全新屏幕（重启会话用），主题颜色保留。`screenText()` 给出屏幕与滚动记录的纯文本，软换行接回一行。
+  - 线程：`TerminalSession` 的方法在引擎线程，视图在主线程，另有 PTY 读、写线程；共享状态在一把锁里（加锁顺序：终端 → 输入队列）。选区的格子引用只在同一把锁内有效，所以复制在同一次加锁里格式化。
+- **视图（`native/src/view.rs`，原生组件 `aed.terminal`）**：只显示 `session` prop 指定的会话；会话有输出时唤醒视图，按 libghostty-vt 渲染状态的脏行重画。用 CoreText 画字（`fontFamily` 找不到时用系统等宽字体，字号缺省 12），格子尺寸按像素取整，四周留 6pt。视图尺寸一变就算出行列调用 `resize`。`theme` prop 是 `buildTerminalTheme(theme)`：`theme.ui` 的背景、前景、强调色（光标）、选区色，加 16 色 ANSI 调色板（`ANSI_PALETTES`，按上游配色，过淡的颜色调到在本主题背景上对比度 ≥3，前景 ≥4.5；没有自带调色板的主题从语法色推出）；字体：偏好设置 → Ghostty `font-family`；字号：偏好设置 → Ghostty `font-size` → 12。
+  - 键盘：普通键经 libghostty-vt 的按键编码器（跟随终端当前的光标键、Kitty 键盘等模式；Option 不当 Alt）直接写进 PTY，不经过 TSX。`⌘` 组合键交还给 App 的菜单与 `keymap`。输入法走 `NSTextInputClient`：组字中的文字带下划线画在光标处，候选窗跟着光标，确认后才写入。
+  - 鼠标：拖拽选择、双击选词、三击选行由 libghostty-vt 的选择手势处理；程序开了鼠标跟踪时（`vim`、`htop`）事件经鼠标编码器交给程序，按住 Shift 仍然是选择。滚轮：鼠标跟踪时交给程序；备用屏且开了模式 1007 时变成方向键；否则滚动查看记录（触控板按像素累计）。
+  - 剪贴板：⌘C 复制选区，⌘V 粘贴（程序开了 2004 时加括号粘贴标记），⌘A 全选，都走菜单的 `copy:` / `paste:` / `selectAll:`。
+  - ⌘-点击：OSC 8 超链接取其 URI，否则取点击处的词（去掉两端括号、引号与标点），发 `link` 事件。TSX `linkTarget(text, dir, home)` 判定：`http(s)://` 用 `openUrl` 打开，其它当作路径（去掉 `:行(:列)`，展开 `~`，相对路径按该 Shell 的启动目录解析），是普通文件才在 Tab 里打开。
+  - 焦点：成为/失去第一响应者时发 `focused` 事件；程序开了 1004 时同时写焦点报告。终端有焦点时 `TerminalPane` 绑定 `mod+k`（清屏）与 `mod+f`（不做事）；`keymap` 同一按键只跑最新的那个绑定，所以此时 ⌘K 不打开 Quick Open、⌘F 不打开编辑器查找栏；失焦即解绑。
+- **多 Tab**：一个视图，换 Tab 只换 `session` prop，所以每个 Tab 的屏幕与滚动记录都在自己的会话里，切换不丢。关 Tab 时 `close()` 会话。
+- **工作目录与启动**：见「状态机清单」#9。新终端 Tab 在当前工作区启动（无工作区时 `~`）。「用过」= Shell 在跑且 `used`（原生视图里的键入）或测试通道键入过。
+- **测试通道**：无头 `nsh test` 没有原生视图，所以宿主事件 `aed.terminal.test` 替它对当前 Tab 键入（经 `createInputGate` 启动闸门，见踩坑 #9）、改尺寸、报焦点，并打开纯文本镜像 `id:terminal-mirror`：每次 `output` 后取 `screenText()`，显示最新 14 行（每行一行高，保证都在屏幕内、`app.texts()` 读得到）。镜像只在通道用过后才更新，打包后的 App 不付这份开销。`App.test.tsx` 的 `runInTerminal(app, cmd, marker)` 走这个通道。原生视图本身的绘制、输入法、鼠标与滚轮无头测不到，只能真机核对；会话层由 `native/src/session/tests.rs` 的 Rust 测试覆盖（`nsh test` 一起跑）。
 - **Ghostty 与 Shell 环境继承**：启动时 `discoverTerminalEnvironment()` 扫描 `~/.config/ghostty/config*` 与 `~/Library/Application Support/com.mitchellh.ghostty/config*`，继承用户的 `font-family`、`font-size` 与 `command`，并探测本机已装的 `zsh`、`fish`、`nu`、`bash`、`sh` 供终端顶栏下拉切换。
 
 ---
@@ -281,33 +285,39 @@ I-019 起终端是真正的 TTY：xterm.js 在 WebView 里画屏、收键盘，`
    - 无头 `nsh test` 没有菜单栏，`app.keyboard.press("mod+q")` 碰不到菜单项；测试经命令面板触发同一个动作。无头下获准的 `process.exit()` 会结束被测 App，之后的步骤以 `the app left` 失败，可以用来断言「已退出」。
 
 15. **测试文件自己不能起进程；`app.texts()` 读不到排在屏幕外的文字（`nsh 0.4.0` 实测）**：
-   - `*.test.tsx` 顶层调用 `process.spawn` 抛 `process is available on desktop hosts`；所以 PTY 桥的真实 `python3` 测试都经 `open("./App.tsx", { platform: "macos", ... })` 打开的 App 自己的终端跑（`App.test.tsx` › a resize from the page reaches the shell as its terminal size 等 5 项）。
+   - `*.test.tsx` 顶层调用 `process.spawn` 抛 `process is available on desktop hosts`；所以真实 Shell 的测试都经 `open("./App.tsx", { platform: "macos", ... })` 打开的 App 自己的终端跑（`App.test.tsx` › a resize reaches the shell as its terminal size 等 5 项）。
    - 测试镜像曾把全部行排成会换行的 `Text`：一行 3000 个汉字换成几十行后，后面的行排到面板外，`app.texts()` 就看不到它们，`waitUntil` 超时。改为只显示最新 14 行、每行 `line-clamp-1`。
-   - `keymap.bind` 的说明（`.nsh/types/nsh/index.d.ts`）：同一按键有多个绑定时只跑最新的；默认在 WebView 有焦点时也会触发。终端借此在有焦点期间接管 ⌘K/⌘F；真机上 WKWebView 焦点与 `keymap` 的交互尚未实测（见 I-019 收尾的手工核对清单）。
+   - `keymap.bind` 的说明（`.nsh/types/nsh/index.d.ts`）：同一按键有多个绑定时只跑最新的。终端借此在有焦点期间接管 ⌘K/⌘F。
+16. **NSH 混合模板与原生组件（`nsh 0.4.0` 实测）**：
+   - `nsh.json` 加 `"rust": "native"` 后，`nsh check` 会编译 crate 并生成 `.nsh/types/aed/native.d.ts`；首次约 68 秒，之后增量 1 秒内。`nsh test` 同时跑 crate 的 `cargo test`。
+   - `nativeComponent` 的事件名不能和 `View` 自带的事件撞名：事件叫 `focus` 时 handler 是 `onFocus`，与内置的 `onFocus: () => void` 交叉成无参类型，`nsh check` 报 TS2322。所以视图的焦点事件叫 `focused`（`onFocused`）。
+   - 原生视图里的键直接进 Rust，TSX 看不到；TSX 判断「用过」读 `TerminalSession.used`。测试通道的输入可能还在闸门里排队、没到 Rust，所以 Tab 另记 `typed`，否则排队期间换目录会重启 Shell（`App.test.tsx` › a half-typed terminal command stays, with its shell, when a folder opens）。
+   - Shell 结束靠 PTY 读到 EOF 判定（读线程随后 `waitpid`）。macOS 上会话首进程退出时内核收回这个 TTY，留在后台的 `sleep 20 &`、`nohup … &` 也拦不住 EOF（`native/src/session/tests.rs` › a_shell_that_exits_ends_even_while_a_job_holds_the_terminal 实测 0.01 秒内收到 exit），所以不另起 `waitpid` 线程。
+   - Rust 程序启动时把 SIGPIPE 设成忽略，`forkpty` 的子进程会原样继承；`std::process::Command` 会替子进程复位，`forkpty` 不会，所以 `pty::exec_shell` 自己复位（› the_shell_gets_default_signals_and_a_utf8_tty）。
 
 ---
 
 ## 试过不做的方案（Tried & Rejected）
 
-- **混合 Rust 模板（`--template mixed`）**：实测首次 `nsh test` 编译耗时 70s、二进制达 192 MB，且多 Agent 并行时 Cargo 锁冲突严重；纯 TSX（`--template ts`）配合 Python `pty.fork()` 与轻量 C/ObjC 包装即可满足全部原生能力，`nsh check` 仅 0.2s、`nsh test` 仅 1.0s。
+- **xterm.js WebView + `python3` `pty.fork()` 帧协议桥（I-019 到终端改原生之间）**：能用，但每个键要经过页面 JS → `postMessage` → TSX → base64 帧 → Python 进程 → PTY，输出再原路返回，打字有可感的延迟；还要维护 380 KB 的 vendored 运行时、页面协议与回放缓冲。改为 libghostty-vt + 原生视图，键在 Rust 里直接写 PTY。代价是混合模板：首次 `nsh check` 编译 crate 约 68 秒（早先「混合模板太慢」的判断按此改写，增量构建在 1 秒内），并多一个要下载校验的 27 MB 静态库。
 - **使用 `qlmanage` + 底部外部打开操作栏预览 PDF**：`qlmanage -t` 在部分系统环境下会弹窗或阻塞，且底部常驻 `Open in Preview` 操作栏喧宾夺主；已改为直接调用 macOS 内置 `sips -Z 1800 -s format png` 生成 2x Retina 预览图，并以暖白纸张底衬（`#f7f4ee`）+ 缩放控制条承载，避免透明底黑字在深色主题下不可读。
 - **在底部 24pt 状态栏放置刷新图标与主题/字体切换按钮**：在非 Git 目录下左下角会留下孤立无文字的 `↻` 图标（语义不明），而右下角的主题下拉、字体下拉与单点循环切主题按钮紧贴终端输入行与窗口缩放边缘，极易误触切走配色或弹出大菜单；现 `StatusBar` 统一改为纯只读状态展示，主题/字体配置与工作区刷新统一走 `⌘,`（Preferences）、应用菜单与 `⌘⇧P` 命令面板。
 - **在 Markdown 预览中用字符画（`mmd2txt`）替代矢量图**：终端适合字符画，但桌面 GUI 编辑器用户期望高分辨率图表；因此采用隐藏 `WebView` + SVG `<foreignObject>` 内联 + 2x Retina PNG 光栅化方案。
 - **原生 `TextView` 重新排版做 Markdown 预览**：需从零实现阅读排版、语法高亮、TOC、链接路由与图片加载，工作量与成熟库差距大；改用 WebView + markdown-it 生态。
 - **在宿主 QuickJS 上渲染 Markdown 再下发 HTML**：实测同一 60 KB 合成文档 QuickJS 中位 283 ms vs WebView JSC 52 ms（快 ~5.5×），且 608 KB 运行时的解析/求值占住应用线程；渲染改在页面侧完成，宿主只做载荷与文件/URL 服务。
 - **直接复用 xicilion markdown-viewer 的成品 bundle**：该扩展为 GPLv3，不能随 Aed 分发。Aed 只沿用旧逻辑：运行时用 `loadMermaidBundleJs()` 读取用户本机已装扩展里的 Mermaid bundle，自己不打包它。
-- **单行 `<Input>` 加整行写入的终端（I-019 之前）**：按 Enter 才把整行写进 PTY，没有 Ctrl-C / Tab / 方向键，宿主只认几种 CSI，`vim` / `less` / `top` 不能用，尺寸写死 32×140，sudo 密码明文可见。改为 xterm.js + 帧协议 PTY 桥。
-- **每个终端 Tab 一个 WebView**：每个 WebView 都是一套页面与 380 KB 运行时；改为一个 WebView 里每个 Tab 一个 xterm 实例，切 Tab 只切显示。
+- **单行 `<Input>` 加整行写入的终端（I-019 之前）**：按 Enter 才把整行写进 PTY，没有 Ctrl-C / Tab / 方向键，宿主只认几种 CSI，`vim` / `less` / `top` 不能用，尺寸写死 32×140，sudo 密码明文可见。
+- **第三方 Rust ghostty 绑定 crate**：版本与 libghostty-vt 1.0.1 的 C API 对不上且多一层依赖；用 bindgen 从官方头文件生成 `native/src/ffi.rs`，只链官方静态库。
 - **WebView `baseUrl=file://` 加载相对资源**：`nsh 0.4.0` 能力层无法授予 `file:`（见踩坑记录 #10）；改为 CSP `img-src data: https:` + 宿主侧图片内联，KaTeX 字体也全部 `data:` 内联。
 
 ---
 
 ## 验证与基准（Verification & Benchmarks）
 
-| 检查项 | 命令 | 基准指标（macOS arm64，`nsh 0.3.0`） |
+| 检查项 | 命令 | 基准指标（macOS arm64） |
 |---|---|---|
-| 类型检查 | `nsh check` | ~0.2s，0 errors |
-| 单测与桌面无头 E2E | `nsh test --trace` | 57 项约 45s（`nsh 0.4.0`，2026-11-12 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、PTY 桥帧协议与真实 Shell |
-| xterm 运行时可重复构建 | `sh scripts/build-xterm-vendor.sh` 跑两次 | 两次 `src/xtermVendor.generated.ts`、`dist/build.json`、`THIRD_PARTY_NOTICES.txt` 字节相同（buildId `ed1b8747c37e669e`，bun 1.4.3） |
+| 类型检查 | `nsh check` | 编译 `native/` crate 加 TS 类型检查：首次约 68s，增量约 1s（`nsh 0.4.0`），0 errors |
+| 单测与桌面无头 E2E | `nsh test --trace` | 108 项（91 项 TSX + 17 项 Rust）约 2 分钟（`nsh 0.4.0`，2026-11-12 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、终端会话与真实 Shell |
+| libghostty-vt 固定版本 | `sh scripts/fetch-ghostty-vt.sh` | 1.0.1 zip 与 `libghostty-vt.a`（macos-arm64_x86_64）SHA-256 都对上才拷入；已有且哈希对时不下载 |
 | 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
 | 打包体积与速度 | `nsh package --target macos` | 增量打包 ~64ms，`.app` 体积 ~37 MB |
