@@ -12,7 +12,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 - **拥有边界**：
   - 工作区目录扫描（深度 ≤ 4，单目录上限 200 项，先去掉忽略项再截断；读不了的目录、超深目录与被截断的目录在文件树里各有一行说明，不显示成空目录）、Git 变更状态解析（`git status --porcelain=v1 -z -uall`）与单文件 Diff 预览。
   - 10 类文件路由与渲染：`code`、`markdown`、`mermaid`、`html`、`table`（CSV/TSV/JSONL）、`diff`、`image`（PNG/JPG/GIF/WebP/AVIF/SVG）、`video`、`audio`、`quicklook`（PDF）、`binary`（4 KB Hex + ASCII）。
-  - 内置多标签真 PTY 终端（`python3` `pty.fork()` 桥接）与本机 Ghostty 字体/主题/Shell 自动探测。
+  - 内置多标签真 TTY 终端（xterm.js 6.0.0 跑在 WebView 里，`python3` `pty.fork()` 帧协议桥接）与本机 Ghostty 字体/Shell 自动探测。
   - macOS Finder 双击/拖拽打开文件桥接（`libFinderBridge.dylib` + `launcher.c`）与 UTI 默认处理程序注册（`set_default_handlers.m`）。
 - **不拥有边界**：不做插件市场/扩展宿主，不做 LSP 语言服务器客户端，不自带网络后端服务。
 
@@ -46,6 +46,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | Finder 队列 | `<缓存目录>/open-<pid>/<seq>.path` | 每个 Aed 进程一个目录，每个待打开路径一个文件（原样路径字节，无换行）。写入方先用 `O_CREAT\|O_EXCL\|O_NOFOLLOW`、`0600` 建 `.<seq>.tmp`，写完再 `renameatx_np(RENAME_EXCL)` 成 `<seq>.path`，所以读方看不到半截文件。写入方：`launcher`（命令行第 2 个起的文件）、`finder_bridge.m`（冷启动阶段收到的 AppleEvent，一批文件全部写入）。读方：`consumeFinderOpenQueue()` 只认 `<数字>.path`，按数字（不是字典序）排序，逐个 `lstat`：普通文件读出内容，其它（符号链接等）不读，两者都删除（`unlink` 只删链接本身）；`.<seq>.tmp` 不碰。`launcher` 启动时清空本 pid 的旧目录，并删除进程已不存在的 `open-<pid>` 目录（是符号链接时只删链接） |
 | QuickLook 临时图 | `<缓存目录>/ql/<随机 UUID>.png` | `generateQuickLookUrl()` 让 `sips` 把 PDF 首页写成 PNG，读进内存转成 `blob:` URL 后立即删除 PNG（`sips` 失败也删）。内存里每个文件只留最新版本（`mtimeMs:size`）的 URL，新版本生成后 `revokeObjectURL` 旧的 |
 | Mermaid bundle | 无磁盘缓存 | `loadMermaidBundleJs()` 每个进程直接从 VS Code / Cursor / Antigravity 扩展目录提取一次，结果只缓存在内存（没找到不缓存，下次渲染器启动再找） |
+| 宿主事件（仅测试） | `aed.terminal.page` | `TerminalPane` 的测试通道：数据是一条终端页面消息（同 `window.nsh.postMessage` 的 JSON 对象，`tab` 缺省为当前 Tab），按页面发来的同一条路径校验和处理；第一次收到时打开纯文本镜像 `id:terminal-mirror`（最新 14 行）。打包宿主不发送；与 `aed.preview.eval` 同级。I-019 新增，无旧版本兼容问题 |
 
 **旧 `/tmp` 路径（I-018 起废弃）**：`/tmp/aed-open.queue`、`/tmp/aed-ql/`、`/tmp/aed-mermaid/` 不再读也不再写。`/tmp` 所有人可写，其他本机用户可以预先放好符号链接或伪造内容，所以 Aed 也不去删除它们（删除本身会跟随别人放的链接）。升级后旧文件留在原处，用户可以手动 `rm`。新旧版本同时运行时互不影响：旧版本仍读写 `/tmp`，新版本只用每用户缓存目录。
 
@@ -66,8 +67,9 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 |     workspace.ts   |   Image (Zoom+Grid) / Video / Audio / QuickLook / Hex        |
 |                    +--------------------------------------------------------------+
 |                    | [1: zsh ×] [+]                                       [zsh ▾] | <- TerminalPane (ResizablePanel)
-|                    | $ echo NSH_PTY_OK_2026                                       |
-|                    | zsh $ _____________________________________________________  |
+|                    | ➜ ~ echo NSH_PTY_OK_2026                                     |    xterm.js WebView, one xterm per Tab
+|                    | NSH_PTY_OK_2026                                              |
+|                    | ➜ ~ █                                                        |
 +--------------------+--------------------------------------------------------------+
 | ⎇ master*          |                             README.md · 2.1 KB · Ln 1, Col 1 · markdown | <- StatusBar (24pt, read-only)
 +--------------------+--------------------------------------------------------------+
@@ -88,7 +90,9 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `src/MarkdownPreview.tsx` | `MarkdownPreview` | Markdown WebView 的 I/O 外壳：注入运行时与 `render`/`setTheme`/`setImages` 载荷、图片按 `classify` MIME 读为 `data:`（≤20 MB）、`openUrl`/已解析路径回传、进程内滚动记忆、测试调试通道 |
 | `vendor/markdown/` | `entry.mjs`, `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的第三方运行时源码（markdown-it 插件组 + KaTeX + hljs + github-markdown-css + DOMPurify），仅由 `scripts/build-markdown-vendor.sh` 构建为 `src/markdownVendor.generated.ts` |
 | `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
-| `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig` | 多标签 Python `pty.fork()` 终端会话、ANSI CSI/OSC 流式剥离与回车覆盖处理、本机 Shell 与 Ghostty 配置探测 |
+| `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig`, `createInputGate`, `shouldFollowCwd` | 终端的 I/O 外壳：每个 Tab 一个 PTY 桥进程、xterm WebView 的注入与页面消息路由、回放缓冲、焦点期间的 ⌘K/⌘F 绑定、Shell 切换规则、测试通道 `aed.terminal.page`、本机 Shell 与 Ghostty 配置探测 |
+| `src/terminalPage.ts` | `PTY_BRIDGE_PY`, `encodeInputFrame`, `encodeResizeFrame`, `parseBridgeLine`, `createLineSplitter`, `createUtf8Stream`, `parseTerminalPageMessage`, `isTerminalReport`, `buildTerminalShellHtml`, `pageCall`, `buildXtermTheme`, `buildTerminalOptions`, `createOutputHistory`, `createTextMirror` | 终端的纯协议（无 I/O）：PTY 桥 Python 源码与行帧编解码、页面上行消息校验、终端应答识别、严格 CSP 壳页、主题到 xterm `ITheme`（16 色 ANSI）映射、回放缓冲、测试用纯文本镜像 |
+| `vendor/xterm/` | `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的 `@xterm/xterm` 6.0.0 与 `addon-fit` 0.11.0 / `addon-web-links` 0.12.0 / `addon-unicode11` 0.9.0，加页面运行时 `window.__aedTerm`；仅由 `scripts/build-xterm-vendor.sh` 构建为 `src/xtermVendor.generated.ts` |
 | `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 8 套配色主题（默认 Industrial Paper / Industrial Carbon，另有 Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、One Dark、Rose Pine、GitHub Light）及带 LRU 缓存的预编译正则语法高亮装饰器 |
 | `src/icons.tsx` | `Icon`, `FileBadge`, `AppLogo` | 内联矢量图标与按文件扩展名着色的类型徽章 |
 
@@ -127,7 +131,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | 6 | 单个 Mermaid 块 | 渲染中 / 已渲染 / 出错 | `MermaidDiagramBlock` 信号，`followLatest` | 半显式。源码、主题或字体一变就回到「渲染中」（旧图撤下，显示 `id:mermaid-loading`），只有最新一次请求的结果（或错误）落地，慢的旧渲染晚到也丢弃 |
 | 7 | 冷启动 | 先读 Recent（之后才记入启动目录）；两路并行：扫描初始目录（`refresh`）；打开初始文件 → 读 Finder 队列 → 读偏好 → 读 Ghostty 后再套一次主题 | `App` `appInitialized`、`recentLoaded` | 隐式，只跑一次 |
 | 8 | Finder 队列 | 轮询中（150ms，最多 16 次）/ 已取到 / 停止；同一时刻只有一次读取 | `drainFinderOpenQueue` `inflightDrain` | 隐式，正常 |
-| 9 | 终端会话 | 未启动 → 启动中（输入排队）→ 运行（未用 / 已用）→ 退出；关最后一个 Tab 立即重开 | `src/TerminalPane.tsx` `sessions`、`PtySession.cwd` / `.used` / `.gate` | 半显式。面板第一次显示时才启动 Shell（启动时不再有隐藏的登录 Shell）；提交命令时若该 Tab 没有 Shell（还没起来，或已 `session ended`）则当场启动一个。启动中输入先排队（`createInputGate`）：Shell 第一次输出后安静 200 毫秒（`SHELL_QUIET_MS`，提示符已画完）或满 3 秒（`SHELL_READY_MAX_MS`，闸门创建时自己计时）才放行。没输入过、且输入框里没有半截命令的 Shell 跟随打开的目录（`shouldFollowCwd`、`followFolder`）；输入过或有半截命令的 Shell 保留目录、输入与进程。换 Shell 只重启正在运行的 Shell，用户在下拉框里选的除外。重启后旧 Shell 迟到的 `exit` 不再结束新会话（`endSession` 只认当前会话） |
+| 9 | 终端会话 | 未启动 → 启动中（输入排队）→ 运行（未用 / 已用）→ 退出；关最后一个 Tab 立即重开 | `src/TerminalPane.tsx` `TerminalModel.sessions`、`PtySession.cwd` / `.used` / `.gate` / `.exitCode` | 半显式。面板第一次显示时才挂载终端 WebView 并启动 Shell（启动时没有隐藏的登录 Shell，也不起 WebKit 进程）；之后 WebView 不再卸载。已结束的 Tab 里按任意键（终端应答除外）当场启动一个新 Shell。启动中输入先排队（`createInputGate`）：Shell 第一次输出后安静 200 毫秒（`SHELL_QUIET_MS`）或满 3 秒（`SHELL_READY_MAX_MS`）才放行；终端应答（`isTerminalReport`：DA、光标位置、焦点、颜色查询等）不排队、直接写给发问的程序。「用过」由页面 `input` 消息判定，终端应答不算。没用过的 Shell 跟随打开的目录（`shouldFollowCwd`、`followFolder`）；用过的保留目录与进程。换 Shell：偏好设置改默认 Shell 时只换没用过的 Tab（`adoptShell`）；下拉框里选 Shell，当前 Tab 没用过就换掉，用过就在新 Tab 里开这个 Shell（`pickShell`），用过的会话从不被杀。重启后旧 Shell 迟到的输出与 `exit` 不再进入新会话（`readBridge` / `endSession` 只认当前会话）。退出行写 `[<标题>] session ended (exit <码>)`，码来自桥的 `X` 帧 |
 | 10 | 浮层 | 命令面板（关 / `files` / `commands`）、偏好设置、查找栏 | `commandOpen` + `commandMode`、`fontDialogOpen`、`findOpen` / `findShown` | 隐式。查找栏属于编辑器：只在编辑器视图上显示（切到预览类 Tab 时隐藏，回来再显示）；`⌘F` 只在编辑器有焦点时打开（终端、预览里按不打开），显示时 `⌘F` 关闭；查找框里按 Esc 关闭；关闭后焦点回到编辑器 |
 | 11 | 文件树视图 | `all` / `changed`，展开项，选中项 | `filterMode`、`expandedIds`、`selectedPath`；扫描结果 `snapshot` | 隐式。切换或关闭工作区时一起重置。扫描只认最新一次，且发起时的根目录仍是当前目录（`refresh` 的 `scanGeneration` 与根目录比对）：旧目录的慢扫描结束后不会覆盖新目录的文件树、Git 徽章、`⌘P` 列表和分支。`Changed` 列表含 git 报 `D`、磁盘上已没有的文件（排在最后），点开显示它被删掉的 diff。外部改名时跟着迁移（见 #14） |
 | 12 | 窗口最小尺寸 | 正常 / 已纠正 | `lastEnforcedKey` | 隐式，正常 |
@@ -169,10 +173,20 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 
 ## 内置 PTY 终端与 Ghostty 配置探测
 
-- **无需 Rust 原生扩展的真 PTY**：`src/TerminalPane.tsx` 使用 `process.spawn("python3", ["-u", "-c", PY_PTY_SCRIPT, shellPath, termProgram, ghosttyResourcesDir], { cwd, stdin: "pipe" })`，在 Python 标准库中调用 `pty.fork()` 与 `termios.TIOCSWINSZ`（32×140）启动登录 Shell（`execvp(shell, [shell, "-l"])`）。
-- **流式 ANSI 解析与半截转义序列拼接**：`extractProcessableChunk()` 使用 `INCOMPLETE_ANSI_TAIL` 缓存跨 chunk 截断的 ESC/CSI/OSC 序列，剥离非 CSI 控制码，处理 `\r` 行内覆盖、`\b` 退格、`CSI K` 清行与 `CSI 2J`/`3J` 清屏，每个会话保留最近 `1000` 行输出。
-- **工作目录与启动**：面板第一次显示时才启动 Shell。新终端 Tab 在当前工作区启动（无工作区时 `~`）。没输入过、输入框里也没有半截命令的 Tab，在工作区变化时于新目录重启；其余 Tab 不动。启动中提交的命令先排队，等提示符画完再写入（见「状态机清单」#9 与踩坑 9）。
-- **Ghostty 与 Shell 环境继承**：启动时 `discoverTerminalEnvironment()` 扫描 `~/.config/ghostty/config*` 与 `~/Library/Application Support/com.mitchellh.ghostty/config*`，自动继承用户的 `font-family`、`font-size`、`theme` 与 `command`，并探测本机已安装的 `zsh`、`fish`、`nu`、`bash`、`sh` 供终端顶栏下拉切换。
+I-019 起终端是真正的 TTY：xterm.js 在 WebView 里画屏、收键盘，`python3` 的 `pty.fork()` 给 Shell 一个真终端，两者之间是有帧格式的双向协议。纯协议在 `src/terminalPage.ts`（无 I/O，可单测），`src/TerminalPane.tsx` 只做 I/O 外壳。
+
+- **PTY 桥（`PTY_BRIDGE_PY`）**：`process.spawn("python3", ["-u", "-c", PTY_BRIDGE_PY, shellPath, termProgram, ghosttyResourcesDir, rows, cols], { cwd, stdin: "pipe" })`。子进程设 `TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM`、`DISABLE_AUTO_TITLE=true`、`PROMPT_EOL_MARK=""`（有 Ghostty 时加 `GHOSTTY_RESOURCES_DIR`），再 `execvp(shell, [shell, "-l"])`。起始尺寸取该 Tab 页面量过的尺寸，没量过取最近一次量到的，都没有用 32×140（`DEFAULT_ROWS` × `DEFAULT_COLS`）。本机 `/usr/bin/python3` 3.9.6 与 Homebrew 3.15.0 实测都能跑。
+  - stdin 每行一帧：`D<base64>` 是给 Shell 的字节；`R<rows> <cols>` 改尺寸（`TIOCSWINSZ`，内核随即给前台进程组发 `SIGWINCH`；行 1–500、列 1–1000，越界丢弃）。输入先进桥内队列，PTY 可写时才写，所以不读输入的程序不会卡住输出。stdin EOF 时给 Shell 发 `SIGHUP`。
+  - stdout 每行一帧：`O<base64>` 是 PTY 输出原始字节（一次最多读 64 KB），Shell 结束后发一次 `X<退出码>`（被信号结束为 128+n）再退出。base64 让 UTF-8 永远不会在 chunk 边界被切断；宿主用 `createLineSplitter` 自己切行，不用 `spawn` 的 `lines: true`（运行时遇到超长行会结束子进程）。桥自己的 stderr（如 Python 报错）原样显示在该 Tab 里。
+- **页面（`vendor/xterm/page.mjs` → `XTERM_RUNTIME_JS`）**：壳页 `buildTerminalShellHtml(background)` 只有 CSP（`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`）、xterm 的 CSS 与一个空根节点，0 个 `<script>`，不加载任何远程资源；运行时在 `onLoad` 用 `injectJavaScript` 注入（踩坑 #10），`!window.__aedTerm` 守卫防重复注入。`html` 只在挂载时生成一次（换值会重载页面），底色取挂载时的主题，防白闪。
+  - 宿主调用 `window.__aedTerm.*`（`pageCall` 生成 JS）：`configure(options)`（主题、字体、字号，改了热更新）、`select(tab)`（显示该 Tab 并 fit）、`write(tab, base64[])`、`clear(tab)`、`reset(tab)`、`close(tab)`、`focus()`。
+  - 页面上行（`parseTerminalPageMessage` 严格校验，未知 `type` 与原型链名一律丢弃）：`ready`；`input`（`term.onData` / `onBinary`，`binary: true` 表示一字符一字节；大段粘贴在页面切成 ≤32768 字符一条，不切开代理对，宿主上限 192 KB 字符）；`resize`（fit addon 算出的行列，变了才发）；`title`（OSC 0/2，去控制字符、≤200 字符，显示为 Tab 名 `<id>: <title>`）；`link`（仅 `http(s)://`，经 `openUrl` 打开）；`focus`（textarea 获得焦点且 `document.hasFocus()` 时为真，失焦或窗口 `blur` 为假）。
+  - 主题：`buildXtermTheme(theme)` 取 `theme.ui` 的背景、前景、强调色（光标）、选区色，加每套内置主题的 16 色 ANSI 调色板（`ANSI_PALETTES`，按上游配色，过淡的颜色调到在本主题背景上对比度 ≥3，前景 ≥4.5）；没有自带调色板的主题从语法色推出。字体：偏好设置 → Ghostty `font-family` → `ui-monospace, Menlo, monospace`；字号：偏好设置 → Ghostty `font-size` → 12。
+- **多 Tab 与回放**：一个 WebView，每个终端 Tab 一个 xterm 实例（`select` 只切显示），所以切 Tab 保留滚动记录（xterm `scrollback: 5000`）。宿主每个 Tab 另存一份输出（`createOutputHistory`，约 1 MB 字节的 base64，超出丢最旧的 chunk、最新的总保留）；页面 `ready` 之前的输出只进这份缓冲，`ready` 后按 `configure` → 每个 Tab `write` 缓冲 → `select` 当前 Tab 的顺序补发。页面重载（`onLoad` 再次触发）同样重新补发。重启会话（换目录、换 Shell）清空这份缓冲并 `reset` 该 xterm。
+- **键盘**：WebView 有焦点时，Ctrl-C、Tab、方向键、Esc 等全部由 xterm 编码后经 `input` 发给 Shell。`⌘` 组合键 xterm 不处理（`attachCustomKeyEventHandler` 返回 `false`），交还给 App 的菜单与 `keymap`。终端有键盘焦点时（页面 `focus` 消息为真），`TerminalPane` 绑定 `mod+k`（清屏）与 `mod+f`（不做事）；`keymap` 同一按键只跑最新的那个绑定，所以此时 ⌘K 不打开 Quick Open、⌘F 不打开编辑器查找栏；失焦即解绑，快捷键还给 App。页面里 ⌘K 也会自己 `term.clear()`，两边都清是幂等的。复制粘贴走菜单的 `copy` / `paste` 角色到 WebView，由 xterm 的选区与剪贴板事件处理。
+- **工作目录与启动**：见「状态机清单」#9。新终端 Tab 在当前工作区启动（无工作区时 `~`）。
+- **测试通道**：无头 `nsh test` 不执行页面 JS，所以宿主事件 `aed.terminal.page` 把一条页面消息当作页面发来的处理（同一个 `parseTerminalPageMessage` 与路由），并打开纯文本镜像 `id:terminal-mirror`：输出经 `createUtf8Stream` 解码、`createTextMirror` 去 ANSI（只认 CR、LF、退格与 CSI `D`/`C`/`G`/`K`，`J` 2/3 清空），显示最新 14 行（每行一行高，保证都在屏幕内、`app.texts()` 读得到）。镜像只在通道用过后才喂，打包后的 App 不付这份开销。`App.test.tsx` 的 `runInTerminal(app, cmd, marker)` 签名与语义不变，改走这个通道。
+- **Ghostty 与 Shell 环境继承**：启动时 `discoverTerminalEnvironment()` 扫描 `~/.config/ghostty/config*` 与 `~/Library/Application Support/com.mitchellh.ghostty/config*`，继承用户的 `font-family`、`font-size` 与 `command`，并探测本机已装的 `zsh`、`fish`、`nu`、`bash`、`sh` 供终端顶栏下拉切换。
 
 ---
 
@@ -261,10 +275,15 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
    - 无头测试里 `Input` 的 `autoFocus` 不会把焦点从刚聚焦的 `Editor` 抢走；测试先 `app.type` 进查找框再按 Esc。`Editor` 的 `onFocus` / `onBlur` 会触发，App 据此判断 `⌘F` 是否来自编辑器（不需要改 `TerminalPane`）。
 13. **`DataTable` 换数据时列标题不更新（`nsh 0.4.0` 无头实测）**：从 `events.jsonl` 切到 `metrics.csv`，行已是新表的，列标题仍是旧表的 `id / event / ok`（两表列 key 都是 `"0"`、`"1"`、`"2"`）。做法：`PreviewBody` 用 `<Each of={[path]} key>` 按文件重建 `TableBody`，排序信号也放在里面。表头的排序按钮在无头测试里不能按（`text:` 选不到可按的视图），排序不带到下一个表格由同一次重建保证。
 
-12. **退出拦截（`nsh 0.4.0` 实测）**：
+14. **退出拦截（`nsh 0.4.0` 实测）**：
    - `nsh/desktop` 与 `nsh` 没有窗口关闭或退出钩子（只有 `Window.close()` 与 `process.exit()`）；macOS 宿主 `nsh-macos-host` 自己实现了 `windowShouldClose:` 与 `applicationShouldTerminate:`，但不交给 JS。所以关闭按钮与系统退出只能由 `finder_bridge.m` 拦截。
    - `keymap.bind({ "mod+q": … })` 直接抛错：`"mod+q" cannot be bound: it quits the app`。`⌘Q` 只能挂在菜单项上。
    - 无头 `nsh test` 没有菜单栏，`app.keyboard.press("mod+q")` 碰不到菜单项；测试经命令面板触发同一个动作。无头下获准的 `process.exit()` 会结束被测 App，之后的步骤以 `the app left` 失败，可以用来断言「已退出」。
+
+15. **测试文件自己不能起进程；`app.texts()` 读不到排在屏幕外的文字（`nsh 0.4.0` 实测）**：
+   - `*.test.tsx` 顶层调用 `process.spawn` 抛 `process is available on desktop hosts`；所以 PTY 桥的真实 `python3` 测试都经 `open("./App.tsx", { platform: "macos", ... })` 打开的 App 自己的终端跑（`App.test.tsx` › a resize from the page reaches the shell as its terminal size 等 5 项）。
+   - 测试镜像曾把全部行排成会换行的 `Text`：一行 3000 个汉字换成几十行后，后面的行排到面板外，`app.texts()` 就看不到它们，`waitUntil` 超时。改为只显示最新 14 行、每行 `line-clamp-1`。
+   - `keymap.bind` 的说明（`.nsh/types/nsh/index.d.ts`）：同一按键有多个绑定时只跑最新的；默认在 WebView 有焦点时也会触发。终端借此在有焦点期间接管 ⌘K/⌘F；真机上 WKWebView 焦点与 `keymap` 的交互尚未实测（见 I-019 收尾的手工核对清单）。
 
 ---
 
@@ -277,6 +296,8 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 - **原生 `TextView` 重新排版做 Markdown 预览**：需从零实现阅读排版、语法高亮、TOC、链接路由与图片加载，工作量与成熟库差距大；改用 WebView + markdown-it 生态。
 - **在宿主 QuickJS 上渲染 Markdown 再下发 HTML**：实测同一 60 KB 合成文档 QuickJS 中位 283 ms vs WebView JSC 52 ms（快 ~5.5×），且 608 KB 运行时的解析/求值占住应用线程；渲染改在页面侧完成，宿主只做载荷与文件/URL 服务。
 - **直接复用 xicilion markdown-viewer 的成品 bundle**：该扩展为 GPLv3，不能随 Aed 分发。Aed 只沿用旧逻辑：运行时用 `loadMermaidBundleJs()` 读取用户本机已装扩展里的 Mermaid bundle，自己不打包它。
+- **单行 `<Input>` 加整行写入的终端（I-019 之前）**：按 Enter 才把整行写进 PTY，没有 Ctrl-C / Tab / 方向键，宿主只认几种 CSI，`vim` / `less` / `top` 不能用，尺寸写死 32×140，sudo 密码明文可见。改为 xterm.js + 帧协议 PTY 桥。
+- **每个终端 Tab 一个 WebView**：每个 WebView 都是一套页面与 380 KB 运行时；改为一个 WebView 里每个 Tab 一个 xterm 实例，切 Tab 只切显示。
 - **WebView `baseUrl=file://` 加载相对资源**：`nsh 0.4.0` 能力层无法授予 `file:`（见踩坑记录 #10）；改为 CSP `img-src data: https:` + 宿主侧图片内联，KaTeX 字体也全部 `data:` 内联。
 
 ---
@@ -286,6 +307,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | 检查项 | 命令 | 基准指标（macOS arm64，`nsh 0.3.0`） |
 |---|---|---|
 | 类型检查 | `nsh check` | ~0.2s，0 errors |
-| 单测与桌面无头 E2E | `nsh test --trace` | ~1.0s，覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析与真 PTY 回显 |
+| 单测与桌面无头 E2E | `nsh test --trace` | 57 项约 45s（`nsh 0.4.0`，2026-11-12 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、PTY 桥帧协议与真实 Shell |
+| xterm 运行时可重复构建 | `sh scripts/build-xterm-vendor.sh` 跑两次 | 两次 `src/xtermVendor.generated.ts`、`dist/build.json`、`THIRD_PARTY_NOTICES.txt` 字节相同（buildId `ed1b8747c37e669e`，bun 1.4.3） |
 | 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
 | 打包体积与速度 | `nsh package --target macos` | 增量打包 ~64ms，`.app` 体积 ~37 MB |
