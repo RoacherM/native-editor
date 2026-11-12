@@ -744,6 +744,32 @@ function MermaidBlockToolbar(props: {
 }
 
 /** Interactive Mermaid diagram block with zoom controls and Diagram/Code toggle (inspired by docu.md). */
+/**
+ * Follow a series of renders where only the newest counts: each call reports
+ * `start` (the loading state) and then the outcome of its own promise, unless a
+ * newer call came meanwhile, whose outcome is the one that lands.
+ */
+export function followLatest<T>(sink: {
+  start: () => void;
+  done: (value: T) => void;
+  fail: (err: unknown) => void;
+}): (pending: Promise<T>) => void {
+  let latest = 0;
+  return (pending) => {
+    latest += 1;
+    const mine = latest;
+    sink.start();
+    pending.then(
+      (value) => {
+        if (mine === latest) sink.done(value);
+      },
+      (err: unknown) => {
+        if (mine === latest) sink.fail(err);
+      }
+    );
+  };
+}
+
 export function MermaidDiagramBlock(props: {
   code: string | Accessor<string>;
   fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
@@ -772,18 +798,19 @@ export function MermaidDiagramBlock(props: {
     });
   };
 
+  const followRender = followLatest<MermaidRenderResult>({
+    start: () => {
+      rendered.set(null);
+      errorMsg.set(null);
+    },
+    done: (res) => rendered.set(res),
+    fail: (err) => errorMsg.set(err instanceof Error ? err.message : String(err)),
+  });
   effect(() => {
     const code = rawCode();
     const currentTheme = activeTheme();
     const font = props.fontStyle().fontFamily ?? "";
-    errorMsg.set(null);
-    void requestMermaidRender(code, currentTheme, font)
-      .then((res) => {
-        rendered.set(res);
-      })
-      .catch((err: unknown) => {
-        errorMsg.set(err instanceof Error ? err.message : String(err));
-      });
+    followRender(requestMermaidRender(code, currentTheme, font));
   });
 
   const displayDimensions = computed(() => {

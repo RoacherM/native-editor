@@ -27,6 +27,8 @@ export interface ImageDimensions {
 export interface TableData {
   columns: DataTableColumn[];
   rows: (string | number)[][];
+  /** 1-based numbers of the JSONL lines left out because they are not JSON objects. */
+  invalidLines: number[];
 }
 
 export interface FileClassification {
@@ -40,8 +42,11 @@ export interface FileClassification {
 /** The directory PDF preview thumbnails are cached in (inside the /tmp grant). */
 const QUICK_LOOK_DIR = "/tmp/aed-ql";
 
-/** A cell that reads as a number becomes one, so a table sorts numerically. */
-const NUMERIC_PATTERN = /^-?\d+(?:\.\d+)?$/;
+/**
+ * A cell that reads as a number (spaces around it allowed) becomes one, so a table
+ * sorts numerically. A leading zero (`007`, a code or an id) keeps it text.
+ */
+const NUMERIC_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
 
 /** The language shown in the editor for a file name that has no extension. */
 const LANGUAGE_BY_FILENAME: Record<string, string> = {
@@ -328,49 +333,69 @@ function toCellValue(value: unknown): string | number {
   if (value === null || value === undefined) return "";
   if (typeof value === "object") return JSON.stringify(value) ?? "";
   const text = String(value);
-  return NUMERIC_PATTERN.test(text) ? Number(text) : text;
+  const trimmed = text.trim();
+  return NUMERIC_PATTERN.test(trimmed) ? Number(trimmed) : text;
 }
 
-/** Split one delimited line, honouring double-quoted cells with "" escapes. */
-function parseDelimitedLine(line: string, delimiter: string): string[] {
-  if (!line.includes('"')) return line.split(delimiter);
-  const cells: string[] = [];
+/** A quoted cell's text from just after its opening quote ("" is one "), and the index after its closing quote. */
+function readQuotedCell(text: string, start: number): { value: string; end: number } {
+  let value = "";
+  let i = start;
+  while (i < text.length) {
+    if (text[i] !== '"') {
+      value += text[i];
+      i += 1;
+    } else if (text[i + 1] === '"') {
+      value += '"';
+      i += 2;
+    } else {
+      return { value, end: i + 1 };
+    }
+  }
+  return { value, end: i };
+}
+
+/**
+ * Split CSV or TSV text into records of cells. A double-quoted cell may hold the
+ * delimiter, line breaks and "" escapes; text without quotes splits by line.
+ */
+function parseDelimitedRecords(text: string, delimiter: string): string[][] {
+  if (!text.includes('"')) return splitLines(text).map((line) => line.split(delimiter));
+  const lf = text.replace(/\r\n?/g, "\n");
+  const body = lf.endsWith("\n") ? lf : `${lf}\n`;
+  const records: string[][] = [];
+  let record: string[] = [];
   let cell = "";
-  let quoted = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"' && line[i + 1] === '"') {
-        cell += '"';
-        i += 1;
-      } else if (ch === '"') {
-        quoted = false;
-      } else {
-        cell += ch;
-      }
-    } else if (ch === '"') {
-      quoted = true;
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    i += 1;
+    if (ch === '"') {
+      const quoted = readQuotedCell(body, i);
+      cell += quoted.value;
+      i = quoted.end;
     } else if (ch === delimiter) {
-      cells.push(cell);
+      record.push(cell);
+      cell = "";
+    } else if (ch === "\n") {
+      record.push(cell);
+      records.push(record);
+      record = [];
       cell = "";
     } else {
       cell += ch;
     }
   }
-  cells.push(cell);
-  return cells;
+  return records;
 }
 
-/** Parse CSV or TSV text: the first line is the header, the rest are rows. */
+/** Parse CSV or TSV text: the first record is the header, the rest are rows. */
 function parseDelimited(text: string, delimiter: string): TableData {
-  const lines = splitLines(text);
-  if (lines.length === 0) return { columns: [], rows: [] };
-  const header = parseDelimitedLine(lines[0], delimiter);
-  const columns = header.map((title, index) => makeColumn(index, title.trim()));
-  const rows = lines
-    .slice(1)
-    .map((line) => parseDelimitedLine(line, delimiter).map(toCellValue));
-  return { columns, rows };
+  const records = parseDelimitedRecords(text, delimiter);
+  if (records.length === 0) return { columns: [], rows: [], invalidLines: [] };
+  const columns = records[0].map((title, index) => makeColumn(index, title.trim()));
+  const rows = records.slice(1).map((record) => record.map(toCellValue));
+  return { columns, rows, invalidLines: [] };
 }
 
 /** The field names of the parsed JSONL objects, in first-seen order. */
@@ -388,25 +413,33 @@ function collectKeys(objects: Record<string, unknown>[]): string[] {
   return keys;
 }
 
-/** Parse one JSON object per line; malformed lines are skipped. */
+/** One JSON object per line, or null when the line is not one. */
+function parseJsonObject(line: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Parse one JSON object per line; the other non-blank lines are listed in `invalidLines`. */
 function parseJsonl(text: string): TableData {
   const objects: Record<string, unknown>[] = [];
-  for (const line of splitLines(text)) {
+  const invalidLines: number[] = [];
+  splitLines(text).forEach((line, index) => {
     const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    try {
-      const parsed: unknown = JSON.parse(trimmed);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        objects.push(parsed as Record<string, unknown>);
-      }
-    } catch {
-      // A malformed line does not stop the table.
-    }
-  }
+    if (trimmed.length === 0) return;
+    const parsed = parseJsonObject(trimmed);
+    if (parsed) objects.push(parsed);
+    else invalidLines.push(index + 1);
+  });
   const keys = collectKeys(objects);
   const columns = keys.map((key, index) => makeColumn(index, key));
   const rows = objects.map((object) => keys.map((key) => toCellValue(object[key])));
-  return { columns, rows };
+  return { columns, rows, invalidLines };
 }
 
 /** Parse CSV, TSV, or JSONL text into DataTable columns and rows. */
