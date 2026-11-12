@@ -77,7 +77,6 @@ plist["CFBundleDocumentTypes"] = [
             "public.source-code",
             "public.script",
             "public.shell-script",
-            "public.data",
             "public.json",
             "public.xml",
             "public.yaml",
@@ -92,6 +91,13 @@ plist["CFBundleDocumentTypes"] = [
             "dev.byronwayne.aed.mermaid",
             "dev.byronwayne.aed.jsonl",
         ],
+    },
+    {
+        # Any other file shows Aed under Open With, without claiming to be its default editor.
+        "CFBundleTypeName": "Any File",
+        "CFBundleTypeRole": "Viewer",
+        "LSHandlerRank": "Alternate",
+        "LSItemContentTypes": ["public.data"],
     },
     {
         "CFBundleTypeName": "Folder",
@@ -164,10 +170,6 @@ codesign --force --deep --sign "$SIGN_ID" "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE"
 
 echo "==> 5. Installing to /Applications & registering LaunchServices..."
-FIRST_INSTALL=0
-if [ ! -d "/Applications/Aed.app" ]; then
-  FIRST_INSTALL=1
-fi
 rm -rf "/Applications/Native Editor.app" "/Applications/Aed.app"
 cp -R "$APP_BUNDLE" "/Applications/Aed.app"
 xattr -cr "/Applications/Aed.app"
@@ -178,7 +180,8 @@ if [ -x "$LSREGISTER" ]; then
   "$LSREGISTER" -f "/Applications/Aed.app"
 fi
 
-if [ "$FIRST_INSTALL" = "1" ] || [ "${1:-}" = "--set-default" ]; then
+# Default apps change only when asked for: sh scripts/package-macos.sh --set-default
+if [ "${1:-}" = "--set-default" ]; then
   "/Applications/Aed.app/Contents/MacOS/set_default_handlers"
 fi
 

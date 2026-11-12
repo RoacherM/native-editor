@@ -20,6 +20,14 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 
 只放 app 自己 `process.run` / `process.spawn` 的 4 个二进制：`git`（状态与 diff）、`python3`（PTY 桥）、`sips`（PDF 预览图）、`osascript`（选目录）。终端里的 Shell 由 `python3` 的 `execvp` 拉起，不经过 nsh 的白名单，所以不需要列 `zsh` / `bash` / `sh`。新增一个 `process.run` 调用时，同时改这个列表和 `App.test.tsx` 里的最小权限断言。
 
+### 网络与网页权限（`nsh.json` `capabilities.network` / `webview`，I-018）
+
+两项都是 `{ "hosts": [] }`：App 不联网，也不显示任何远程网页。依据（`nsh 0.4.0` 文档「Sandbox and capabilities」与 `nsh-core` `access.rs`，并用整套 `nsh test --trace` 核对没有任何 `is not granted` 拒绝）：
+
+- `webview.hosts` 只管 WebView 的 `src` 与顶层跳转。`"webview": { "hosts": [] }` 仍允许 `html` 内联页面与 `about:blank`，所以 Markdown 预览、Mermaid 离屏渲染器和以后的本地 HTML 终端 WebView（xterm.js）都不受影响；去掉整个 `webview` 键才会让 `html` 也被拒。页面自己的子资源（脚本、图片、XHR）不归它管，由各页面的 CSP 管。
+- `network.hosts` 管 `fetch`、WebSocket、远程图片与视频源。`<Image>` 的 `blob:` URL 在进核心前已换成 `data:` 源（trace 里是 `data:image/png;nsh-key=…`），`<Video src={绝对路径}>` 不含 `://`，两者都按「app 自己的文件」放行（`allows_media`）。App 里没有 `fetch` / `WebSocket` / `net`。
+- 需要联网的新功能（例如远程图片预览）要在这里写明原因，再把具体主机加进 `network.hosts`，不要再写 `*`。
+
 ### 持久化标识与 IPC 契约（不可随意改名）
 
 | 类别 | 标识符 / 路径 | 用途与新旧兼容约定 |
@@ -31,10 +39,14 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `Storage` 键 | `aed.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`）；未设置时回退旧键 `native-editor.shell` |
 | `Storage` 键 | `aed.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个显式打开的非 `/` 工作区目录，单独打开外部文件不写入）；未设置时回退旧键 `native-editor.recentWorkspaces`，解析失败回退 `[]` |
 | 环境变量 / Host 参数 | `AED_ROOT` / `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置时返回 `""`（直接展示 `WelcomePanel` 开屏页并列出 `Recent` 历史工作区供点击打开，绝不自动进入旧工作区或扫 `$HOME`、`/`） |
-| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以无文件树（`workspaceRoot = ""`）独立窗口打开的初始文件绝对路径（不写入历史工作区） |
-| Finder 队列文件 | `/tmp/aed-open.queue` | 仅用于冷启动阶段（`NSApplicationDidFinishLaunching` 前及完成后 `1.5s` 内且尚无初始目标）接收首个 AppleEvent 打开路径及宿主事件 `enqueueFinderOpen`（支持 `file://` URI、`#L<line>` 与 `:line(:col)` 后缀归一化）；当 Aed 已有运行中窗口时，再次点击外部文件由 `finder_bridge.m` 直接通过 `/usr/bin/open -n <Aed.app> --args <path>` 拉起全新的无文件树独立窗口 |
-| 临时缓存目录 | `/tmp/aed-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
-| 临时缓存目录 | `/tmp/aed-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
+| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以无文件树（`workspaceRoot = ""`）独立窗口打开的第一个文件。值可以带 `:line(:col)` 后缀（`launcher` 解析出行列时附上），由 `resolveExternalFileReference()` 先按原样找文件，找不到才剥后缀并跳到该行（不写入历史工作区） |
+| 环境变量 / Host 参数 | `AED_OPEN_QUEUE` / `host.params.openQueue` | 本进程的 Finder 队列目录，`launcher` 在 `execv` 前设置，`libFinderBridge.dylib` 构造函数按 `getpid()` 重算并覆盖（不信任传入值）；`nsh.json` `process.env` 白名单需含此名。App 只接受形如 `<缓存目录>/open-<数字>` 的值（`resolveFinderQueueDir`），否则不读队列。`host.params.openQueue` 只供测试注入 |
+| 每用户缓存目录 | `~/Library/Caches/dev.byronwayne.aed/`（`0700`） | Aed 自己的临时文件都放这里（`aedCacheDir()` / `scripts/aed_paths.h`）。原生代码用 `O_NOFOLLOW\|O_DIRECTORY` 打开后 `fstat` 校验：必须是真目录（不是符号链接）、属于当前用户，权限不是 `0700` 就改成 `0700`，否则放弃写入。App 侧 `fs/promises` 没有 `mode` / `chmod`，只在其下 `mkdir` 出 `ql/`，靠 `~/Library` 本身是 `0700`。WebKit 也把 Aed 的网页缓存放在同一目录的 `WebKit/` 下，两者互不干扰 |
+| Finder 队列 | `<缓存目录>/open-<pid>/<seq>.path` | 每个 Aed 进程一个目录，每个待打开路径一个文件（原样路径字节，无换行）。写入方先用 `O_CREAT\|O_EXCL\|O_NOFOLLOW`、`0600` 建 `.<seq>.tmp`，写完再 `renameatx_np(RENAME_EXCL)` 成 `<seq>.path`，所以读方看不到半截文件。写入方：`launcher`（命令行第 2 个起的文件）、`finder_bridge.m`（冷启动阶段收到的 AppleEvent，一批文件全部写入）。读方：`consumeFinderOpenQueue()` 只认 `<数字>.path`，按数字（不是字典序）排序，逐个 `lstat`：普通文件读出内容，其它（符号链接等）不读，两者都删除（`unlink` 只删链接本身）；`.<seq>.tmp` 不碰。`launcher` 启动时清空本 pid 的旧目录，并删除进程已不存在的 `open-<pid>` 目录（是符号链接时只删链接） |
+| QuickLook 临时图 | `<缓存目录>/ql/<随机 UUID>.png` | `generateQuickLookUrl()` 让 `sips` 把 PDF 首页写成 PNG，读进内存转成 `blob:` URL 后立即删除 PNG（`sips` 失败也删）。内存里每个文件只留最新版本（`mtimeMs:size`）的 URL，新版本生成后 `revokeObjectURL` 旧的 |
+| Mermaid bundle | 无磁盘缓存 | `loadMermaidBundleJs()` 每个进程直接从 VS Code / Cursor / Antigravity 扩展目录提取一次，结果只缓存在内存（没找到不缓存，下次渲染器启动再找） |
+
+**旧 `/tmp` 路径（I-018 起废弃）**：`/tmp/aed-open.queue`、`/tmp/aed-ql/`、`/tmp/aed-mermaid/` 不再读也不再写。`/tmp` 所有人可写，其他本机用户可以预先放好符号链接或伪造内容，所以 Aed 也不去删除它们（删除本身会跟随别人放的链接）。升级后旧文件留在原处，用户可以手动 `rm`。新旧版本同时运行时互不影响：旧版本仍读写 `/tmp`，新版本只用每用户缓存目录。
 
 ---
 
@@ -67,9 +79,9 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | `App.tsx` | `App` (mount root) | 顶层信号状态、可拖拽分栏（水平 `Sidebar` + 垂直 `PreviewPane`/`TerminalPane`）、快捷键、Finder 队列轮询、Preferences 弹窗 |
 | `src/session.ts` | `WINDOW_TRANSITIONS`, `deriveWindowMode`, `deriveEditorSurface`, `planWorkspaceIntent`, `externalOpenKeepsTree`, `decideGuard`, `nextActiveAfterClose`, `canToggleSidebar`, `serialize` | 窗口会话状态机的纯规则（无 I/O）：窗口模式、编辑区显示内容、工作区打开/关闭计划、外部文件是否保留文件树、未保存确认框与关 Tab 后的激活项；`serialize` 让一个异步任务的运行不重叠（磁盘比对用它）。见「状态机清单」 |
 | `src/classify.ts` | `classifyFile`, `parseTableData`, `formatHexDump`, `probeImageDimensions`, `normalizeMachOBuildVersion`, `generateQuickLookUrl`, `createBlobUrl` | 纯文件类型判定（扩展名 + 前 4 KB `\0` 探测）、CSV/TSV/JSONL 解析、4 KB 十六进制格式化、PNG/GIF/SVG 尺寸探测、Mach-O `LC_BUILD_VERSION` 最低系统版本归一化、PDF `sips` 缩略图生成 |
-| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `consumeFinderOpenQueue`, `enqueueFinderOpenPath`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `readDiskStamp`, `isBehindDisk`, `hasChangedOnDisk`, `reloadFromDisk`, `reloadIfChangedOnDisk`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件路径与 `file://`/`:line:col` 归一化、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
-| `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
-| `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender`, `loadMermaidBundleJs`, `buildMermaidConfig` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL；`buildMermaidConfig` 是两条 Mermaid 渲染路径共用的主题配置工厂 |
+| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `aedCacheDir`, `resolveFinderQueueDir`, `consumeFinderOpenQueue`, `externalFileCandidates`, `resolveExternalFileReference`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `readDiskStamp`, `isBehindDisk`, `hasChangedOnDisk`, `reloadFromDisk`, `reloadIfChangedOnDisk`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件引用解析（先按原样找文件，找不到才剥 `:line:col` / `#L` 并带上行列；`file://[localhost]` 百分号解码）、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
+| `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta`, `withPreviewCsp` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、外部打开带行列时移动光标（`reveal`）、`.html` 预览加 CSP 并关闭页面 JS、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
+| `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender`, `loadMermaidBundleJs`, `buildMermaidConfig`, `rememberRender` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL；`buildMermaidConfig` 是两条 Mermaid 渲染路径共用的主题配置工厂 |
 | `src/markdownPage.ts` | `buildPreviewShellHtml`, `buildPreviewThemeCss`, `classifyPreviewLink`, `resolvePreviewImagePath`, `imageMimeForPath`, `parsePreviewMessage`, `handlePreviewMessage`, `isExternalOrHashUrl`, `resolveRelativeLink` | Markdown 预览的纯协议/路径/主题逻辑（无 I/O）：严格 CSP 壳页、主题化阅读排版与 TOC CSS、链接与图片路径安全分类、页面上行消息校验与路由 |
 | `src/MarkdownPreview.tsx` | `MarkdownPreview` | Markdown WebView 的 I/O 外壳：注入运行时与 `render`/`setTheme`/`setImages` 载荷、图片按 `classify` MIME 读为 `data:`（≤20 MB）、`openUrl`/已解析路径回传、进程内滚动记忆、测试调试通道 |
 | `vendor/markdown/` | `entry.mjs`, `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的第三方运行时源码（markdown-it 插件组 + KaTeX + hljs + github-markdown-css + DOMPurify），仅由 `scripts/build-markdown-vendor.sh` 构建为 `src/markdownVendor.generated.ts` |
@@ -125,16 +137,17 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 1. **类型判定、并发预热与大文件保护（`src/classify.ts` + `src/workspace.ts` + `src/themes.ts`）**：
    - `scanWorkspace()` 并发执行 `readGitStatus()`、`readGitBranch()` 与跨子目录 `Promise.all` 递归扫描，并在扫描完成后异步调用 `warmWorkspaceFiles()` 预热前 12 个 `≤ 256 KB` 的非音视频/非 PDF 文件；点击文件树时通过 `tryReuseLoadedFileSync()` 同步命中内存缓存，实现 `0ms` 瞬时打开与切换。
    - `computeSyntaxDecorations()` 采用模块级预编译正则、基于 `indexOf("\n")` 的零全量切分扫描（上限 `600` 行）与 48 项 LRU 缓存（`SYNTAX_DECORATION_CACHE`）；Tab 切换或主题切换时同步应用缓存装饰器，消除 10ms 延迟重绘与旧高亮闪烁。
-   - `parseDelimitedLine()` 对不含引号的行走原生 `line.split(delimiter)` 快路径；`generateQuickLookUrl()` 按 `filePath:mtimeMs:size` 缓存 PDF 预览 `blob:` URL，避免重复拉起 `sips`。
+   - `parseDelimitedLine()` 对不含引号的行走原生 `line.split(delimiter)` 快路径；`generateQuickLookUrl()` 按文件缓存最新版本（`mtimeMs:size`）的 PDF 预览 `blob:` URL，避免重复拉起 `sips`，PNG 读完即删（见「术语与边界」）。
+   - `.html` 预览（`PreviewPane` `preview-webview`）：`javaScriptEnabled={false}`，并由 `withPreviewCsp()` 在页面最前（有 doctype 时紧跟其后）插入 CSP `<meta>`：`default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; form-action 'none'`。浏览器同时执行页面里所有 CSP，页面自己再写的 CSP 只能更严、不能放宽。所以本地 HTML 里引用的远程脚本、图片、样式表都不加载（不向外发请求），只显示文件本身。
    - `video`（`.mp4`, `.mov`, `.m4v`, `.webm`）与 `audio`（`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`）在 `loadFile()` 中只调用 `fs.stat()` 获取字节数并直接将文件路径传给 `<Video src={filePath} />`，绝不 `fs.readFile` 全量读入内存。
    - 图片（`.png`, `.jpg`, `.gif`, `.webp`, `.avif`, `.svg`）通过 `fs.readFile` 构造 `URL.createObjectURL(new Blob([bytes], { type }))`，由 `nsh-js` 在 Rust 侧零拷贝读取 `Blob` 的 `Arc<[u8]>`。
    - 未知扩展名文件读取前 4 KB，含 `\0` 字节则归类为 `binary`，展示只读 4 KB Hex + ASCII 视图。
 2. **模式胶囊按钮显示规则（`App.tsx` `hasRichPreview`）**：
    - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
 3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
-   - 独立 `.mmd` / `.mermaid` 文件预览使用 `MermaidDiagramBlock`；Markdown 内的 ` ```mermaid ` 代码块由预览页在 WebView 内直接渲染为 SVG（见下条），两条路径共享 `buildMermaidConfig()` 生成的同一份 `mermaid.initialize` 配置（预览页在其上覆写 `securityLevel: "strict"`）。
-   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle 缓存到 `/tmp/aed-mermaid/mermaid-docu-bundle.js`，缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束；只丢弃该任务等的那一代渲染器（见「状态机清单」#5）。`loadMermaidBundleJs()` 导出这份 bundle 提取逻辑供 Markdown 预览页复用。
-   - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。
+   - 独立 `.mmd` / `.mermaid` 文件预览使用 `MermaidDiagramBlock`；Markdown 内的 ` ```mermaid ` 代码块由预览页在 WebView 内直接渲染为 SVG（见下条），两条路径共享 `buildMermaidConfig()` 生成的同一份 `mermaid.initialize` 配置，两条路径都用 `securityLevel: "strict"`（I-018 前独立 `.mmd` 用的是 `"loose"`：标签里的 HTML 与 `click` 回调会在渲染器 WebView 里执行）。
+   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle（只存在内存，见「术语与边界」），缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束；只丢弃该任务等的那一代渲染器（见「状态机清单」#5）。`loadMermaidBundleJs()` 导出这份 bundle 提取逻辑供 Markdown 预览页复用。
+   - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。结果缓存 `renderCache` 最多 24 张（`rememberRender`，最近用过的排最后），超出时删掉最久没用的一张并 `revokeObjectURL`。
 4. **Markdown WebView 渲染契约（`src/MarkdownPreview.tsx` + `src/markdownPage.ts` + `vendor/markdown/`）**：
    - 渲染全部在 WebView（JSC）内完成，宿主只投递运行时与载荷并响应页面请求。`vendor/markdown/entry.mjs` 构建 markdown-it 15.0.3 管线（`html:true`、`linkify:true`、footnote / task-lists / CJK 安全去重 slug 的 anchor / GitHub alerts / highlight.js 11.12.0 common 子集 / KaTeX 0.19.1，`mermaid` 围栏保留为 `<pre class="mermaid">`），与 `page.mjs`（DOMPurify 消毒 + `window.__aed` 协议）一起经 `scripts/build-markdown-vendor.sh`（`bun install --frozen-lockfile` + `bun build --format iife`）打进 `src/markdownVendor.generated.ts`（已提交，`MARKDOWN_RUNTIME_JS` / `KATEX_CSS`（`url(fonts/*.woff2)` 全部内联为 `data:`、丢弃 woff/ttf 回退）/ `GITHUB_MARKDOWN_CSS` 自动明暗两变量版）。许可证见 `vendor/markdown/THIRD_PARTY_NOTICES.txt`。重建：`sh scripts/build-markdown-vendor.sh`。构建把 `entry.mjs + page.mjs + bun.lock` 的 sha256 前缀写成 `globalThis.AedMarkdown.buildId`（防 `dist/` 与生成文件漂移，测试断言 `MARKDOWN_RUNTIME_JS` 包含同一 buildId）。
    - 页面壳层 `buildPreviewShellHtml()` 只含 `<meta charset>`、严格 CSP（`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: https:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`）、三个 `<style>` 块与空 `<main>`/`<nav>`，**不含任何 `<script>`**；运行时只在 `onLoad` 注入一次（`page.mjs` 顶部有 `!window.__aed` 安装守卫，重复注入不产生重复监听器），随后每次 `sendRender` 只发 `__aed.render(payload)`（绕过 HTML 解析器与 `script-src`，见踩坑记录）。
@@ -163,15 +176,18 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 
 1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/Aed`）**：
    - 原 `Aed` 二进制被重命名为 `AedCore`。
-   - `launcher` 解析命令行参数（剥离 `file://` 前缀、`#L<line>` 锚点与可选 `:line(:col)` 行列后缀）：目录参数写入 `AED_ROOT`；普通文件参数清除 `AED_ROOT` / `NATIVE_EDITOR_ROOT` 并仅写入本进程环境变量 `AED_OPEN_FILE`（不写入全局 `/tmp/aed-open.queue`，避免被其它已运行窗口抢读），随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
+   - `launcher` 解析命令行参数：`file://[localhost]/…` 做百分号解码（`%00` 不解码），`#L<line>[C<col>]` 一律当片段；路径先按原样 `realpath`，存在就不剥任何后缀（文件可以叫 `notes:12`），不存在才剥 `#L<line>` / `:line(:col)` 再试，剥出的行列以 `:line:col` 附在路径后交给 App 跳转。有文件参数时文件优先：第 1 个写入 `AED_OPEN_FILE`（清除 `AED_ROOT` / `NATIVE_EDITOR_ROOT`），第 2 个起写入本进程自己的队列 `open-<pid>`（`execv` 后 pid 不变），同一个窗口全部作为 Tab 打开；没有文件参数时第 1 个目录写入 `AED_ROOT`。随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
 2. **`scripts/finder_bridge.m`（`libFinderBridge.dylib`）**：
    - 在 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警）。
    - Method Swizzle `NSApplication setDelegate:` 并通过 `setOrReplaceMethod` 向宿主 Delegate 注入或覆盖 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`：
-     - **冷启动首个外部目标**（`NSApplicationDidFinishLaunching` 前及完成后 `1.5s` 内且未通过 `--args` 指定初始目标）：写入 `/tmp/aed-open.queue` 并唤醒当前窗口，由 `App.tsx` 以无文件树独立模式（`workspaceRoot = ""`）直接展示该文件；
-     - **运行中再次点击外部文件**：调用 `/usr/bin/open -n <Aed.app> --args <path>` 拉起全新的独立 Aed 窗口进程（不带左侧文件树），并在 AppKit 层锁定窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
+     - 一次打开事件（Finder 里选中 N 个文件）是一批：所有文件进同一个窗口作为 Tab，每个文件夹各开一个窗口。
+     - **冷启动首个外部目标**（`NSApplicationDidFinishLaunching` 前及完成后 `1.5s` 内且未通过 `--args` 指定初始目标）：这一批文件全部写入本进程队列 `open-<pid>`（没有文件时写第 1 个文件夹）并唤醒当前窗口，由 `App.tsx` 以无文件树独立模式（`workspaceRoot = ""`）直接展示；
+     - **运行中再次点击外部文件**：调用一次 `/usr/bin/open -n <Aed.app> --args <path1> <path2> …` 拉起一个全新的独立 Aed 窗口进程（不带左侧文件树），由它的 `launcher` 按上条分发，并在 AppKit 层锁定窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
 3. **`scripts/set_default_handlers.m`**：
    - 先通过 `LSCopyDefaultRoleHandlerForContentType` 查询当前默认打开程序，已绑定 `dev.byronwayne.aed` 的 UTI 直接跳过（避免重复触发 macOS `CoreServicesUIAgent` 确认弹窗），并对 UTI 去重、过滤未声明的 `dyn.*` 动态 UTI。
    - 默认仅注册 8 个核心文档与数据 UTI（Markdown、Mermaid、JSONL、JSON、CSV、TSV、Plain Text、Diff/Patch）；传入 `--all` 时额外注册常用源码 UTI，也可直接传入指定扩展名（如 `set_default_handlers yaml toml`）。
+   - 只在用户要求时运行：`sh scripts/package-macos.sh --set-default`，或 DMG 里的 `Install & Set Default.command`（I-018 前首次安装会自动运行，不问用户就接管默认文本编辑器）。`install.sh` 目前仍在每次安装后运行它，并提示「set as default document editor」。
+   - `Info.plist` 的 `CFBundleDocumentTypes`：文本、源码、Markdown、JSON、CSV 等具体类型为 `Editor` / `Default`；`public.data`（任意文件）单独一组，为 `Viewer` / `Alternate`，只让 Aed 出现在「打开方式」里，不声明自己是所有文件的默认编辑器。
 4. **跨版本 macOS 兼容性锁定（`LSMinimumSystemVersion = 11.0` + `LC_BUILD_VERSION` `minos = 11.0.0`）**：
    - `scripts/package-macos.sh` 统一设置 `MACOSX_DEPLOYMENT_TARGET=11.0` 并为所有 `clang` 编译命令传 `-mmacosx-version-min=11.0`，同时将 `Info.plist` 的 `LSMinimumSystemVersion` 设为 `"11.0"`，并将 `Contents/MacOS/` 下全部 Mach-O 二进制的 `LC_BUILD_VERSION`（`cmd = 0x32`）归一化为 `minos = 11.0.0`、`sdk = 14.0.0`。
    - `install.sh` 在用户机器落盘 `/Applications/Aed.app` 后，同样执行 `Info.plist` 与 Mach-O `LC_BUILD_VERSION` 归一化及本机 `codesign --force --deep --sign -` 重签名，再调用 `lsregister -f` 刷新 LaunchServices 缓存，确保在 macOS 11+ 全系列 Apple Silicon 系统上 `open /Applications/Aed.app` 均不会触发 `-10825`（`kLSIncompatibleSystemVersionErr`）。
@@ -207,7 +223,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
    - 早期版本在未传工作区时回退 `os.homedir()` 或自动恢复 `aed.recentWorkspaces[0]`（如历史遗留的 `data` 目录），导致每次打开 Aed 或等待 LaunchServices `odoc` 事件时总是强制跳进上次的目录页面（`EmptyEditorPanel` + 左侧文件树），无法停留在开屏页。现 `getInitialWorkspaceRoot()` 在无显式工作区（`AED_ROOT`）时返回 `""`：冷启动默认隐藏左侧文件树并渲染瑞士网格开屏页 `WelcomePanel`（`id:welcome-panel`），`Storage` 中的 `aed.recentWorkspaces` 仅在开屏页右侧 `Recent` 列表中展示供用户主动点击打开，绝不自动加载为当前工作区。
    - 一旦用户主动打开工作区（`workspaceRoot().length > 0`）且当前无打开的 Tab（`activeFile() === undefined`），编辑区渲染安静的低对比度快捷键提示页 `EmptyEditorPanel`（`id:empty-editor-panel`）；用户可随时通过 `Close Folder`（`⌘⇧W`、菜单栏 `File ▸ Close Folder`、命令面板或空态页 `id:empty-editor-close-folder`）将 `workspaceRoot` 置空并重置工作区状态，随时返回 `WelcomePanel` 开屏页。
    - 左侧文件树顶部目录名（`id:sidebar-workspace-title`）为纯静态标题展示，绝不绑定 `osascript` 选目录弹窗，避免误触文件树顶部时弹出系统模态窗；切换/打开目录仅通过菜单栏、`⌘O`、命令面板或空态页 `id:empty-editor-open-folder` 触发。文件树顶栏只放目录名与 All / Changed 切换，不放打开/关闭文件夹按钮（入口已有 4 处，按钮只增加误触）。
-   - 外部点击打开单文件（Finder / Herdr / 终端链接点击或 `AED_OPEN_FILE`）一律以**不带左侧文件树的独立窗口**（`workspaceRoot = ""`）打开：若当前窗口已处于运行态，`finder_bridge.m` 通过 `open -n <Aed.app> --args <path>` 新开一个不带文件树的独立 Aed 窗口；若为冷启动首次拉起，直接将文件载入当前无文件树窗口，绝不把外部单文件塞进旧工作区目录树里。拖拽到窗口上的文件例外：不论在不在当前工作区内，都在本窗口作为 Tab 打开并保留文件树（见「状态机清单」）。关闭或切换含未保存修改（`dirty`）的 Tab/工作区时弹出确认框（`id:unsaved-changes-dialog`）。状态栏仅在当前工作区确属 Git 仓库（`branch` 非空）时展示分支名，绝不在非 Git 目录伪造 `main`。
+   - 外部点击打开单文件（Finder / Herdr / 终端链接点击或 `AED_OPEN_FILE`）一律以**不带左侧文件树的独立窗口**（`workspaceRoot = ""`）打开：若当前窗口已处于运行态，`finder_bridge.m` 通过 `open -n <Aed.app> --args <path…>` 为这一批文件新开一个不带文件树的独立 Aed 窗口；若为冷启动首次拉起，直接将文件载入当前无文件树窗口，绝不把外部单文件塞进旧工作区目录树里。拖拽到窗口上的文件例外：不论在不在当前工作区内，都在本窗口作为 Tab 打开并保留文件树（见「状态机清单」）。关闭或切换含未保存修改（`dirty`）的 Tab/工作区时弹出确认框（`id:unsaved-changes-dialog`）。状态栏仅在当前工作区确属 Git 仓库（`branch` 非空）时展示分支名，绝不在非 Git 目录伪造 `main`。
 5. **`DYLD_INSERT_LIBRARIES` 泄漏坑**：
    - 若不在 `finder_bridge.m` 的构造函数里立即 `unsetenv("DYLD_INSERT_LIBRARIES")`，内置 PTY 终端里启动的所有 macOS 系统命令都会尝试加载 `libFinderBridge.dylib`。
 6. **`nsh/base` 无样式原语（`Select` / `Command` / `Tree`）必须传完整浮层与行渲染**：

@@ -62,11 +62,8 @@ export function MarkdownPreview(props: {
   const themeCss = computed(() =>
     buildPreviewThemeCss(props.theme(), props.fontStyle()),
   );
-  const mermaidConfig = () => ({
-    // Preview diagrams use the body UI font, not the editor mono font.
-    ...buildMermaidConfig(props.theme(), ""),
-    securityLevel: "strict",
-  });
+  // Preview diagrams use the body UI font, not the editor mono font.
+  const mermaidConfig = () => buildMermaidConfig(props.theme(), "");
 
   const deps: PreviewBridgeDeps = {
     basePath: () => props.file().path,

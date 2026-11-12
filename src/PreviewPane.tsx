@@ -35,7 +35,7 @@ import {
   EDITOR_THEMES,
   type EditorTheme,
 } from "./themes";
-import { type LoadedFile } from "./workspace";
+import { type FileLocation, type LoadedFile } from "./workspace";
 
 export interface PreviewPaneProps {
   file: Accessor<LoadedFile | undefined>;
@@ -49,6 +49,9 @@ export interface PreviewPaneProps {
   /** Receives an already-resolved absolute path (markdown links, file links). */
   onOpenRelativeLink: (resolvedPath: string) => void;
   onCursorChange?: (line: number, column: number) => void;
+  /** A place to move the caret to once this file is in the editor. */
+  reveal?: Accessor<FileLocation | null>;
+  onRevealed?: () => void;
 }
 
 function compareCells(
@@ -232,6 +235,19 @@ function bindEditorDecorationEffect(
   });
 }
 
+/**
+ * Puts the caret of `editor` at `target` (1-based) when it names the file shown, clamped inside the
+ * text: past the end is the last line, past a line's end its end. Returns whether it moved the caret.
+ */
+function revealInEditor(editor: EditorRef | null, file: LoadedFile, target: FileLocation | null | undefined): boolean {
+  if (!editor || !target || target.path !== file.path) return false;
+  const lines = file.text.split("\n");
+  const line = Math.min(Math.max(target.line - 1, 0), lines.length - 1);
+  const at = { line, column: Math.min(Math.max(target.column - 1, 0), lines[line].length) };
+  editor.setSelections([{ anchor: at, head: at }]);
+  return true;
+}
+
 function EditorBody(props: {
   file: Accessor<LoadedFile>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
@@ -239,9 +255,15 @@ function EditorBody(props: {
   theme: Accessor<EditorTheme>;
   onTextChange: (val: string) => void;
   onCursorChange?: (line: number, col: number) => void;
+  reveal?: Accessor<FileLocation | null>;
+  onRevealed?: () => void;
 }): JSX.Element {
   const f = props.file;
   let editorRef: EditorRef | null = null;
+  const applyReveal = () => {
+    if (revealInEditor(editorRef, f(), props.reveal?.())) props.onRevealed?.();
+  };
+  effect(applyReveal);
   const editorStyles = computed(() => buildEditorThemeStyles(props.theme()));
   const decorations = signal(
     computeSyntaxDecorations(
@@ -264,6 +286,7 @@ function EditorBody(props: {
       ref={(r) => {
         editorRef = r;
         r?.focus();
+        applyReveal();
       }}
       autoFocus
       value={f().text}
@@ -294,6 +317,21 @@ function EditorBody(props: {
       class="flex-1"
     />
   );
+}
+
+/**
+ * The CSP an `.html` preview runs under: no scripts and nothing fetched from
+ * outside the file (inline styles and `data:` images, fonts and media only).
+ * WebKit applies the first CSP `<meta>` it parses before any later tag, so it
+ * goes in front of the page's own markup (after a doctype, to keep the mode).
+ */
+const HTML_PREVIEW_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; form-action 'none'";
+
+export function withPreviewCsp(html: string): string {
+  const doctype = /^\s*<!doctype[^>]*>/i.exec(html)?.[0] ?? "";
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;
+  return doctype + meta + html.slice(doctype.length);
 }
 
 function TableBody(props: {
@@ -701,7 +739,12 @@ function PreviewBody(props: {
         </Scroll>
       </If>
       <If when={activeView() === "html"}>
-        <WebView testID="preview-webview" html={props.file().text} class="flex-1" />
+        <WebView
+          testID="preview-webview"
+          html={withPreviewCsp(props.file().text)}
+          javaScriptEnabled={false}
+          class="flex-1"
+        />
       </If>
       <If when={activeView() === "image"}>
         <ImageBody file={props.file} theme={props.theme} />
@@ -720,6 +763,8 @@ function PreviewBody(props: {
           theme={props.theme}
           onTextChange={(val) => props.paneProps.onTextChange(props.file().path, val)}
           onCursorChange={props.paneProps.onCursorChange}
+          reveal={props.paneProps.reveal}
+          onRevealed={props.paneProps.onRevealed}
         />
       </If>
     </View>

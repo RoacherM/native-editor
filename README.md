@@ -104,7 +104,7 @@ Aed classifies every file by extension, content signature, and byte stream (`src
 ```mermaid
 flowchart LR
   Finder["Finder / CLI\nopen -a Aed"] --> Bridge["finder_bridge.dylib\nNSWindowDelegate + Queue"]
-  Bridge --> Queue["/tmp/aed-open.queue"]
+  Bridge --> Queue["~/Library/Caches/dev.byronwayne.aed\nper-process open queue"]
   Queue --> Workspace["src/workspace.ts\nWorkspace Tree + Git Status"]
   Workspace --> App["App.tsx\nWindow Shell + Tabs + Keybindings"]
   App --> Sidebar["src/Sidebar.tsx\nFiles + Git Diff Tree"]
@@ -117,7 +117,7 @@ flowchart LR
 | Path | Responsibility |
 |---|---|
 | [`App.tsx`](App.tsx) | Window shell, titlebar, `ResizablePanelGroup`, tabs, dialogs, and shortcut routing |
-| [`src/workspace.ts`](src/workspace.ts) | Directory scanner, Git status/diff runner, and `/tmp/aed-open.queue` consumer |
+| [`src/workspace.ts`](src/workspace.ts) | Directory scanner, Git status/diff runner, and per-process Finder open queue consumer |
 | [`src/classify.ts`](src/classify.ts) | 10-format file classifier, CSV/TSV/JSONL parser, Hex formatter, and `sips` PDF/image probe |
 | [`src/PreviewPane.tsx`](src/PreviewPane.tsx) | Format-specific viewers (`CodeEditor`, `Markdown`, `DataTable`, `DiffView`, `Image`, `Video`, `Audio`, `QuickLookBody`, `Binary`) |
 | [`src/mermaid.tsx`](src/mermaid.tsx) | Offline Mermaid syntax validator, offscreen WebKit SVG renderer, and 2x Retina PNG cache |
@@ -126,7 +126,7 @@ flowchart LR
 | [`src/themes.ts`](src/themes.ts) | 8 color palettes, syntax token colors, and font stacks |
 | [`scripts/`](scripts/) | `launcher.c` (`Aed` Mach-O entrypoint), `finder_bridge.m` (`DYLD_INSERT_LIBRARIES` AppleEvent + window min-size hook), `set_default_handlers.m`, and `package-macos.sh` |
 
-For persistence keys (`aed.*`), environment variables (`AED_*`), IPC paths (`/tmp/aed-*`), and native packaging invariants, see [`DESIGN.md`](DESIGN.md).
+For persistence keys (`aed.*`), environment variables (`AED_*`), cache and queue paths (`~/Library/Caches/dev.byronwayne.aed/`), and native packaging invariants, see [`DESIGN.md`](DESIGN.md).
 
 ---
 
@@ -139,7 +139,7 @@ nsh check                           # TypeScript 7 native typecheck (~0.2s)
 nsh test --trace                    # Headless unit + desktop E2E test suite
 nsh test App.tsx --target macos     # Real AppKit window integration test
 nsh run --target macos              # Development host with hot reload
-sh scripts/package-macos.sh         # Build, sign, install /Applications/Aed.app, and create DMG/ZIP
+sh scripts/package-macos.sh         # Build, sign, install /Applications/Aed.app, and create DMG/ZIP (add --set-default to also register default handlers)
 ```
 
 To register **Aed** as the macOS default handler for core document/data types (`.md`, `.txt`, `.json`, `.jsonl`, `.yaml`, `.toml`, `.csv`, `.tsv`), or for all supported source extensions:

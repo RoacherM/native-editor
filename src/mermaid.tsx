@@ -52,13 +52,13 @@ interface WorkerMessage {
 }
 
 // DESIGN.md「文件预览与 Mermaid 渲染契约」
-const CACHE_DIR = "/tmp/aed-mermaid";
-const CACHED_BUNDLE_PATH = `${CACHE_DIR}/mermaid-docu-bundle.js`;
 const MERMAID_START_MARKER = "var __esbuild_esm_mermaid_nm;";
 const MERMAID_END_MARKER =
   'globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;';
 
+/** Rendered diagrams kept, newest last; an older one's `blob:` URL is revoked as it leaves. */
 const renderCache = new Map<string, MermaidRenderResult>();
+const RENDER_CACHE_SIZE = 24;
 const inflightRequests = new Map<string, Promise<MermaidRenderResult>>();
 const pendingQueue: PendingJob[] = [];
 const activeJobs = new Map<number, PendingJob>();
@@ -102,15 +102,6 @@ function extractInlineMermaidFromHtml(html: string): string | null {
   return html.slice(start, end + MERMAID_END_MARKER.length);
 }
 
-async function tryReadCachedBundle(): Promise<string | null> {
-  try {
-    const text = await fs.readFile(CACHED_BUNDLE_PATH, "utf8");
-    return text.length > 1000 ? text : null;
-  } catch {
-    return null;
-  }
-}
-
 async function readMermaidFromDocuMd(
   extRoot: string,
   entry: string
@@ -147,7 +138,7 @@ export interface MermaidInitConfig {
 
 /**
  * The `mermaid.initialize(...)` config shared by the offscreen .mmd worker and
- * the markdown preview page. The preview overrides `securityLevel: "strict"`.
+ * the markdown preview page.
  */
 export function buildMermaidConfig(
   theme: EditorTheme,
@@ -160,7 +151,7 @@ export function buildMermaidConfig(
     '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif';
   return {
     startOnLoad: false,
-    securityLevel: "loose",
+    securityLevel: "strict",
     theme: "base",
     look: "classic",
     fontFamily: font,
@@ -191,10 +182,19 @@ export function buildMermaidConfig(
   };
 }
 
-export async function loadMermaidBundleJs(): Promise<string | null> {
-  const cached = await tryReadCachedBundle();
-  if (cached) return cached;
+/** The bundle found by this process, kept in memory only (never written to disk). */
+let bundleLookup: Promise<string | null> | null = null;
 
+/** Mermaid's JS from an installed editor extension, found once per process; null when none has it. */
+export function loadMermaidBundleJs(): Promise<string | null> {
+  bundleLookup ??= findMermaidBundleJs().then((found) => {
+    if (!found) bundleLookup = null;
+    return found;
+  });
+  return bundleLookup;
+}
+
+async function findMermaidBundleJs(): Promise<string | null> {
   const home = os.homedir();
   const roots = [
     path.join(home, ".vscode", "extensions"),
@@ -204,15 +204,7 @@ export async function loadMermaidBundleJs(): Promise<string | null> {
 
   for (const root of roots) {
     const found = await scanExtensionRoot(root);
-    if (found) {
-      try {
-        await fs.mkdir(CACHE_DIR, { recursive: true });
-        await fs.writeFile(CACHED_BUNDLE_PATH, found);
-      } catch {
-        // Best-effort cache write.
-      }
-      return found;
-    }
+    if (found) return found;
   }
   return null;
 }
@@ -564,6 +556,27 @@ function ensureWorkerInitialized(): void {
   });
 }
 
+function revokeBlobUrl(res: MermaidRenderResult): void {
+  URL.revokeObjectURL(res.blobUrl);
+}
+
+/** Put `key` last in `cache` (most recent); past `max` entries, drop the oldest and `evict` each. */
+export function rememberRender<T>(
+  cache: Map<string, T>,
+  key: string,
+  value: T,
+  max: number,
+  evict: (value: T) => void
+): void {
+  cache.delete(key);
+  cache.set(key, value);
+  for (const [oldKey, oldValue] of cache) {
+    if (cache.size <= max) break;
+    cache.delete(oldKey);
+    evict(oldValue);
+  }
+}
+
 /** Render Mermaid diagram source into a Retina PNG blob: URL via the hidden WebKit host. */
 export function requestMermaidRender(
   rawCode: string,
@@ -580,7 +593,10 @@ export function requestMermaidRender(
   const normalized = preprocessMermaidCode(rawCode);
   const cacheKey = `${resolvedTheme.id}:${fontFamily}:${normalized}`;
   const cached = renderCache.get(cacheKey);
-  if (cached) return Promise.resolve(cached);
+  if (cached) {
+    rememberRender(renderCache, cacheKey, cached, RENDER_CACHE_SIZE, revokeBlobUrl);
+    return Promise.resolve(cached);
+  }
 
   const existing = inflightRequests.get(cacheKey);
   if (existing) return existing;
@@ -599,7 +615,7 @@ export function requestMermaidRender(
       mermaidConfig: buildMermaidConfig(resolvedTheme, fontFamily),
       resolve: (res) => {
         clearTimeout(timer);
-        renderCache.set(cacheKey, res);
+        rememberRender(renderCache, cacheKey, res, RENDER_CACHE_SIZE, revokeBlobUrl);
         inflightRequests.delete(cacheKey);
         resolve(res);
       },
