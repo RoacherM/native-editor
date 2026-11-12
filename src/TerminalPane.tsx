@@ -3,20 +3,54 @@ import * as os from "os";
 import * as path from "path";
 import process from "process";
 import type { ChildProcess } from "process";
-import type { Accessor, InputRef, JSX, ScrollRef, Signal } from "nsh";
+import type { Accessor, JSX, Signal, WebViewRef } from "nsh";
 import {
   cleanup,
   computed,
   effect,
+  host,
+  keymap,
+  openUrl,
   Scroll,
   signal,
   Text,
   untracked,
   View,
+  WebView,
 } from "nsh";
-import { Button, Input, Select, type SelectItem } from "nsh/base";
+import { Button, Select, type SelectItem } from "nsh/base";
 import { Icon } from "./icons";
+import {
+  binaryStringBytes,
+  buildTerminalOptions,
+  buildTerminalShellHtml,
+  createLineSplitter,
+  createOutputHistory,
+  createTextMirror,
+  createUtf8Stream,
+  decodeBase64,
+  DEFAULT_COLS,
+  DEFAULT_ROWS,
+  encodeInputFrame,
+  encodeResizeFrame,
+  isTerminalReport,
+  type LineSplitter,
+  type OutputHistory,
+  pageCall,
+  parseBridgeLine,
+  parseTerminalPageMessage,
+  PTY_BRIDGE_PY,
+  type TerminalPageMessage,
+  type TextMirror,
+  textChunk,
+  type Utf8Stream,
+} from "./terminalPage";
 import { EDITOR_THEMES, type EditorTheme } from "./themes";
+import { XTERM_RUNTIME_JS } from "./xtermVendor.generated";
+
+// DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」. The I/O shell of the
+// terminal: PTY bridge processes, the xterm WebView and the test channel.
+// The protocol itself is src/terminalPage.ts.
 
 export interface TerminalPaneProps {
   cwd: Accessor<string>;
@@ -57,27 +91,42 @@ export interface TerminalEnvironment {
   ghostty: GhosttyConfig;
 }
 
+interface TermSize {
+  rows: number;
+  cols: number;
+}
+
+/** The test channel's plain-text copy of a tab's output (fed only once the channel is used). */
+interface TabMirror {
+  text: TextMirror;
+  utf8: Utf8Stream;
+  lines: Signal<string[]>;
+}
+
 interface TermTab {
   id: number;
   shell: Signal<ShellProfile>;
+  /** The title the program set (OSC 0/2), "" for none. */
+  programTitle: Signal<string>;
   title: Accessor<string>;
-  lines: Signal<string[]>;
-  current: Signal<string>;
-  input: Signal<string>;
-  running: Signal<boolean>;
+  /** What the page shows; replayed when the page becomes ready. */
+  history: OutputHistory;
+  mirror: TabMirror;
+  /** The size the page last measured for this tab. */
+  size: TermSize | null;
 }
 
 interface PtySession {
   child: ChildProcess;
-  escBuffer: string;
-  pending: string;
-  col: number;
   /** The directory the shell started in. */
   cwd: string;
-  /** Whether the user has sent the shell any input. */
+  /** Whether the user has sent the shell any input (typing, not terminal answers). */
   used: boolean;
   /** Holds input until the shell has drawn its first prompt. */
   gate: InputGate;
+  frames: LineSplitter;
+  /** The shell's exit code, from the bridge's `X` frame. */
+  exitCode: number | null;
 }
 
 /** Quiet time after the shell's first output that means its prompt is drawn. */
@@ -130,20 +179,13 @@ export function createInputGate(
 
 /**
  * A shell the user has not typed into yet follows the open folder: it
- * restarts in `cwd`. A shell the user has used, or one with a half-typed
- * command in its input (`draft`), keeps its directory, input and whatever
- * runs in it. DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
+ * restarts in `cwd`. A shell the user has typed into (even a half-typed
+ * command: every key reaches the shell at once) keeps its directory, input
+ * and whatever runs in it. DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
  */
-export function shouldFollowCwd(
-  session: { cwd: string; used: boolean } | undefined,
-  cwd: string,
-  draft = ""
-): boolean {
-  return !!session && !session.used && draft.trim() === "" && session.cwd !== cwd;
+export function shouldFollowCwd(session: { cwd: string; used: boolean } | undefined, cwd: string): boolean {
+  return !!session && !session.used && session.cwd !== cwd;
 }
-
-/** How many output lines one session keeps. */
-const MAX_LINES = 1000;
 
 const TERMINAL_APP_CANDIDATES: {
   id: string;
@@ -200,84 +242,6 @@ const SHELL_CANDIDATES = [
   "/bin/bash",
   "/bin/sh",
 ];
-
-/**
- * The PTY bridge: `pty.fork()` gives the shell a real terminal, configured
- * dynamically with the selected shell binary and terminal program environment.
- */
-// DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」
-const PY_PTY_SCRIPT = `
-import fcntl, os, pty, select, struct, sys, termios
-
-def main():
-    shell = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else (os.environ.get("SHELL") or "/bin/sh")
-    term_prog = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "Aed"
-    ghostty_res = sys.argv[3] if len(sys.argv) > 3 else ""
-    pid, master = pty.fork()
-    if pid == 0:
-        os.environ["TERM"] = "xterm-256color"
-        os.environ["COLORTERM"] = "truecolor"
-        os.environ["TERM_PROGRAM"] = term_prog
-        os.environ["DISABLE_AUTO_TITLE"] = "true"
-        os.environ["PROMPT_EOL_MARK"] = ""
-        if ghostty_res:
-            os.environ["GHOSTTY_RESOURCES_DIR"] = ghostty_res
-        os.execvp(shell, [shell, "-l"])
-        return
-    try:
-        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 140, 0, 0))
-    except OSError:
-        pass
-    stdin_fd = sys.stdin.fileno()
-    stdout_fd = sys.stdout.fileno()
-    while True:
-        try:
-            ready, _, _ = select.select([stdin_fd, master], [], [])
-        except (OSError, ValueError):
-            break
-        if master in ready:
-            try:
-                data = os.read(master, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            os.write(stdout_fd, data)
-        if stdin_fd in ready:
-            try:
-                data = os.read(stdin_fd, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            os.write(master, data)
-
-main()
-`;
-
-/** Non-CSI escapes: OSC, DCS, APC, charset designations, and 2-byte ESC sequences. */
-const NON_CSI_ESCAPES =
-  /\u001b[\]P^_k][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[()#%][0-9A-Za-z]|\u001b[^[\]P^_k()#%]/g;
-
-/** Matches either a CSI sequence `\x1b[...X` or a single non-ESC character. */
-const TERM_TOKEN_PATTERN =
-  /\u001b\[([0-9:;<=>?]*)([ -/]*[@-~])|([^\u001b])/g;
-
-/** Matches an unfinished escape sequence at the end of a PTY chunk. */
-const INCOMPLETE_ANSI_TAIL =
-  /\u001b(?:\][^\u0007\u001b]*|[P^_k][^\u0007\u001b]*|\[[0-9:;<=>?]*[ -/]*|[()#%]?)$/;
-
-/** Buffer any split escape tail on `session` and strip non-CSI escapes. */
-function extractProcessableChunk(session: PtySession, chunk: string): string {
-  const combined = session.escBuffer + chunk;
-  const tailMatch = INCOMPLETE_ANSI_TAIL.exec(combined);
-  if (tailMatch && combined.length - tailMatch.index < 512) {
-    session.escBuffer = tailMatch[0];
-    return combined.slice(0, tailMatch.index).replace(NON_CSI_ESCAPES, "");
-  }
-  session.escBuffer = "";
-  return combined.replace(NON_CSI_ESCAPES, "");
-}
 
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
@@ -411,228 +375,205 @@ export async function discoverTerminalEnvironment(): Promise<TerminalEnvironment
   return { externalApps, shells, ghostty };
 }
 
+/** Lines the test channel's mirror shows (the newest). */
+const MIRROR_ROWS = 14;
+
+/** What a tab's shell needs from the pane. */
+interface SessionDeps {
+  sessions: Map<number, PtySession>;
+  cwd: Accessor<string>;
+  app: Accessor<ExternalTerminalApp | undefined>;
+  /** The size a shell starts with when the page has not measured its tab yet. */
+  lastSize: () => TermSize;
+  /** New output for a tab, as base64 chunks. */
+  output: (tab: TermTab, chunks: string[]) => void;
+  /** A tab starts over: its screen, scrollback and title go. */
+  reset: (tab: TermTab) => void;
+}
+
+function createMirror(lines: Signal<string[]>): TabMirror {
+  return { text: createTextMirror(), utf8: createUtf8Stream(), lines };
+}
+
 function createTermTab(id: number, initialShell: ShellProfile): TermTab {
   const shell = signal<ShellProfile>(initialShell);
+  const programTitle = signal("");
   return {
     id,
     shell,
-    title: computed(() => `${id}: ${shell().name}`),
-    lines: signal<string[]>([]),
-    current: signal(""),
-    input: signal(""),
-    running: signal(false),
+    programTitle,
+    title: computed(() => `${id}: ${programTitle() || shell().name}`),
+    history: createOutputHistory(),
+    mirror: createMirror(signal<string[]>([])),
+    size: null,
   };
 }
 
-/** Append lines, keeping only the newest MAX_LINES. */
-function pushLines(tab: TermTab, lines: string[]): void {
-  if (lines.length === 0) return;
-  tab.lines.update((previous) => {
-    const next = previous.concat(lines);
-    return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
-  });
-}
-
-function putCharAt(buffer: string, col: number, ch: string): string {
-  if (col >= buffer.length) {
-    return buffer + " ".repeat(col - buffer.length) + ch;
-  }
-  return buffer.slice(0, col) + ch + buffer.slice(col + 1);
-}
-
-function applyCsiErase(
-  tab: TermTab,
-  state: { buffer: string; col: number },
-  params: string,
-  cmd: string
-): void {
-  if (cmd === "K" && (!params || params === "0")) {
-    state.buffer = state.buffer.slice(0, state.col);
-  } else if (cmd === "K" && params === "2") {
-    state.buffer = "";
-    state.col = 0;
-  } else if (cmd === "J" && (params === "2" || params === "3")) {
-    tab.lines.set([]);
-  }
-}
-
-function applyCsiCommand(
-  tab: TermTab,
-  state: { buffer: string; col: number },
-  params: string,
-  cmd: string
-): void {
-  const n = Number.parseInt(params, 10) || 1;
-  if (cmd === "D") state.col = Math.max(0, state.col - n);
-  else if (cmd === "C") state.col = Math.min(state.buffer.length, state.col + n);
-  else if (cmd === "G") state.col = Math.max(0, n - 1);
-  else applyCsiErase(tab, state, params, cmd);
-}
-
-function applyTerminalChar(
-  state: { buffer: string; col: number },
-  ch: string,
-  complete: string[]
-): void {
-  if (ch === "\r") state.col = 0;
-  else if (ch === "\n") {
-    complete.push(state.buffer);
-    state.buffer = "";
-    state.col = 0;
-  } else if (ch === "\b") {
-    state.col = Math.max(0, state.col - 1);
-  } else if (ch === "\t" || ch >= " ") {
-    state.buffer = putCharAt(state.buffer, state.col, ch);
-    state.col += 1;
-  }
-}
-
-/**
- * Turn a raw PTY chunk into lines, honouring CR, LF, backspace, and CSI
- * cursor/erase commands (`D`, `C`, `G`, `K`, `J`) used by zsh-syntax-highlighting.
- */
-function appendChunk(tab: TermTab, session: PtySession, text: string): void {
-  const state = { buffer: session.pending, col: session.col };
-  const complete: string[] = [];
-  const cleaned = extractProcessableChunk(session, text);
-  for (const match of cleaned.matchAll(TERM_TOKEN_PATTERN)) {
-    if (match[2] !== undefined) {
-      applyCsiCommand(tab, state, match[1] ?? "", match[2]);
-    } else if (match[3] !== undefined) {
-      applyTerminalChar(state, match[3], complete);
-    }
-  }
-  session.pending = state.buffer;
-  session.col = state.col;
-  tab.current.set(state.buffer);
-  pushLines(tab, complete);
-}
-
-/** Write to a shell's stdin; a shell that already exited (EPIPE) drops it. */
-function writeToChild(child: ChildProcess, text: string): void {
+/** Write a frame to a bridge; one that already exited (EPIPE) drops it. */
+function writeToChild(child: ChildProcess, frame: string): void {
   try {
-    child.write(text);
+    child.write(frame);
   } catch {
-    // The shell is gone; its exit line says so.
+    // The bridge is gone; its exit line says so.
   }
+}
+
+/** The bridge's stdout: output frames go to the tab, the exit frame is kept for the exit line. */
+function readBridge(tab: TermTab, session: PtySession, text: string, deps: SessionDeps): void {
+  if (deps.sessions.get(tab.id) !== session) return;
+  const chunks: string[] = [];
+  for (const line of session.frames.push(text)) {
+    const event = parseBridgeLine(line);
+    if (event?.kind === "output") chunks.push(event.data);
+    else if (event?.kind === "exit") session.exitCode = event.code;
+  }
+  if (chunks.length === 0) return;
+  session.gate.output();
+  deps.output(tab, chunks);
 }
 
 /**
  * A shell exited. A restarted tab (new folder or shell) already runs a new
  * session; the old shell's late exit must not end it.
  */
-function endSession(tab: TermTab, sessions: Map<number, PtySession>, session: PtySession): void {
-  if (sessions.get(tab.id) !== session) return;
-  tab.running.set(false);
-  sessions.delete(tab.id);
-  pushLines(tab, [`[${untracked(() => tab.title())}] session ended`]);
+function endSession(tab: TermTab, session: PtySession, code: number | null | undefined, deps: SessionDeps): void {
+  if (deps.sessions.get(tab.id) !== session) return;
+  deps.sessions.delete(tab.id);
+  const exit = session.exitCode ?? code;
+  const status = exit === null || exit === undefined ? "" : ` (exit ${exit})`;
+  deps.output(tab, [textChunk(`\r\n[${untracked(() => tab.title())}] session ended${status}\r\n`)]);
 }
 
-/** Start the PTY for a tab once; a failure shows as a line, not a crash. */
-function startPtySession(
-  tab: TermTab,
-  sessions: Map<number, PtySession>,
-  cwdAccessor: Accessor<string>,
-  primaryApp: Accessor<ExternalTerminalApp | undefined>
-): void {
-  if (sessions.has(tab.id)) return;
+/** Start the PTY for a tab once; a failure shows in the terminal, not as a crash. */
+function startSession(tab: TermTab, deps: SessionDeps): void {
+  if (deps.sessions.has(tab.id)) return;
+  const cwd = untracked(() => deps.cwd()) || os.homedir();
+  const app = untracked(() => deps.app());
+  const size = tab.size ?? deps.lastSize();
   try {
-    const cwd = untracked(() => cwdAccessor()) || os.homedir();
-    const app = untracked(() => primaryApp());
-    const termProgram = app?.termProgram || process.env.TERM_PROGRAM || "Aed";
-    const resourcesDir = app?.resourcesDir || "";
-    const shellPath = untracked(() => tab.shell().path);
     const child = process.spawn(
       "python3",
-      ["-u", "-c", PY_PTY_SCRIPT, shellPath, termProgram, resourcesDir],
-      {
-        cwd,
-        stdin: "pipe",
-      }
+      [
+        "-u",
+        "-c",
+        PTY_BRIDGE_PY,
+        untracked(() => tab.shell().path),
+        app?.termProgram || process.env.TERM_PROGRAM || "Aed",
+        app?.resourcesDir || "",
+        String(size.rows),
+        String(size.cols),
+      ],
+      { cwd, stdin: "pipe" }
     );
     const session: PtySession = {
       child,
-      escBuffer: "",
-      pending: "",
-      col: 0,
       cwd,
       used: false,
-      gate: createInputGate((text) => writeToChild(child, text)),
+      gate: createInputGate((frame) => writeToChild(child, frame)),
+      frames: createLineSplitter(),
+      exitCode: null,
     };
-    sessions.set(tab.id, session);
-    tab.running.set(true);
-    const onOutput = (text: string) => {
-      session.gate.output();
-      appendChunk(tab, session, text);
-    };
-    child.on("stdout", onOutput);
-    child.on("stderr", onOutput);
-    child.on("exit", () => endSession(tab, sessions, session));
+    deps.sessions.set(tab.id, session);
+    child.on("stdout", (text) => readBridge(tab, session, text, deps));
+    child.on("stderr", (text) => {
+      if (deps.sessions.get(tab.id) === session) deps.output(tab, [textChunk(text.replace(/\r?\n/g, "\r\n"))]);
+    });
+    child.on("exit", (result) => endSession(tab, session, result.code, deps));
   } catch (error) {
-    pushLines(tab, [`[error] ${String(error)}`]);
+    deps.output(tab, [textChunk(`[error] ${String(error)}\r\n`)]);
   }
 }
 
-function disposeSession(
-  id: number,
-  sessions: Map<number, PtySession>
-): void {
+function disposeSession(id: number, sessions: Map<number, PtySession>): void {
   const session = sessions.get(id);
   if (!session) return;
+  sessions.delete(id);
   try {
     session.child.kill();
   } catch {
-    // The shell already exited.
+    // The bridge already exited.
   }
   session.child.dispose();
-  sessions.delete(id);
 }
 
 function disposeAllSessions(sessions: Map<number, PtySession>): void {
-  for (const session of sessions.values()) {
-    try {
-      session.child.kill();
-    } catch {
-      // The shell already exited.
-    }
-  }
-  sessions.clear();
+  for (const id of [...sessions.keys()]) disposeSession(id, sessions);
 }
 
-function writeCommandToSession(
-  tab: TermTab | undefined,
-  sessions: Map<number, PtySession>,
-  text: string
-): void {
-  const session = tab ? sessions.get(tab.id) : undefined;
-  if (!tab || !session) return;
-  session.used = true;
-  session.gate.send(text.endsWith("\n") ? text : `${text}\n`);
-  tab.input.set("");
+/** Replace a tab's shell with a fresh one, on a clean screen. */
+function restartSession(tab: TermTab, deps: SessionDeps): void {
+  disposeSession(tab.id, deps.sessions);
+  deps.reset(tab);
+  startSession(tab, deps);
 }
 
-function removeTabAndSelectReplacement(
-  id: number,
-  tabs: Signal<TermTab[]>,
-  activeId: Signal<number>,
-  sessions: Map<number, PtySession>,
-  cwd: Accessor<string>,
-  shell: Accessor<ShellProfile>,
-  primaryApp: Accessor<ExternalTerminalApp | undefined>,
-  nextId: () => number
-): void {
-  disposeSession(id, sessions);
-  tabs.update((previous) => previous.filter((tab) => tab.id !== id));
-  if (activeId() !== id) return;
-  const remaining = tabs();
-  if (remaining.length > 0) {
-    activeId.set(remaining[remaining.length - 1].id);
+/**
+ * Keys from the page for a tab's shell. A key in a tab whose shell ended
+ * starts a new one. Terminal answers (`isTerminalReport`) go straight to the
+ * shell that asked, past the start-up gate, and do not make it "used".
+ */
+function sendInput(tab: TermTab, msg: { data: string; binary: boolean }, deps: SessionDeps): void {
+  const report = isTerminalReport(msg.data);
+  if (!report) startSession(tab, deps);
+  const session = deps.sessions.get(tab.id);
+  if (!session) return;
+  const frame = encodeInputFrame(msg.binary ? binaryStringBytes(msg.data) : msg.data);
+  if (report) {
+    writeToChild(session.child, frame);
     return;
   }
-  const replacement = createTermTab(nextId(), shell());
-  tabs.set([replacement]);
-  activeId.set(replacement.id);
-  startPtySession(replacement, sessions, cwd, primaryApp);
+  session.used = true;
+  session.gate.send(frame);
+}
+
+/** The page measured a tab: its shell gets the size (TIOCSWINSZ, then SIGWINCH). */
+function resizeSession(tab: TermTab, size: TermSize, deps: SessionDeps): void {
+  tab.size = size;
+  const frame = encodeResizeFrame(size.rows, size.cols);
+  const session = deps.sessions.get(tab.id);
+  if (frame && session) writeToChild(session.child, frame);
+}
+
+/**
+ * A new default shell (Preferences): tabs nobody has typed into take it,
+ * restarting if their old shell runs; used tabs keep theirs.
+ */
+function adoptShell(tabs: TermTab[], shell: ShellProfile, deps: SessionDeps): void {
+  for (const tab of tabs) {
+    const session = deps.sessions.get(tab.id);
+    if (session?.used || untracked(() => tab.shell().path) === shell.path) continue;
+    tab.shell.set(shell);
+    if (session) restartSession(tab, deps);
+  }
+}
+
+/** Restart every tab whose shell should follow the open folder (see `shouldFollowCwd`). */
+function followFolder(tabs: TermTab[], deps: SessionDeps): void {
+  const dir = untracked(() => deps.cwd()) || os.homedir();
+  for (const tab of tabs) {
+    if (shouldFollowCwd(deps.sessions.get(tab.id), dir)) restartSession(tab, deps);
+  }
+}
+
+type PageHandlers = {
+  [K in TerminalPageMessage["type"]]: (msg: Extract<TerminalPageMessage, { type: K }>) => void;
+};
+
+function routePageMessage(msg: TerminalPageMessage, handlers: PageHandlers): void {
+  (handlers[msg.type] as (m: TerminalPageMessage) => void)(msg);
+}
+
+function resolveShellByPath(
+  list: ShellProfile[],
+  targetPath: string | undefined,
+  fallback: ShellProfile
+): ShellProfile {
+  if (!targetPath) return list[0] || fallback;
+  const matched = list.find(
+    (s) => s.path === targetPath || s.name === targetPath
+  );
+  if (matched) return matched;
+  return { name: path.basename(targetPath) || "shell", path: targetPath };
 }
 
 function TermTabChip(props: {
@@ -687,82 +628,6 @@ function TermTabChip(props: {
   );
 }
 
-function setTabInput(tab: TermTab | undefined, value: string): void {
-  if (tab) tab.input.set(value);
-}
-
-function switchTabShell(
-  tab: TermTab,
-  nextShell: ShellProfile,
-  sessions: Map<number, PtySession>,
-  cwd: Accessor<string>,
-  primaryApp: Accessor<ExternalTerminalApp | undefined>,
-  startIfIdle: boolean
-): void {
-  const running = sessions.has(tab.id);
-  if (tab.shell().path === nextShell.path && running) return;
-  tab.shell.set(nextShell);
-  // `startIfIdle`: the user picked it, so run it now (also for a tab whose shell ended).
-  // Otherwise a shell that has not started yet starts later, with the new choice.
-  if (running || startIfIdle) restartSession(tab, sessions, cwd, primaryApp);
-}
-
-/** Start every tab's shell that is not running yet. */
-function startAllSessions(
-  tabs: TermTab[],
-  sessions: Map<number, PtySession>,
-  cwd: Accessor<string>,
-  primaryApp: Accessor<ExternalTerminalApp | undefined>
-): void {
-  for (const tab of tabs) startPtySession(tab, sessions, cwd, primaryApp);
-}
-
-/** Restart every tab whose shell should follow the open folder (see `shouldFollowCwd`). */
-function followFolder(
-  tabs: TermTab[],
-  sessions: Map<number, PtySession>,
-  cwd: Accessor<string>,
-  primaryApp: Accessor<ExternalTerminalApp | undefined>
-): void {
-  const dir = untracked(() => cwd()) || os.homedir();
-  for (const tab of tabs) {
-    const draft = untracked(() => tab.input());
-    if (shouldFollowCwd(sessions.get(tab.id), dir, draft)) restartSession(tab, sessions, cwd, primaryApp);
-  }
-}
-
-/** Replace a tab's shell process with a fresh one and clear its screen. */
-function restartSession(
-  tab: TermTab,
-  sessions: Map<number, PtySession>,
-  cwd: Accessor<string>,
-  primaryApp: Accessor<ExternalTerminalApp | undefined>
-): void {
-  disposeSession(tab.id, sessions);
-  tab.lines.set([]);
-  tab.current.set("");
-  tab.input.set("");
-  startPtySession(tab, sessions, cwd, primaryApp);
-}
-
-function resolveShellByPath(
-  list: ShellProfile[],
-  targetPath: string | undefined,
-  fallback: ShellProfile
-): ShellProfile {
-  if (!targetPath) return list[0] || fallback;
-  const matched = list.find(
-    (s) => s.path === targetPath || s.name === targetPath
-  );
-  if (matched) return matched;
-  return { name: path.basename(targetPath) || "shell", path: targetPath };
-}
-
-/**
- * A bottom-dock terminal: dynamically discovers local terminal apps (Ghostty,
- * iTerm2, Warp, kitty, WezTerm, Alacritty, Terminal) and installed shells,
- * applies local Ghostty font/theme settings, and spawns interactive PTY tabs.
- */
 function ShellSelectOptionRow(props: {
   value: string;
   title: string;
@@ -809,113 +674,205 @@ function ShellSelectOptionRow(props: {
   );
 }
 
+/**
+ * A bottom-dock terminal: one xterm per tab in one WebView, each on a PTY
+ * bridge process; discovers local terminal apps (Ghostty, iTerm2, Warp,
+ * kitty, WezTerm, Alacritty, Terminal) and installed shells, and applies
+ * local Ghostty font settings.
+ */
 export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   let counter = 1;
-  let inputRef: InputRef | null = null;
-  let scrollRef: ScrollRef | null = null;
-  const sessions = new Map<number, PtySession>();
   const nextId = () => ++counter;
+  const sessions = new Map<number, PtySession>();
+  let webView: WebViewRef | null = null;
+  let pageReady = false;
+  let lastSize: TermSize = { rows: DEFAULT_ROWS, cols: DEFAULT_COLS };
+  /** The page is mounted the first time the panel shows, then kept. */
+  const pageMounted = signal(false);
+  /** Whether the terminal has the keyboard (the page says so). */
+  const focused = signal(false);
+  /** The test channel is in use: the plain-text mirror is fed and shown. */
+  const mirrorOn = signal(false);
 
   const fallbackShell = defaultShellProfile();
   const shells = signal<ShellProfile[]>([fallbackShell]);
   const selectedShell = signal<ShellProfile>(
-    resolveShellByPath(
-      [fallbackShell],
-      untracked(() => props.shellPath?.()),
-      fallbackShell
-    )
+    resolveShellByPath([fallbackShell], untracked(() => props.shellPath?.()), fallbackShell)
   );
   const externalApps = signal<ExternalTerminalApp[]>([]);
   const ghosttyCfg = signal<GhosttyConfig>({});
-
   const primaryExternal = computed(() => externalApps()[0]);
 
-  const firstTab = createTermTab(
-    counter,
-    untracked(() => selectedShell())
-  );
+  const firstTab = createTermTab(counter, untracked(() => selectedShell()));
   const tabs = signal<TermTab[]>([firstTab]);
   const activeId = signal(firstTab.id);
+  const activeTab = computed(() => tabs().find((tab) => tab.id === activeId()) || firstTab);
+  const tabById = (id: number) => untracked(() => tabs()).find((tab) => tab.id === id);
 
-  const activeTab = computed(
-    () => tabs().find((tab) => tab.id === activeId()) || firstTab
-  );
-  const focusInput = () => inputRef?.focus();
+  const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
+  const termFont = computed(() => {
+    const cfg = ghosttyCfg();
+    const family = props.fontFamily?.() || cfg.fontFamily || undefined;
+    const size = props.fontSize?.() ?? (cfg.fontSize ? Math.round(cfg.fontSize) : 12);
+    return { fontFamily: family, fontSize: size };
+  });
+  const termOptions = computed(() => buildTerminalOptions(activeTheme(), termFont()));
+  /** Built once: a new `html` value would reload the page. */
+  const shellHtml = buildTerminalShellHtml(untracked(() => activeTheme().ui.background));
 
-  const applyShellSelection = (shell: ShellProfile, notifyParent: boolean) => {
-    selectedShell.set(shell);
-    if (notifyParent) props.onShellChange?.(shell.path);
-    const tab = untracked(() => activeTab());
-    switchTabShell(tab, shell, sessions, props.cwd, primaryExternal, notifyParent);
-    focusInput();
+  const inject = (js: string) => {
+    if (pageReady) webView?.injectJavaScript(js);
   };
+  const feedMirror = (tab: TermTab, chunks: string[]) => {
+    const { text, utf8, lines } = tab.mirror;
+    for (const chunk of chunks) text.push(utf8.push(decodeBase64(chunk)));
+    lines.set([...text.lines(), text.current()]);
+  };
+  const deps: SessionDeps = {
+    sessions,
+    cwd: props.cwd,
+    app: primaryExternal,
+    lastSize: () => lastSize,
+    output: (tab, chunks) => {
+      for (const chunk of chunks) tab.history.push(chunk);
+      if (untracked(() => mirrorOn())) feedMirror(tab, chunks);
+      inject(pageCall("write", tab.id, chunks));
+    },
+    reset: (tab) => {
+      tab.history.clear();
+      tab.mirror = createMirror(tab.mirror.lines);
+      tab.mirror.lines.set([]);
+      tab.programTitle.set("");
+      inject(pageCall("reset", tab.id));
+    },
+  };
+
+  const focusTerminal = () => {
+    webView?.focus();
+    inject(pageCall("focus"));
+  };
+  const clearActive = () => {
+    const tab = untracked(() => activeTab());
+    tab.mirror = createMirror(tab.mirror.lines);
+    tab.mirror.lines.set([]);
+    inject(pageCall("clear", tab.id));
+  };
+
+  const addTab = (shell: ShellProfile) => {
+    const tab = createTermTab(nextId(), shell);
+    tabs.update((previous) => previous.concat([tab]));
+    activeId.set(tab.id);
+    startSession(tab, deps);
+    focusTerminal();
+  };
+
+  const closeTab = (id: number) => {
+    disposeSession(id, sessions);
+    inject(pageCall("close", id));
+    const remaining = untracked(() => tabs()).filter((tab) => tab.id !== id);
+    tabs.set(remaining);
+    if (untracked(() => activeId()) !== id) return;
+    if (remaining.length > 0) {
+      activeId.set(remaining[remaining.length - 1].id);
+      focusTerminal();
+      return;
+    }
+    // The last tab closed: a new one opens at once.
+    addTab(untracked(() => selectedShell()));
+  };
+
+  /**
+   * The user picked a shell in the dropdown: it becomes the default for new
+   * tabs; the active tab switches to it unless someone typed into it, then
+   * the shell opens in a new tab instead (a used session is never killed).
+   */
+  const pickShell = (shell: ShellProfile) => {
+    selectedShell.set(shell);
+    props.onShellChange?.(shell.path);
+    const tab = untracked(() => activeTab());
+    if (sessions.get(tab.id)?.used) {
+      addTab(shell);
+      return;
+    }
+    tab.shell.set(shell);
+    restartSession(tab, deps);
+    focusTerminal();
+  };
+
+  const handlers: PageHandlers = {
+    ready: () => {
+      pageReady = true;
+      inject(pageCall("configure", untracked(() => termOptions())));
+      for (const tab of untracked(() => tabs())) inject(pageCall("write", tab.id, tab.history.chunks()));
+      inject(pageCall("select", untracked(() => activeId())));
+      if (untracked(() => props.visible())) focusTerminal();
+    },
+    input: (msg) => {
+      const tab = tabById(msg.tab);
+      if (tab) sendInput(tab, msg, deps);
+    },
+    resize: (msg) => {
+      const tab = tabById(msg.tab);
+      if (!tab) return;
+      lastSize = { rows: msg.rows, cols: msg.cols };
+      resizeSession(tab, lastSize, deps);
+    },
+    title: (msg) => tabById(msg.tab)?.programTitle.set(msg.title),
+    link: (msg) => void openUrl(msg.url),
+    focus: (msg) => focused.set(msg.focused),
+  };
+  const onPageMessage = (raw: string) => {
+    const msg = parseTerminalPageMessage(raw);
+    if (msg) routePageMessage(msg, handlers);
+  };
+
+  // Test channel; the packaged app's host never sends it. `aed.terminal.page`
+  // delivers a page message as if the page posted it (`tab` defaults to the
+  // active tab; headless tests run no page JS, DESIGN.md trap #10) and turns
+  // on the plain-text mirror (`id:terminal-mirror`) that tests read.
+  host.on("aed.terminal.page", (data) => {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
+    if (!untracked(() => mirrorOn())) {
+      mirrorOn.set(true);
+      for (const tab of untracked(() => tabs())) feedMirror(tab, tab.history.chunks());
+    }
+    onPageMessage(JSON.stringify({ tab: untracked(() => activeId()), ...data }));
+  });
 
   effect(() => {
     discoverTerminalEnvironment().then((env) => {
       if (env.shells.length > 0) {
         shells.set(env.shells);
         const pref = untracked(() => props.shellPath?.());
-        const resolved = resolveShellByPath(env.shells, pref, fallbackShell);
-        selectedShell.set(resolved);
+        selectedShell.set(resolveShellByPath(env.shells, pref, fallbackShell));
       }
       if (env.externalApps.length > 0) externalApps.set(env.externalApps);
       ghosttyCfg.set(env.ghostty);
     });
   });
 
+  // A new default shell from Preferences: unused tabs take it.
   effect(() => {
     const extPath = props.shellPath?.();
     if (!extPath) return;
-    const resolved = resolveShellByPath(
-      untracked(() => shells()),
-      extPath,
-      fallbackShell
-    );
-    if (untracked(() => activeTab().shell().path) !== resolved.path) {
-      // Outside this effect's run: a shell spawned inside it ends when the effect runs again.
-      setTimeout(() => applyShellSelection(resolved, false), 0);
+    const resolved = resolveShellByPath(untracked(() => shells()), extPath, fallbackShell);
+    selectedShell.set(resolved);
+    // Outside this effect's run: a shell spawned inside it ends when the effect runs again.
+    setTimeout(() => adoptShell(untracked(() => tabs()), resolved, deps), 0);
+  });
+
+  // Shells start the first time the panel shows (no hidden login shell at
+  // launch), outside the effect's run (DESIGN.md trap #8).
+  effect(() => {
+    if (!props.visible()) {
+      focused.set(false);
+      return;
     }
-  });
-
-  const sendCommand = (text: string) => {
-    // A command for a tab with no shell (it ended, or has not started yet) starts one.
-    startPtySession(activeTab(), sessions, props.cwd, primaryExternal);
-    writeCommandToSession(activeTab(), sessions, text);
-    focusInput();
-  };
-
-  const addTab = () => {
-    const tab = createTermTab(nextId(), selectedShell());
-    tabs.update((previous) => previous.concat([tab]));
-    activeId.set(tab.id);
-    startPtySession(tab, sessions, props.cwd, primaryExternal);
-    focusInput();
-  };
-
-  const closeTab = (id: number) => {
-    removeTabAndSelectReplacement(
-      id,
-      tabs,
-      activeId,
-      sessions,
-      props.cwd,
-      selectedShell,
-      primaryExternal,
-      nextId
-    );
-    focusInput();
-  };
-
-  effect(() => {
-    void activeId();
-    focusInput();
-  });
-
-  // Shells start the first time the panel shows (no hidden login shell at launch),
-  // outside the effect's run (a shell spawned inside it ends when the effect runs again).
-  effect(() => {
-    if (!props.visible()) return;
-    setTimeout(() => startAllSessions(untracked(() => tabs()), sessions, props.cwd, primaryExternal), 0);
+    pageMounted.set(true);
+    setTimeout(() => {
+      for (const tab of untracked(() => tabs())) startSession(tab, deps);
+      focusTerminal();
+    }, 0);
   });
   effect(() => {
     cleanup(() => disposeAllSessions(sessions));
@@ -923,33 +880,26 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
 
   effect(() => {
     void props.cwd();
-    // Spawn outside this effect's run: a shell started inside it would end when the effect runs again.
-    setTimeout(() => followFolder(untracked(() => tabs()), sessions, props.cwd, primaryExternal), 0);
+    setTimeout(() => followFolder(untracked(() => tabs()), deps), 0);
   });
 
   effect(() => {
-    void activeTab().lines();
-    void activeTab().current();
-    scrollRef?.scrollTo({ y: 999999, animated: false });
+    inject(pageCall("select", activeId()));
+  });
+  effect(() => {
+    inject(pageCall("configure", termOptions()));
+  });
+
+  // While the terminal has the keyboard its bindings are the newest, so they
+  // win: ⌘K clears it (not Quick Open), ⌘F opens no editor find bar.
+  effect(() => {
+    if (!focused()) return;
+    cleanup(keymap.bind({ "mod+k": clearActive, "mod+f": () => undefined }));
   });
 
   const shellItems = computed<SelectItem[]>(() =>
-    shells().map((s) => ({
-      value: s.path,
-      title: s.name,
-      subtitle: s.path,
-    }))
+    shells().map((s) => ({ value: s.path, title: s.name, subtitle: s.path }))
   );
-
-  const termFontStyle = computed(() => {
-    const cfg = ghosttyCfg();
-    const family = props.fontFamily?.() || cfg.fontFamily || undefined;
-    const size =
-      props.fontSize?.() ?? (cfg.fontSize ? Math.round(cfg.fontSize) : 12);
-    return { fontFamily: family, fontSize: size };
-  });
-
-  const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
 
   return (
     <View
@@ -972,7 +922,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
                     theme={activeTheme}
                     onSelect={(id) => {
                       activeId.set(id);
-                      focusInput();
+                      focusTerminal();
                     }}
                     onClose={closeTab}
                   />
@@ -982,15 +932,11 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
           </Scroll>
           <Button
             testID="terminal-add-btn"
-            onPress={addTab}
+            onPress={() => addTab(selectedShell())}
             accessibilityLabel="New terminal tab"
             class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0 shrink-0"
           >
-            <Icon
-              name="plus"
-              size={12}
-              tint={() => activeTheme().ui.mutedForeground}
-            />
+            <Icon name="plus" size={12} tint={() => activeTheme().ui.mutedForeground} />
           </Button>
         </View>
 
@@ -1002,31 +948,17 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
             placement="top"
             align="end"
             offset={6}
-            onChange={({ value }) => {
-              const next = resolveShellByPath(
-                shells(),
-                value ?? undefined,
-                fallbackShell
-              );
-              applyShellSelection(next, true);
-            }}
+            onChange={({ value }) => pickShell(resolveShellByPath(shells(), value ?? undefined, fallbackShell))}
             trigger={
               <View
                 testID="terminal-shell-trigger"
                 style={{ backgroundColor: activeTheme().ui.background }}
                 class="h-6 px-2 flex-row items-center gap-1.5 rounded"
               >
-                <Text
-                  style={{ color: activeTheme().ui.foreground }}
-                  class="text-[11px] font-mono"
-                >
+                <Text style={{ color: activeTheme().ui.foreground }} class="text-[11px] font-mono">
                   {activeTab().shell().name}
                 </Text>
-                <Icon
-                  name="chevron-down"
-                  size={10}
-                  tint={() => activeTheme().ui.mutedForeground}
-                />
+                <Icon name="chevron-down" size={10} tint={() => activeTheme().ui.mutedForeground} />
               </View>
             }
             popupClass="w-56 rounded-lg shadow-2xl p-1"
@@ -1044,73 +976,36 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
         </View>
       </View>
 
-      <View
-        style={{ backgroundColor: activeTheme().ui.background }}
-        class="flex-1"
-        onPress={focusInput}
-      >
-        <Scroll
-          ref={(r) => {
-            scrollRef = r;
-          }}
-          keyboardShouldPersistTaps="always"
-          style={{ backgroundColor: activeTheme().ui.background }}
-          class="flex-1"
-          contentClass="p-3"
-        >
-          <View class="flex-col" onPress={focusInput}>
-            <Each of={activeTab().lines()} key="index">
+      <View style={{ backgroundColor: activeTheme().ui.background }} class="flex-1">
+        <If when={pageMounted()}>
+          <WebView
+            ref={(r) => {
+              webView = r;
+            }}
+            testID="terminal-view"
+            html={shellHtml}
+            class="flex-1"
+            onLoad={() => {
+              // A (re)loaded page knows nothing: runtime first, then its `ready` replays the tabs.
+              pageReady = false;
+              webView?.injectJavaScript(XTERM_RUNTIME_JS);
+            }}
+            onMessage={({ data }) => onPageMessage(data)}
+            onBlur={() => focused.set(false)}
+          />
+        </If>
+        <If when={mirrorOn()}>
+          <View testID="terminal-mirror" class="absolute inset-0 flex-col overflow-hidden">
+            {/* The newest lines, one row each, so all of them stay on screen for `app.texts()`. */}
+            <Each of={activeTab().mirror.lines().slice(-MIRROR_ROWS)} key="index">
               {(line) => (
-                <Text
-                  class="select-text font-mono text-xs leading-relaxed"
-                  style={{
-                    ...termFontStyle(),
-                    color: activeTheme().ui.foreground,
-                  }}
-                >
+                <Text style={{ color: activeTheme().ui.foreground }} class="font-mono text-[8px] leading-none line-clamp-1">
                   {line()}
                 </Text>
               )}
             </Each>
-            <View
-              class="flex-row items-center min-h-[20px] gap-2"
-              onPress={focusInput}
-            >
-              <Text
-                class="font-mono text-xs leading-relaxed shrink-0"
-                style={{
-                  ...termFontStyle(),
-                  color: activeTheme().ui.foreground,
-                }}
-              >
-                {activeTab().current().trimEnd()}
-              </Text>
-              <Input
-                testID="terminal-input"
-                ref={(r) => {
-                  inputRef = r;
-                  r?.focus();
-                }}
-                autoFocus
-                caret
-                autoCapitalize="none"
-                autoCorrect={false}
-                style={{
-                  height: 20,
-                  paddingHorizontal: 0,
-                  paddingVertical: 0,
-                  color: activeTheme().ui.foreground,
-                  ...termFontStyle(),
-                }}
-                class="flex-1 h-5 font-mono text-xs bg-transparent border-none outline-none p-0 m-0"
-                value={activeTab().input()}
-                onChange={({ value }) => setTabInput(activeTab(), value)}
-                onSubmit={({ text }) => sendCommand(text)}
-                submitBehavior="submit"
-              />
-            </View>
           </View>
-        </Scroll>
+        </If>
       </View>
     </View>
   );

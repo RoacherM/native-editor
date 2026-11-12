@@ -56,11 +56,32 @@ if (
     };
   }
 
+  // The host gives ⌘K / ⌘F to the terminal only while it has the keyboard:
+  // the page's own focus counts only while the web view itself has it
+  // (document.hasFocus()), not a textarea focused in a background view.
   function watchFocus(term) {
     const ta = term.textarea;
     if (!ta) return;
-    ta.addEventListener("focus", () => post({ type: "focus", focused: true }));
+    ta.addEventListener("focus", () => post({ type: "focus", focused: document.hasFocus() }));
     ta.addEventListener("blur", () => post({ type: "focus", focused: false }));
+  }
+
+  function isTerminalTextarea(el) {
+    for (const tab of tabs.values()) if (tab.term.textarea === el) return true;
+    return false;
+  }
+
+  // A paste arrives as one onData string: post it in pieces the host's
+  // message limit takes, never between the halves of a surrogate pair.
+  const INPUT_PIECE = 32768;
+  function postInput(id, data, binary) {
+    for (let i = 0; i < data.length; ) {
+      let end = Math.min(data.length, i + INPUT_PIECE);
+      const last = data.charCodeAt(end - 1);
+      if (end < data.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+      post(binary ? { type: "input", tab: id, data: data.slice(i, end), binary: true } : { type: "input", tab: id, data: data.slice(i, end) });
+      i = end;
+    }
   }
 
   function ensure(id) {
@@ -91,8 +112,8 @@ if (
     term.unicode.activeVersion = "11";
     term.attachCustomKeyEventHandler(keyHandler(term));
     term.open(el);
-    term.onData((data) => post({ type: "input", tab: id, data }));
-    term.onBinary((data) => post({ type: "input", tab: id, data, binary: true }));
+    term.onData((data) => postInput(id, data, false));
+    term.onBinary((data) => postInput(id, data, true));
     term.onTitleChange((title) => post({ type: "title", tab: id, title }));
     watchFocus(term);
     const tab = { term, fit, el, cols: 0, rows: 0 };
@@ -135,7 +156,6 @@ if (
       tab.el.style.display = tid === id ? "block" : "none";
     }
     fitTab(id);
-    focus();
   }
 
   function write(id, chunks) {
@@ -168,6 +188,9 @@ if (
 
   new ResizeObserver(() => fitTab(activeId)).observe(root());
   window.addEventListener("blur", () => post({ type: "focus", focused: false }));
+  window.addEventListener("focus", () => {
+    if (isTerminalTextarea(document.activeElement)) post({ type: "focus", focused: true });
+  });
 
   window.__aedTerm = { configure, select, write, clear, reset, close, focus };
   post({ type: "ready" });

@@ -50,6 +50,28 @@ import { buildMermaidConfig } from "./src/mermaid";
 import { MARKDOWN_RUNTIME_JS } from "./src/markdownVendor.generated";
 import { XTERM_BUILD_ID, XTERM_CSS, XTERM_RUNTIME_JS } from "./src/xtermVendor.generated";
 import xtermBuild from "./vendor/xterm/dist/build.json";
+import {
+  ANSI_NAMES,
+  ANSI_PALETTES,
+  binaryStringBytes,
+  buildTerminalOptions,
+  buildTerminalShellHtml,
+  buildXtermTheme,
+  createLineSplitter,
+  createOutputHistory,
+  createTextMirror,
+  createUtf8Stream,
+  cssFontStack,
+  decodeBase64,
+  encodeInputFrame,
+  encodeResizeFrame,
+  isTerminalReport,
+  pageCall,
+  parseBridgeLine,
+  parseTerminalPageMessage,
+  TERMINAL_CSP,
+  textChunk,
+} from "./src/terminalPage";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -410,8 +432,6 @@ describe("window session state machine (src/session.ts)", () => {
   });
 
   test("only a terminal the user has not typed into follows the open folder", () => {
-    expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur", "ls -la")).toBe(false);
-    expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur", "  ")).toBe(true);
     expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur")).toBe(true);
     expect(shouldFollowCwd({ cwd: "/home", used: true }, "/w/cur")).toBe(false);
     expect(shouldFollowCwd({ cwd: "/w/cur", used: false }, "/w/cur")).toBe(false);
@@ -428,13 +448,24 @@ type TestApp = Awaited<ReturnType<typeof open>>;
 const SCRATCH_RUN = `/tmp/aed-e2e-disk-${Date.now().toString(36)}`;
 let scratchCount = 0;
 
+/**
+ * A terminal page message, as the xterm page would post it (headless tests run no
+ * page JS): `aed.terminal.page`, the terminal's test channel. `tab` defaults to the
+ * active tab; the first message turns on the plain-text mirror `app.texts()` reads.
+ */
+async function termPage(app: TestApp, message: Record<string, unknown>): Promise<void> {
+  await app.host.send("aed.terminal.page", message);
+}
+
+/** Keys typed into the active terminal tab (`\r` is Enter). */
+const termType = (app: TestApp, data: string) => termPage(app, { type: "input", data });
+
 async function runInTerminal(app: TestApp, cmd: string, marker: string): Promise<void> {
   if (!app.shows("id:terminal-pane")) {
     await app.press("id:titlebar-toggle-terminal");
     await app.waitFor("id:terminal-pane");
   }
-  await app.type("id:terminal-input", `${cmd} && echo ${marker}`);
-  await app.submit("id:terminal-input");
+  await termType(app, `${cmd} && echo ${marker}\r`);
   await app.waitUntil(
     () => app.texts().some((t) => t.includes(marker) && !t.includes("echo")),
     { timeout: 8000 }
@@ -703,8 +734,9 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.waitFor("id:terminal-pane");
     expect(app.shows("id:terminal-shell-select")).toBe(true);
     expect(app.shows("id:terminal-external-btn")).toBe(false);
-    await app.type("id:terminal-input", "echo NSH_PTY_OK_2026");
-    await app.keyboard.press("enter");
+    expect(app.shows("id:terminal-view")).toBe(true);
+    expect(app.shows("id:terminal-input")).toBe(false);
+    await termType(app, "echo NSH_PTY_OK_2026\r");
     await app.waitUntil(
       () => app.texts().some((t) => t.includes("NSH_PTY_OK_2026")),
       { timeout: 8000 }
@@ -956,8 +988,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
     await app.press("id:titlebar-toggle-terminal");
     await app.waitFor("id:terminal-pane");
-    await app.type("id:terminal-input", "echo FIRST_CMD_RAN");
-    await app.submit("id:terminal-input");
+    await termType(app, "echo FIRST_CMD_RAN\r");
     await app.waitUntil(() => showsText(app, "FIRST_CMD_RAN"), { timeout: 8000 });
   });
 
@@ -966,9 +997,9 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("id:titlebar-toggle-terminal");
     await app.waitFor("id:terminal-pane");
     await runInTerminal(app, "true", "SHELL_UP");
-    await app.type("id:terminal-input", "exit");
-    await app.submit("id:terminal-input");
-    await app.waitUntil(() => app.texts().some((t) => t.endsWith("session ended")), { timeout: 8000 });
+    await termType(app, "exit\r");
+    // The bridge's exit frame carries the shell's code.
+    await app.waitUntil(() => app.texts().some((t) => t.endsWith("session ended (exit 0)")), { timeout: 8000 });
     await runInTerminal(app, "true", "SHELL_BACK");
   });
 
@@ -976,12 +1007,12 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
     await app.press("id:titlebar-toggle-terminal");
     await app.waitFor("id:terminal-pane");
-    await app.type("id:terminal-input", "echo DRAFT_KEPT");
+    // Keys go to the shell at once: a half-typed command is in its line editor.
+    await termType(app, "echo DRAFT_KEPT");
     await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
     await app.waitFor("id:workspace-tree");
     await new Promise((resolve) => setTimeout(resolve, 300));
-    // The input values are not in texts(): submit the kept draft and read its output.
-    await app.submit("id:terminal-input");
+    await termType(app, "\r");
     await app.waitUntil(() => showsText(app, "DRAFT_KEPT"), { timeout: 8000 });
     await runInTerminal(app, "pwd", "PWD_DONE");
     expect(showsText(app, FIXTURE_ROOT)).toBe(false);
@@ -1361,5 +1392,254 @@ describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
     expect(XTERM_RUNTIME_JS).toContain(`AedXterm={buildId:"${XTERM_BUILD_ID}"}`);
     expect(XTERM_RUNTIME_JS).toContain("__aedTerm");
     expect(XTERM_CSS).toContain(".xterm");
+  });
+
+  test("input and resize frames encode text, binary and sizes", () => {
+    const utf8 = (s: string) => Array.from(new TextEncoder().encode(s));
+    const frameBytes = (f: string) => Array.from(decodeBase64(f.slice(1, -1)));
+    const ls = encodeInputFrame("ls\r");
+    expect(ls.startsWith("D")).toBe(true);
+    expect(ls.endsWith("\n")).toBe(true);
+    expect(frameBytes(ls)).toEqual(utf8("ls\r"));
+    expect(frameBytes(encodeInputFrame("echo 中文 😀\r"))).toEqual(utf8("echo 中文 😀\r"));
+    // xterm's onBinary gives one char per byte (old mouse reports above 127).
+    expect(frameBytes(encodeInputFrame(binaryStringBytes("\u001b[M\u00a0!!")))).toEqual([27, 91, 77, 160, 33, 33]);
+    expect(frameBytes(encodeInputFrame(new Uint8Array([0xe4, 0xb8])))).toEqual([0xe4, 0xb8]);
+    expect(encodeResizeFrame(40, 120)).toBe("R40 120\n");
+    for (const [rows, cols] of [[0, 80], [24, 0], [1.5, 80], [501, 80], [24, 1001], [Number.NaN, 80]]) {
+      expect(encodeResizeFrame(rows, cols)).toBeNull();
+    }
+  });
+
+  test("the bridge's stdout splits into whole line frames, at any chunk boundary", () => {
+    const stream = "OaGk=\nOd29ybGQ=\nX0\n";
+    for (let cut = 0; cut <= stream.length; cut += 1) {
+      const split = createLineSplitter();
+      const lines = [...split.push(stream.slice(0, cut)), ...split.push(stream.slice(cut))];
+      expect(lines).toEqual(["OaGk=", "Od29ybGQ=", "X0"]);
+    }
+    expect(Array.from(decodeBase64(textChunk("中\r\n")))).toEqual(Array.from(new TextEncoder().encode("中\r\n")));
+  });
+
+  test("bridge output lines decode to output and exit events; anything else is ignored", () => {
+    expect(parseBridgeLine("OaGk=")).toEqual({ kind: "output", data: "aGk=" });
+    expect(parseBridgeLine("O")).toEqual({ kind: "output", data: "" });
+    expect(parseBridgeLine("X0")).toEqual({ kind: "exit", code: 0 });
+    expect(parseBridgeLine("X130")).toEqual({ kind: "exit", code: 130 });
+    for (const bad of ["", "Ohello!", "OaGk", "Xabc", "X", "Traceback (most recent call last):", "D aGk="]) {
+      expect(parseBridgeLine(bad)).toBeNull();
+    }
+  });
+
+  test("UTF-8 split across frames decodes whole, at every cut", () => {
+    const text = "a中文é😀z";
+    const bytes = new TextEncoder().encode(text);
+    for (let i = 0; i <= bytes.length; i += 1) {
+      for (let j = i; j <= bytes.length; j += 1) {
+        const stream = createUtf8Stream();
+        const out = stream.push(bytes.slice(0, i)) + stream.push(bytes.slice(i, j)) + stream.push(bytes.slice(j));
+        expect(out).toBe(text);
+      }
+    }
+    // A broken byte becomes U+FFFD and does not hold back what follows.
+    const stream = createUtf8Stream();
+    expect(stream.push(new Uint8Array([0xff, 0x41]))).toBe("\ufffdA");
+  });
+
+  test("terminal answers to the program are not the user typing", () => {
+    for (const report of ["\u001b[?1;2c", "\u001b[>0;276;0c", "\u001b[12;40R", "\u001b[0n", "\u001b[I", "\u001b[O",
+      "\u001b]11;rgb:0000/0000/0000\u001b\\", "\u001b]10;rgb:ffff/ffff/ffff\u0007", "\u001b[?2004;1$y"]) {
+      expect(isTerminalReport(report)).toBe(true);
+    }
+    for (const typed of ["ls\r", "\u001b[A", "\u0003", "\t", "\u001b", "q", "\u001b[200~paste\u001b[201~"]) {
+      expect(isTerminalReport(typed)).toBe(false);
+    }
+  });
+
+  test("the replay history drops the oldest output past its cap and keeps the newest chunk", () => {
+    const history = createOutputHistory(10);
+    history.push("aaaa");
+    history.push("bbbb");
+    expect(history.chunks()).toEqual(["aaaa", "bbbb"]);
+    history.push("cccc");
+    expect(history.chunks()).toEqual(["bbbb", "cccc"]);
+    history.push("x".repeat(30));
+    expect(history.chunks()).toEqual(["x".repeat(30)]);
+    history.clear();
+    expect(history.chunks()).toEqual([]);
+  });
+
+  test("the text mirror removes ANSI and follows CR, backspace and line erases", () => {
+    const mirror = createTextMirror(3);
+    mirror.push("\u001b[1;31mred\u001b[0m\r\nabc\rX\r\n");
+    expect(mirror.lines()).toEqual(["red", "Xbc"]);
+    mirror.push("\u001b]0;title\u0007typo\b\bpe\r\n");
+    expect(mirror.lines()).toEqual(["red", "Xbc", "type"]);
+    // An escape cut between two chunks is held, not printed.
+    mirror.push("\u001b[3");
+    mirror.push("2mgreen\u001b[K tail\u001b[5D\u001b[K\r\n");
+    expect(mirror.lines()).toEqual(["Xbc", "type", "green"]);
+    mirror.push("half");
+    expect(mirror.current()).toBe("half");
+    mirror.push("\u001b[2J");
+    expect(mirror.lines()).toEqual([]);
+    mirror.clear();
+    expect(mirror.current()).toBe("");
+  });
+
+  test("page messages are validated strictly", () => {
+    const parse = (m: unknown) => parseTerminalPageMessage(JSON.stringify(m));
+    expect(parse({ type: "ready" })).toEqual({ type: "ready" });
+    expect(parse({ type: "input", tab: 2, data: "ls\r" })).toEqual({ type: "input", tab: 2, data: "ls\r", binary: false });
+    expect(parse({ type: "input", tab: 2, data: "\u00a0", binary: true })).toEqual({ type: "input", tab: 2, data: "\u00a0", binary: true });
+    expect(parse({ type: "resize", tab: 1, rows: 30, cols: 100 })).toEqual({ type: "resize", tab: 1, rows: 30, cols: 100 });
+    expect(parse({ type: "title", tab: 1, title: " vim\u0007 a.txt " })).toEqual({ type: "title", tab: 1, title: "vim a.txt" });
+    expect((parse({ type: "title", tab: 1, title: "t".repeat(500) }) as { title: string }).title.length).toBe(200);
+    expect(parse({ type: "link", url: "https://example.com/a?b=1" })).toEqual({ type: "link", url: "https://example.com/a?b=1" });
+    expect(parse({ type: "focus", focused: true })).toEqual({ type: "focus", focused: true });
+    const bad: unknown[] = [
+      { type: "input", tab: 0, data: "x" }, { type: "input", tab: "1", data: "x" }, { type: "input", tab: 1.5, data: "x" },
+      { type: "input", tab: 1, data: 7 }, { type: "input", tab: 1, data: "x".repeat(192 * 1024 + 1) },
+      { type: "resize", tab: 1, rows: 0, cols: 80 }, { type: "resize", tab: 1, rows: 24, cols: 5000 },
+      { type: "resize", tab: 1, rows: "24", cols: 80 }, { type: "title", tab: 1 },
+      { type: "link", url: "javascript:alert(1)" }, { type: "link", url: "file:///etc/passwd" },
+      { type: "focus", focused: "yes" }, { type: "constructor" }, { type: "__proto__" }, { type: "toString" },
+      { type: "eval" }, null, [], "ready", 3,
+    ];
+    for (const m of bad) expect(parse(m)).toBeNull();
+    expect(parseTerminalPageMessage("{not json")).toBeNull();
+  });
+
+  test("the terminal shell page has a strict CSP, xterm's CSS and no script", () => {
+    const html = buildTerminalShellHtml("#161514");
+    expect(html).toContain(`content="${TERMINAL_CSP}"`);
+    expect(TERMINAL_CSP).toContain("script-src 'none'");
+    expect(TERMINAL_CSP).toContain("connect-src 'none'");
+    expect(html).not.toContain("<script");
+    expect(html).toContain(XTERM_CSS);
+    expect(html).toContain('id="aed-term-root"');
+    expect(html).toContain("background:#161514");
+    expect(buildTerminalShellHtml("red;}</style><script>")).toContain("background:#000000");
+    expect(pageCall("write", 2, ["QQ=="])).toBe('window.__aedTerm&&window.__aedTerm.write(2,["QQ=="]);');
+    expect(pageCall("focus")).toBe("window.__aedTerm&&window.__aedTerm.focus();");
+  });
+
+  test("every theme maps to an xterm theme whose 16 ANSI colours read on its background", () => {
+    const luminance = (hex: string) => {
+      const [r, g, b] = [1, 3, 5].map((i) => {
+        const c = Number.parseInt(hex.slice(i, i + 2), 16) / 255;
+        return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const contrast = (a: string, b: string) => {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    for (const theme of EDITOR_THEMES) {
+      expect(ANSI_PALETTES[theme.id]).toBeDefined();
+      const x = buildXtermTheme(theme);
+      expect(x.background).toBe(theme.ui.background);
+      expect(x.foreground).toBe(theme.ui.foreground);
+      expect(x.cursor).toBe(theme.ui.accent);
+      expect(x.selectionBackground).toBe(theme.ui.selection);
+      expect(contrast(x.foreground, x.background)).toBeGreaterThanOrEqual(4.5);
+      for (const name of ANSI_NAMES) {
+        expect(x[name]).toMatch(/^#[0-9a-f]{6}$/);
+        // Black is the background colour of dark themes; everything else is text.
+        if (name === "black" && theme.appearance === "dark") continue;
+        expect(contrast(x[name], x.background)).toBeGreaterThanOrEqual(3);
+      }
+    }
+    // A theme without a palette of its own takes its syntax colours.
+    const custom = { ...EDITOR_THEMES[1], id: "custom-dark" };
+    const derived = buildXtermTheme(custom);
+    expect(derived.red).toBe(custom.syntax.keyword);
+    expect(derived.green).toBe(custom.syntax.string);
+    expect(derived.brightBlack).toBe(custom.ui.mutedForeground);
+    expect(ANSI_NAMES.every((name) => typeof derived[name] === "string")).toBe(true);
+  });
+
+  test("the page options carry the theme, a quoted font stack and the size", () => {
+    expect(cssFontStack("JetBrainsMono Nerd Font Mono")).toBe("'JetBrainsMono Nerd Font Mono', ui-monospace, Menlo, monospace");
+    expect(cssFontStack("Evil'; } body { x")).toBe("'Evil  body  x', ui-monospace, Menlo, monospace");
+    expect(cssFontStack(undefined)).toBe("ui-monospace, Menlo, monospace");
+    const opts = buildTerminalOptions(EDITOR_THEMES[0], { fontFamily: "Menlo", fontSize: 14 });
+    expect(opts.fontSize).toBe(14);
+    expect(opts.fontFamily).toBe("'Menlo', ui-monospace, Menlo, monospace");
+    expect(opts.theme.background).toBe(EDITOR_THEMES[0].ui.background);
+  });
+
+  // The PTY bridge, through the app's own terminal (a test file cannot spawn processes).
+  test("a resize from the page reaches the shell as its terminal size", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await runInTerminal(app, "stty size", "SIZE_FIRST");
+    expect(showsText(app, "32 140")).toBe(true); // DEFAULT_ROWS × DEFAULT_COLS until the page measures
+    await termPage(app, { type: "resize", rows: 40, cols: 120 });
+    await runInTerminal(app, "stty size", "SIZE_AFTER");
+    expect(showsText(app, "40 120")).toBe(true);
+  });
+
+  test("Ctrl-C from the page interrupts a running command", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await runInTerminal(app, "true", "SHELL_UP");
+    await termType(app, "sleep 30\r");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await termType(app, "\u0003");
+    await runInTerminal(app, "true", "AFTER_INTERRUPT"); // within 8 s, not after sleep's 30
+  });
+
+  test("UTF-8 split across input frames and across output frames arrives whole", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await runInTerminal(app, "true", "SHELL_UP");
+    const bytes = new TextEncoder().encode("echo 中文字符_OK\r");
+    const cut = bytes.indexOf(0xe4) + 1; // inside 中
+    const binary = (b: Uint8Array) => String.fromCharCode(...b);
+    await termPage(app, { type: "input", data: binary(bytes.slice(0, cut)), binary: true });
+    await termPage(app, { type: "input", data: binary(bytes.slice(cut)), binary: true });
+    await app.waitUntil(() => showsText(app, "中文字符_OK"), { timeout: 8000 });
+    // 9000 bytes of output: the PTY hands them over in reads that cut characters.
+    await runInTerminal(app, "printf '中%.0s' $(seq 1 3000); echo", "CJK_DONE");
+    expect(showsText(app, "中".repeat(3000))).toBe(true);
+    expect(app.texts().some((t) => t.includes("\ufffd"))).toBe(false);
+  });
+
+  test("while the terminal has the keyboard, ⌘K clears it and ⌘F opens no find bar", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    await runInTerminal(app, "true", "CLEAR_ME");
+    await termPage(app, { type: "focus", focused: true });
+    await app.keyboard.press("mod+f");
+    await app.keyboard.press("mod+k");
+    expect(app.shows("id:editor-find-input")).toBe(false);
+    expect(app.shows("id:command-palette")).toBe(false);
+    expect(showsText(app, "CLEAR_ME")).toBe(false);
+    // Once it lost the keyboard, the shortcuts are the app's again.
+    await termPage(app, { type: "focus", focused: false });
+    await app.keyboard.press("mod+f");
+    await app.waitFor("id:editor-find-input");
+    await app.keyboard.press("mod+k");
+    await app.waitFor("id:command-palette");
+  });
+
+  test("picking another shell keeps a used session and opens the new shell in a new tab", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await runInTerminal(app, "true", "USED_SHELL");
+    const firstTitle = app.texts().find((t) => t.startsWith("1: "));
+    expect(firstTitle).toBeDefined();
+    await app.press("id:terminal-shell-trigger");
+    await app.press("id:shell-option-sh");
+    await app.waitFor("text:2: sh");
+    expect(showsText(app, firstTitle!)).toBe(true);
+    await runInTerminal(app, "echo $0", "IN_NEW_TAB");
+    expect(app.texts().some((t) => /^-?sh$/.test(t))).toBe(true);
+    await app.press(`text:${firstTitle}`);
+    await app.waitUntil(() => showsText(app, "USED_SHELL"), { timeout: 3000 });
   });
 });
