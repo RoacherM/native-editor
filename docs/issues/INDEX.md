@@ -11,6 +11,7 @@ Agent 自动处理规则：只认领 `ready` 栏的条目；修完用 `git commi
 
 | ID | 优先级 | 子系统 | 标题 | 验证命令 |
 |---|---|---|---|---|
+| [I-014](./I-014.md) | P0 | `src/workspace.ts` · `App.tsx` · `src/Sidebar.tsx` | 文件树与打开的 Tab 不感知外部改动（改名/删除/新建/Git 变化），源文件消失后保存会重建旧路径；读取失败显示成空目录；截断不提示；图标按钮无无障碍名称（8 项） | `nsh check && nsh test --trace` |
 
 ## 2. Needs Decision（等用户拍板）
 
