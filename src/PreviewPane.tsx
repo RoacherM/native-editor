@@ -51,22 +51,21 @@ export interface PreviewPaneProps {
   onCursorChange?: (line: number, column: number) => void;
 }
 
-function compareCells(
-  va: string | number | undefined,
-  vb: string | number | undefined,
-  sign: number
-): number {
-  if (va == null || vb == null) {
-    if (va == null && vb == null) return 0;
-    return (va == null ? -1 : 1) * sign;
-  }
-  if (typeof va === "number" && typeof vb === "number") {
-    return (va - vb) * sign;
-  }
-  return String(va).localeCompare(String(vb)) * sign;
+/** Empty cells first, then numbers, then text: one order however a mixed column starts. */
+function cellRank(value: string | number | undefined): number {
+  if (value == null) return 0;
+  return typeof value === "number" ? 1 : 2;
 }
 
-function sortRows(
+/** Ascending order of two cells. */
+function compareCells(va: string | number | undefined, vb: string | number | undefined): number {
+  const rank = cellRank(va) - cellRank(vb);
+  if (rank !== 0 || va == null) return rank;
+  if (typeof va === "number") return va - (vb as number);
+  return String(va).localeCompare(String(vb));
+}
+
+export function sortRows(
   rows: (string | number)[][],
   columns: DataTableColumn[],
   sort: DataTableSort | null
@@ -75,46 +74,46 @@ function sortRows(
   const colIdx = columns.findIndex((c) => c.key === sort.key);
   if (colIdx < 0) return rows;
   const sign = sort.direction === "ascending" ? 1 : -1;
-  return [...rows].sort((a, b) => compareCells(a[colIdx], b[colIdx], sign));
+  return [...rows].sort((a, b) => compareCells(a[colIdx], b[colIdx]) * sign);
 }
 
+/** The editor's find bar while it shows; Escape closes it. */
 function FindBar(props: {
   findOpen: Signal<boolean>;
   findQuery: Signal<string>;
   theme: Accessor<EditorTheme>;
 }): JSX.Element {
+  cleanup(keymap.bind("escape", () => props.findOpen.set(false), { when: "always" }));
   return (
-    <If when={props.findOpen()}>
-      <View
-        style={{ backgroundColor: props.theme().ui.sidebar }}
-        class="h-8 flex-row items-center px-3 gap-2 shrink-0"
+    <View
+      style={{ backgroundColor: props.theme().ui.sidebar }}
+      class="h-8 flex-row items-center px-3 gap-2 shrink-0"
+    >
+      <Input
+        testID="editor-find-input"
+        autoFocus
+        value={props.findQuery()}
+        onChange={({ value }) => props.findQuery.set(value)}
+        placeholder="Find"
+        style={{
+          height: 24,
+          backgroundColor: props.theme().ui.background,
+          color: props.theme().ui.foreground,
+        }}
+        class="flex-1 h-6 px-2 text-xs text-foreground placeholder:text-muted-foreground rounded border-none"
+      />
+      <Button
+        onPress={() => props.findOpen.set(false)}
+        class="h-6 px-2 items-center justify-center rounded bg-transparent border-none shadow-none"
       >
-        <Input
-          testID="editor-find-input"
-          autoFocus
-          value={props.findQuery()}
-          onChange={({ value }) => props.findQuery.set(value)}
-          placeholder="Find"
-          style={{
-            height: 24,
-            backgroundColor: props.theme().ui.background,
-            color: props.theme().ui.foreground,
-          }}
-          class="flex-1 h-6 px-2 text-xs text-foreground placeholder:text-muted-foreground rounded border-none"
-        />
-        <Button
-          onPress={() => props.findOpen.set(false)}
-          class="h-6 px-2 items-center justify-center rounded bg-transparent border-none shadow-none"
+        <Text
+          style={{ color: props.theme().ui.mutedForeground }}
+          class="text-xs"
         >
-          <Text
-            style={{ color: props.theme().ui.mutedForeground }}
-            class="text-xs"
-          >
-            Close
-          </Text>
-        </Button>
-      </View>
-    </If>
+          Close
+        </Text>
+      </Button>
+    </View>
   );
 }
 
@@ -235,10 +234,12 @@ function bindEditorDecorationEffect(
 function EditorBody(props: {
   file: Accessor<LoadedFile>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
+  findShown: Accessor<boolean>;
   fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
   theme: Accessor<EditorTheme>;
   onTextChange: (val: string) => void;
   onCursorChange?: (line: number, col: number) => void;
+  onFocusChange: (focused: boolean) => void;
 }): JSX.Element {
   const f = props.file;
   let editorRef: EditorRef | null = null;
@@ -257,6 +258,10 @@ function EditorBody(props: {
     void f().mode;
     editorRef?.focus();
   });
+  // The find bar closing hands the keyboard back to the text.
+  effect(() => {
+    if (!props.findShown()) editorRef?.focus();
+  });
 
   return (
     <Editor
@@ -270,6 +275,8 @@ function EditorBody(props: {
       value={f().text}
       language={f().classification.language}
       onChange={({ value }) => props.onTextChange(value)}
+      onFocus={() => props.onFocusChange(true)}
+      onBlur={() => props.onFocusChange(false)}
       onSelectionChange={({ selections }) => {
         const last = selections[selections.length - 1];
         if (last && props.onCursorChange) {
@@ -297,37 +304,60 @@ function EditorBody(props: {
   );
 }
 
+/** What the table says about JSONL lines it left out, or null. */
+function invalidLinesNotice(lines: readonly number[]): string | null {
+  if (lines.length === 0) return null;
+  const listed = lines.slice(0, 8).join(", ") + (lines.length > 8 ? ", …" : "");
+  const noun = lines.length === 1 ? "line" : "lines";
+  return `Skipped ${lines.length} ${noun} that ${lines.length === 1 ? "is" : "are"} not a JSON object: ${listed}`;
+}
+
+/** One file's table; PreviewBody makes a new one per file, so its sort starts unsorted. */
 function TableBody(props: {
   file: Accessor<LoadedFile>;
-  sort: Signal<DataTableSort | null>;
   theme: Accessor<EditorTheme>;
 }): JSX.Element {
   const f = props.file;
+  const sort = signal<DataTableSort | null>(null);
   const sortedTableRows = computed(() =>
-    sortRows(f().tableData?.rows ?? [], f().tableData?.columns ?? [], props.sort())
+    sortRows(f().tableData?.rows ?? [], f().tableData?.columns ?? [], sort())
   );
+  const notice = computed(() => invalidLinesNotice(f().tableData?.invalidLines ?? []));
 
   return (
-    <DataTable
-      testID="preview-table"
-      columns={f().tableData?.columns ?? []}
-      data={sortedTableRows()}
-      rowCount={sortedTableRows().length}
-      sort={props.sort()}
-      onSortChange={({ sort }) => props.sort.set(sort)}
-      stripe
-      rowHeader
-      classes={{
-        headerCell: "text-foreground font-medium bg-muted/60 border-b border-r border-border px-3",
-        cell: "text-foreground border-b border-r border-border/40 px-3",
-        rowOdd: "bg-muted/15",
-        rowHover: "bg-muted/30",
-        rowHeader: "text-muted-foreground bg-muted/40 border-b border-r border-border px-2",
-        rowHeaderCorner: "bg-muted/60 border-b border-r border-border",
-      }}
-      style={{ backgroundColor: props.theme().ui.background }}
-      class="flex-1"
-    />
+    <View class="flex-1">
+      <If when={notice()}>
+        {(text) => (
+          <Text
+            testID="table-invalid-lines"
+            style={{ color: props.theme().ui.mutedForeground }}
+            class="px-3 py-1.5 text-xs truncate"
+          >
+            {text()}
+          </Text>
+        )}
+      </If>
+      <DataTable
+        testID="preview-table"
+        columns={f().tableData?.columns ?? []}
+        data={sortedTableRows()}
+        rowCount={sortedTableRows().length}
+        sort={sort()}
+        onSortChange={({ sort: next }) => sort.set(next)}
+        stripe
+        rowHeader
+        classes={{
+          headerCell: "text-foreground font-medium bg-muted/60 border-b border-r border-border px-3",
+          cell: "text-foreground border-b border-r border-border/40 px-3",
+          rowOdd: "bg-muted/15",
+          rowHover: "bg-muted/30",
+          rowHeader: "text-muted-foreground bg-muted/40 border-b border-r border-border px-2",
+          rowHeaderCorner: "bg-muted/60 border-b border-r border-border",
+        }}
+        style={{ backgroundColor: props.theme().ui.background }}
+        class="flex-1"
+      />
+    </View>
   );
 }
 
@@ -616,10 +646,11 @@ function PreviewBody(props: {
   file: Accessor<LoadedFile>;
   root: Accessor<string>;
   diffLayout: Signal<DiffLayout>;
-  tableSort: Signal<DataTableSort | null>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
+  findShown: Accessor<boolean>;
   theme: Accessor<EditorTheme>;
   paneProps: PreviewPaneProps;
+  onEditorFocusChange: (focused: boolean) => void;
 }): JSX.Element {
   const activeView = computed(() => getActiveView(props.file()));
   const markdownMounted = signal(false);
@@ -648,11 +679,9 @@ function PreviewBody(props: {
         <QuickLookBody file={props.file} theme={props.theme} />
       </If>
       <If when={activeView() === "table"}>
-        <TableBody
-          file={props.file}
-          sort={props.tableSort}
-          theme={props.theme}
-        />
+        <Each of={[props.file().path]} key={(p) => p}>
+          {() => <TableBody file={props.file} theme={props.theme} />}
+        </Each>
       </If>
       <If when={activeView() === "binary"}>
         <Editor
@@ -717,10 +746,12 @@ function PreviewBody(props: {
         <EditorBody
           file={props.file}
           search={props.search}
+          findShown={props.findShown}
           fontStyle={fontStyle}
           theme={props.theme}
           onTextChange={(val) => props.paneProps.onTextChange(props.file().path, val)}
           onCursorChange={props.paneProps.onCursorChange}
+          onFocusChange={props.onEditorFocusChange}
         />
       </If>
     </View>
@@ -730,18 +761,21 @@ function PreviewBody(props: {
 export function PreviewPane(props: PreviewPaneProps): JSX.Element {
   const findOpen = signal(false);
   const findQuery = signal("");
+  const editorFocused = signal(false);
   const diffLayout = signal<DiffLayout>("split");
-  const tableSort = signal<DataTableSort | null>(null);
   const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
+  // The find bar is the editor's: it shows only over an editor view.
+  const findShown = computed(() => {
+    const cur = props.file();
+    return findOpen() && !!cur && getActiveView(cur) === "editor";
+  });
 
+  // ⌘F opens the bar only from the focused editor (not from the terminal or a
+  // preview), and closes it wherever it shows.
   cleanup(
-    keymap.bind({
-      "mod+f": () => {
-        const cur = props.file();
-        if (cur && getActiveView(cur) === "editor") {
-          findOpen.update((v) => !v);
-        }
-      },
+    keymap.bind("mod+f", () => {
+      if (findShown()) findOpen.set(false);
+      else if (editorFocused()) findOpen.set(true);
     })
   );
 
@@ -761,19 +795,18 @@ export function PreviewPane(props: PreviewPaneProps): JSX.Element {
       <If when={props.file()}>
         {(currentFile) => (
           <View class="flex-1">
-            <FindBar
-              findOpen={findOpen}
-              findQuery={findQuery}
-              theme={activeTheme}
-            />
+            <If when={findShown()}>
+              <FindBar findOpen={findOpen} findQuery={findQuery} theme={activeTheme} />
+            </If>
             <PreviewBody
               file={currentFile}
               root={props.workspaceRoot}
               diffLayout={diffLayout}
-              tableSort={tableSort}
               search={searchParam}
+              findShown={findShown}
               theme={activeTheme}
               paneProps={props}
+              onEditorFocusChange={(focused) => editorFocused.set(focused)}
             />
           </View>
         )}

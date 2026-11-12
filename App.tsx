@@ -49,7 +49,7 @@ import {
   type GuardedAction,
   type UnsavedGuard as PendingUnsavedGuard,
 } from "./src/session";
-import { saveInStore, type FileStore, type SaveOutcome } from "./src/saving";
+import { describeFailure, saveInStore, type FileStore, type SaveOutcome } from "./src/saving";
 import { CommandPalette, Sidebar } from "./src/Sidebar";
 import {
   discoverTerminalEnvironment,
@@ -70,7 +70,7 @@ import {
   getInitialWorkspaceRoot,
   getPreloadedFile,
   isDirectoryPath,
-  loadFile,
+  loadTabFile,
   lookupGitStatus,
   normalizeExternalFilePath,
   pickWorkspaceFolder,
@@ -1208,9 +1208,48 @@ function DiskConflictBanner(props: {
   );
 }
 
+/** A one-line error above the editor, until dismissed: `<id>-banner`, `<id>-dismiss-btn`. */
+function ErrorNotice(props: {
+  id: string;
+  message: Accessor<string | null>;
+  theme: Accessor<EditorTheme>;
+  onDismiss: () => void;
+}): JSX.Element {
+  return (
+    <If when={props.message()}>
+      {(message) => (
+        <View
+          testID={`${props.id}-banner`}
+          style={{ backgroundColor: props.theme().ui.card }}
+          class="h-9 px-3 flex-row items-center gap-3 select-none"
+        >
+          <View
+            style={{ backgroundColor: props.theme().ui.accent }}
+            class="w-1.5 h-1.5 rounded-full"
+          />
+          <Text style={{ color: props.theme().ui.foreground }} class="flex-1 text-xs truncate">
+            {message()}
+          </Text>
+          <Button
+            testID={`${props.id}-dismiss-btn`}
+            onPress={props.onDismiss}
+            style={{ backgroundColor: props.theme().ui.sidebar }}
+            class="h-6 px-3 rounded border-none shadow-none"
+          >
+            <Text style={{ color: props.theme().ui.foreground }} class="text-xs">
+              Dismiss
+            </Text>
+          </Button>
+        </View>
+      )}
+    </If>
+  );
+}
+
 /**
  * Shown above the editor when the active copy cannot be saved: its last save
- * failed (reason and path; the tab stays dirty), or its bytes are not UTF-8.
+ * failed (reason and path; the tab stays dirty), its bytes are not UTF-8, or it
+ * is too large to edit.
  */
 function FileNoticeBanner(props: {
   file: Accessor<LoadedFile | undefined>;
@@ -1221,33 +1260,12 @@ function FileNoticeBanner(props: {
   const readOnly = computed(() => (saveError() ? null : props.file()?.readOnly ?? null));
   return (
     <View>
-      <If when={saveError()}>
-        {(message) => (
-          <View
-            testID="save-error-banner"
-            style={{ backgroundColor: props.theme().ui.card }}
-            class="h-9 px-3 flex-row items-center gap-3 select-none"
-          >
-            <View
-              style={{ backgroundColor: props.theme().ui.accent }}
-              class="w-1.5 h-1.5 rounded-full"
-            />
-            <Text style={{ color: props.theme().ui.foreground }} class="flex-1 text-xs truncate">
-              {message()}
-            </Text>
-            <Button
-              testID="save-error-dismiss-btn"
-              onPress={props.onDismissSaveError}
-              style={{ backgroundColor: props.theme().ui.sidebar }}
-              class="h-6 px-3 rounded border-none shadow-none"
-            >
-              <Text style={{ color: props.theme().ui.foreground }} class="text-xs">
-                Dismiss
-              </Text>
-            </Button>
-          </View>
-        )}
-      </If>
+      <ErrorNotice
+        id="save-error"
+        message={saveError}
+        theme={props.theme}
+        onDismiss={props.onDismissSaveError}
+      />
       <If when={readOnly()}>
         {(notice) => (
           <View
@@ -1438,10 +1456,9 @@ function setupDesktopChrome(
   });
 }
 
-function decodeDroppedUri(uri: string | undefined): string | null {
-  if (!uri) return null;
-  const normalized = normalizeExternalFilePath(uri);
-  return normalized.length > 0 ? normalized : null;
+/** The paths of dropped `file:` URIs, in drop order. */
+function decodeDroppedUris(uris: readonly string[]): string[] {
+  return uris.map(normalizeExternalFilePath).filter((p) => p.length > 0);
 }
 
 function tryReuseLoadedFileSync(
@@ -1479,7 +1496,7 @@ async function fetchOrReuseLoadedFile(
   const gitStatus = lookupGitStatus(filePath, root, statusMap);
   const existing = current[filePath];
   if (!existing) {
-    return loadFile(filePath, root, openInDiff ? "diff" : undefined, gitStatus);
+    return loadTabFile(filePath, root, openInDiff ? "diff" : undefined, gitStatus);
   }
   return resolveModeFile({ ...existing, gitStatus }, "diff", root);
 }
@@ -1759,17 +1776,14 @@ async function initUserPreferences(
   fontSize: Signal<number>,
   themeId: Signal<string>,
   defaultShell: Signal<string>,
-  availableShells: Signal<ShellProfile[]>,
-  recentWorkspaces: Signal<string[]>
+  availableShells: Signal<ShellProfile[]>
 ): Promise<void> {
-  const [savedFamily, savedSize, savedTheme, savedShell, savedRecent] =
-    await Promise.all([
-      getStorageWithFallback("fontFamily"),
-      getStorageWithFallback("fontSize"),
-      getStorageWithFallback("theme"),
-      getStorageWithFallback("shell"),
-      getStorageWithFallback("recentWorkspaces"),
-    ]);
+  const [savedFamily, savedSize, savedTheme, savedShell] = await Promise.all([
+    getStorageWithFallback("fontFamily"),
+    getStorageWithFallback("fontSize"),
+    getStorageWithFallback("theme"),
+    getStorageWithFallback("shell"),
+  ]);
   applySavedThemeAndFont(
     fontFamily,
     fontSize,
@@ -1780,9 +1794,6 @@ async function initUserPreferences(
     {}
   );
   if (savedShell) defaultShell.set(savedShell);
-
-  const recent = parseRecentWorkspaces(savedRecent);
-  recentWorkspaces.set(recent);
 
   const env = await discoverTerminalEnvironment();
   applySavedThemeAndFont(
@@ -1843,6 +1854,15 @@ function App(): JSX.Element {
   ]);
   const fontDialogOpen = signal<boolean>(false);
   const pendingUnsaved = signal<PendingUnsavedGuard | null>(null);
+  const openError = signal<string | null>(null);
+
+  // The saved Recent list loads before anything is recorded into it: recording
+  // into the empty start list would overwrite it with one folder.
+  const recentLoaded = getStorageWithFallback("recentWorkspaces").then((raw) =>
+    recentWorkspaces.set(parseRecentWorkspaces(raw))
+  );
+  const rememberWorkspace = (folderPath: string) =>
+    void recentLoaded.then(() => recordRecentWorkspace(recentWorkspaces, folderPath));
 
   const setFontFamily = (next: string) => {
     fontFamily.set(next);
@@ -1868,14 +1888,20 @@ function App(): JSX.Element {
     defaultShell.set(next);
     Storage.setItem("aed.shell", next);
   };
+  // Size only: the family is a separate choice (⌘0 and the Reset next to the size).
   const resetFont = () => {
-    setFontFamily(DEFAULT_FONT_FAMILY);
     fontSize.set(DEFAULT_FONT_SIZE);
     Storage.setItem("aed.fontSize", String(DEFAULT_FONT_SIZE));
   };
 
+  // Only the newest scan of the folder open now lands: a slow scan of the folder
+  // before (or an older scan of this one) is dropped when it ends.
+  let scanGeneration = 0;
   const refresh = async () => {
-    const scanned = await scanWorkspace(workspaceRoot());
+    const generation = ++scanGeneration;
+    const root = workspaceRoot();
+    const scanned = await scanWorkspace(root);
+    if (generation !== scanGeneration || root !== workspaceRoot()) return;
     snapshot.set(scanned);
     void warmWorkspaceFiles(scanned);
   };
@@ -1909,7 +1935,7 @@ function App(): JSX.Element {
   const performSwitchToWorkspace = async (folderPath: string) => {
     if (!folderPath) return;
     resetWorkspaceState(folderPath);
-    recordRecentWorkspace(recentWorkspaces, folderPath);
+    rememberWorkspace(folderPath);
     await refresh();
   };
 
@@ -1961,21 +1987,42 @@ function App(): JSX.Element {
   const openExternalFile = async (rawPath: string, origin: ExternalOrigin = "click") => {
     const filePath = normalizeExternalFilePath(rawPath);
     if (!filePath) return;
-    try {
-      if (await isDirectoryPath(filePath)) {
-        switchToWorkspace(filePath);
-        if (desktopAvailable) Window.orderFront();
-        return;
-      }
-      if (!externalOpenKeepsTree(origin)) clearWorkspaceTree();
+    if (await isDirectoryPath(filePath)) {
+      switchToWorkspace(filePath);
+    } else if (externalOpenKeepsTree(origin)) {
       await openFileInTab(filePath);
-      if (desktopAvailable) Window.orderFront();
-    } catch {
-      // Ignore unreadable or deleted external paths so queued opens continue.
+    } else {
+      // Read first: a click on a file that cannot open leaves the folder and tree.
+      const file = await loadForTab(filePath, "");
+      if (!file) return;
+      clearWorkspaceTree();
+      activateLoadedTab(filePath, file);
+    }
+    if (desktopAvailable) Window.orderFront();
+  };
+
+  /** The file for a tab, or null after showing why it cannot be opened. */
+  const loadForTab = async (
+    filePath: string,
+    root: string,
+    openInDiff?: boolean
+  ): Promise<LoadedFile | null> => {
+    try {
+      return await fetchOrReuseLoadedFile(
+        loadedFiles(),
+        filePath,
+        root,
+        snapshot().gitStatusMap,
+        openInDiff
+      );
+    } catch (err) {
+      openError.set(describeFailure("open", path.basename(filePath), err));
+      return null;
     }
   };
 
   const activateLoadedTab = (filePath: string, file: LoadedFile) => {
+    openError.set(null);
     const current = loadedFiles();
     if (current[filePath] !== file) {
       loadedFiles.set({ ...current, [filePath]: file });
@@ -1999,14 +2046,8 @@ function App(): JSX.Element {
       activateLoadedTab(filePath, syncHit);
       return;
     }
-    const file = await fetchOrReuseLoadedFile(
-      loadedFiles(),
-      filePath,
-      workspaceRoot(),
-      snapshot().gitStatusMap,
-      openInDiff
-    );
-    activateLoadedTab(filePath, file);
+    const file = await loadForTab(filePath, workspaceRoot(), openInDiff);
+    if (file) activateLoadedTab(filePath, file);
   };
 
   let inflightDrain: Promise<boolean> | null = null;
@@ -2031,19 +2072,11 @@ function App(): JSX.Element {
   effect(() => {
     if (appInitialized) return;
     appInitialized = true;
-    if (initialRoot) {
-      recordRecentWorkspace(recentWorkspaces, initialRoot);
-    }
+    if (initialRoot) rememberWorkspace(initialRoot);
     // Out of the effect's run: it reads `recentWorkspaces` and runs again when the
     // preferences load, which would end the git processes of a scan started here
     // (DESIGN.md 踩坑 8).
-    setTimeout(() => {
-      void (async () => {
-        const scannedInitial = await scanWorkspace(initialRoot);
-        snapshot.set(scannedInitial);
-        void warmWorkspaceFiles(scannedInitial);
-      })();
-    }, 0);
+    setTimeout(() => void refresh(), 0);
     void (async () => {
       const initFile = getInitialOpenFile();
       if (initFile) {
@@ -2055,8 +2088,7 @@ function App(): JSX.Element {
         fontSize,
         themeId,
         defaultShell,
-        availableShells,
-        recentWorkspaces
+        availableShells
       );
     })();
   });
@@ -2212,8 +2244,9 @@ function App(): JSX.Element {
         enforceMinWindowSize(bounds.size.width, bounds.size.height)
       }
       onFileDrop={({ uris }) => {
-        const p = decodeDroppedUri(uris[0]);
-        if (p) void openExternalFile(p, "drop");
+        void (async () => {
+          for (const p of decodeDroppedUris(uris)) await openExternalFile(p, "drop");
+        })();
       }}
     >
       <WindowTitleBar
@@ -2303,6 +2336,12 @@ function App(): JSX.Element {
                     onResolve={(choice) =>
                       void resolveDiskConflict(loadedFiles, activeFilePath(), choice, workspaceRoot())
                     }
+                  />
+                  <ErrorNotice
+                    id="open-error"
+                    message={openError}
+                    theme={activeTheme}
+                    onDismiss={() => openError.set(null)}
                   />
                   <FileNoticeBanner
                     file={activeFile}

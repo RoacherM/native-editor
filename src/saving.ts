@@ -16,10 +16,10 @@ export type SaveWriter = (file: LoadedFile, text: string) => Promise<LoadedFile>
 /** `skipped`: nothing to write (clean, closed, or a copy that may never be saved). */
 export type SaveOutcome = "saved" | "skipped" | "failed";
 
-/** The message a failed save shows: what failed, on which path. */
-export function describeSaveError(filePath: string, error: unknown): string {
+/** The message a failed save or open shows: what failed, on which file. */
+export function describeFailure(action: "save" | "open", file: string, error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
-  return `Could not save ${filePath}: ${reason}`;
+  return `Could not ${action} ${file}: ${reason}`;
 }
 
 /**
@@ -53,7 +53,7 @@ export async function saveInStore(
     saved = await write(file, file.text);
   } catch (error) {
     const latest = store.get(filePath);
-    if (latest) store.set(filePath, { ...latest, saveError: describeSaveError(filePath, error) });
+    if (latest) store.set(filePath, { ...latest, saveError: describeFailure("save", filePath, error) });
     return "failed";
   }
   const latest = store.get(filePath);
