@@ -8,6 +8,7 @@ import {
 } from "./src/classify";
 import {
   detectMermaidKind,
+  followLatest,
   preprocessMermaidCode,
   planJobTimeout,
   requeueOrphanedJobs,
@@ -28,6 +29,7 @@ import {
   type WindowMode,
 } from "./src/session";
 import { createInputGate, parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
+import { sortRows } from "./src/PreviewPane";
 import manifest from "./nsh.json";
 import {
   computeSyntaxDecorations,
@@ -473,12 +475,10 @@ async function withScratch(
   body: (s: Scratch) => Promise<void>,
   extra: (dir: string) => string[] = () => []
 ) {
-  scratchCount += 1;
-  const dir = `${SCRATCH_RUN}-${scratchCount}`;
-  const writes = Object.entries(files).map(([n, c]) => `printf '${c}\\n' > ${dir}/${n}`);
-  const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-  const commands = [`rm -rf ${dir}`, `mkdir -p ${dir}`, ...writes, ...extra(dir)];
-  await runInTerminal(setup, commands.join(" && "), "SETUP_DONE");
+  const { dir, remove } = await makeScratch((d) => [
+    ...Object.entries(files).map(([n, c]) => `printf '${c}\\n' > ${d}/${n}`),
+    ...extra(d),
+  ]);
   const app = await open("./App.tsx", {
     platform: "macos",
     width: 1280,
@@ -496,9 +496,25 @@ async function withScratch(
     await app.waitUntil(() => showsText(app, content), { timeout: 5000 });
     await body({ app, dir, write, run });
   } finally {
-    // u+rwx first: a test may lock a folder (chmod 000).
-    await runInTerminal(setup, `chmod -R u+rwx ${dir} 2>/dev/null; rm -rf ${dir}`, "CLEAN_DONE");
+    await remove();
   }
+}
+
+/**
+ * A fresh scratch folder, filled by `commands(dir)` in a helper window's terminal (the
+ * test sandbox cannot write files). `remove` deletes it; call it in a `finally`.
+ */
+async function makeScratch(
+  commands: (dir: string) => string[]
+): Promise<{ dir: string; remove: () => Promise<void> }> {
+  scratchCount += 1;
+  const dir = `${SCRATCH_RUN}-${scratchCount}`;
+  const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+  const all = [`rm -rf ${dir}`, `mkdir -p ${dir}`, ...commands(dir)];
+  await runInTerminal(setup, all.join(" && "), "SETUP_DONE");
+  // u+rwx first: a test may lock a folder (chmod 000).
+  const remove = () => runInTerminal(setup, `chmod -R u+rwx ${dir} 2>/dev/null; rm -rf ${dir}`, "CLEAN_DONE");
+  return { dir, remove };
 }
 
 /** Make the open tab dirty by typing `text`, and wait for its unsaved dot. */
@@ -1924,5 +1940,260 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
       "QL_COUNTED"
     );
     expect(app.texts().some((t) => t.includes("QLPNG_0"))).toBe(true);
+  });
+});
+
+describe("races and silent failures (I-017)", () => {
+  const GIT_COMMIT = "-c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --no-verify -m init";
+
+  test("an AED_ROOT launch adds its folder to Recent and keeps the others", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      storage: { "aed.recentWorkspaces": JSON.stringify(["/r/a", "/r/b"]) },
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    const expected = JSON.stringify([FIXTURE_ROOT, "/r/a", "/r/b"]);
+    await app.waitUntil(() => app.storage()["aed.recentWorkspaces"] === expected, { timeout: 3000 });
+  });
+
+  test("a slow scan of the folder before never replaces the tree of the folder open now", async () => {
+    // `git status` waits ~4 s on the fsmonitor hook: the scan of this folder ends last.
+    const { dir, remove } = await makeScratch((d) => [
+      `printf 'X\\n' > ${d}/OLD_ONLY.txt`,
+      `git -C ${d} init -q`,
+      `git -C ${d} config core.fsmonitor 'sleep 2; false'`,
+    ]);
+    try {
+      const app = await open("./App.tsx", {
+        platform: "macos",
+        width: 1280,
+        height: 800,
+        host: { params: { workspaceRoot: FIXTURE_ROOT } },
+      });
+      await app.waitFor("text:main.ts");
+      await app.dropFiles("id:app-root", [`file://${dir}`]);
+      await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
+      await app.waitFor("text:main.ts");
+      await app.wait(5000);
+      expect(app.shows("text:main.ts")).toBe(true);
+      expect(app.shows("text:OLD_ONLY.txt")).toBe(false);
+    } finally {
+      await remove();
+    }
+  });
+
+  test("only the newest Mermaid render lands, and each new render shows loading first", async () => {
+    const shown: string[] = [];
+    let starts = 0;
+    const follow = followLatest<string>({
+      start: () => (starts += 1),
+      done: (v) => shown.push(v),
+      fail: (e) => shown.push(`error:${String(e)}`),
+    });
+    let finishOld: (v: string) => void = () => undefined;
+    let failOld: (e: unknown) => void = () => undefined;
+    follow(new Promise<string>((resolve) => (finishOld = resolve)));
+    follow(Promise.resolve("new"));
+    follow(new Promise<string>((_, reject) => (failOld = reject)));
+    follow(Promise.resolve("newest"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finishOld("old");
+    failOld("boom");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(starts).toBe(4);
+    expect(shown).toEqual(["newest"]);
+  });
+
+  test("a deleted file in the Changed list opens its diff", async () => {
+    await withScratch(
+      { "keep.txt": "KEEP_V1", "gone.txt": "GONE_V1" },
+      async ({ app }) => {
+        await app.press("id:sidebar-filter-changed");
+        await app.waitFor("text:gone.txt");
+        await app.press("text:gone.txt");
+        await app.waitFor("id:preview-diff");
+        expect(app.shows("id:open-error-banner")).toBe(false);
+      },
+      (dir) => [`git -C ${dir} init -q`, `git -C ${dir} add -A`, `git -C ${dir} ${GIT_COMMIT}`, `rm ${dir}/gone.txt`]
+    );
+  });
+
+  test("a Finder open that fails keeps the folder and says why", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT, openFile: `${SCRATCH_RUN}-missing/nope.md` } },
+    });
+    await app.waitFor("id:open-error-banner");
+    expect(app.shows("id:workspace-tree")).toBe(true);
+    expect(app.texts().some((t) => t.includes("nope.md"))).toBe(true);
+    await app.press("id:open-error-dismiss-btn");
+    expect(app.shows("id:open-error-banner")).toBe(false);
+  });
+
+  test("a link or drop to a missing file says it cannot be opened", async () => {
+    // A Markdown link and a drop both end in the same tab open (the WebView click
+    // itself cannot be driven headless).
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.dropFiles("id:app-root", [`file://${SCRATCH_RUN}-missing/link.md`]);
+    await app.waitFor("id:open-error-banner");
+    expect(app.texts().some((t) => t.includes("link.md"))).toBe(true);
+    // The next good open clears it.
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    expect(app.shows("id:open-error-banner")).toBe(false);
+  });
+
+  test("⌘0 resets the font size and keeps the font family", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      storage: { "aed.fontFamily": "Menlo", "aed.fontSize": "16" },
+    });
+    await app.keyboard.press("mod+,");
+    await app.waitFor("text:16px");
+    await app.keyboard.press("mod+0");
+    await app.waitFor("text:13px");
+    expect(app.storage()["aed.fontSize"]).toBe("13");
+    expect(app.storage()["aed.fontFamily"]).toBe("Menlo");
+  });
+
+  test("the find bar belongs to the editor: hidden on previews, closed by Escape, not opened from the terminal", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.press("text:README.md");
+    await app.waitFor("id:preview-markdown");
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    await app.keyboard.press("mod+f");
+    await app.waitFor("id:editor-find-input");
+    // Escape in the find field closes it and hands the keys back to the editor.
+    await app.type("id:editor-find-input", "main");
+    await app.keyboard.press("escape");
+    await app.waitUntil(() => !app.shows("id:editor-find-input"), { timeout: 2000 });
+    await app.keyboard.press("mod+f");
+    await app.waitFor("id:editor-find-input");
+    // A preview tab has no find bar; back on the editor it is there to close with ⌘F.
+    await app.press("id:tab-select-README.md");
+    await app.waitFor("id:preview-markdown");
+    expect(app.shows("id:editor-find-input")).toBe(false);
+    await app.press("id:tab-select-main.ts");
+    await app.waitFor("id:editor-find-input");
+    await app.keyboard.press("mod+f");
+    await app.waitUntil(() => !app.shows("id:editor-find-input"), { timeout: 2000 });
+    // ⌘F typed in the terminal is the terminal's.
+    await app.press("id:titlebar-toggle-terminal");
+    await app.waitFor("id:terminal-pane");
+    await app.type("id:terminal-input", "echo");
+    await app.keyboard.press("mod+f");
+    await app.wait(200);
+    expect(app.shows("id:editor-find-input")).toBe(false);
+  });
+
+  test("dropping several files opens each of them", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.dropFiles("id:app-root", [
+      `file://${FIXTURE_ROOT}/main.ts`,
+      `file://${FIXTURE_ROOT}/guide.md`,
+    ]);
+    await app.waitFor("id:tab-select-main.ts");
+    await app.waitFor("id:tab-select-guide.md");
+  });
+
+  test("CSV quoted line breaks, number cells and JSONL bad lines", () => {
+    const csv = parseTableData('name,note,n\nA,"line1\nline2", 42 \nB,x,007\n', "t.csv");
+    expect(csv.rows).toEqual([
+      ["A", "line1\nline2", 42],
+      ["B", "x", "007"],
+    ]);
+    expect(csv.invalidLines).toEqual([]);
+    const jsonl = parseTableData('{"a":1}\nnot json\n\n[1]\n{"a":2}\n', "t.jsonl");
+    expect(jsonl.rows).toEqual([[1], [2]]);
+    expect(jsonl.invalidLines).toEqual([2, 4]);
+  });
+
+  test("a column of numbers and text sorts the same from any order", () => {
+    const columns = [{ key: "0", title: "v" }];
+    const asc = { key: "0", direction: "ascending" as const };
+    const orders = [[2], [10], ["1a"], ["b"]];
+    const permutations = [orders, [...orders].reverse(), [orders[2], orders[0], orders[3], orders[1]]];
+    for (const rows of permutations) {
+      expect(sortRows(rows, columns, asc).map((r) => r[0])).toEqual([2, 10, "1a", "b"]);
+    }
+  });
+
+  test("a table starts fresh after another table: its own columns, no sort carried over", async () => {
+    // The sort itself cannot be pressed headless (the header is drawn natively); both
+    // live in the table, which now starts again for each file.
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:events.jsonl");
+    await app.press("text:events.jsonl");
+    await app.waitFor("text:boot");
+    await app.press("text:metrics.csv");
+    await app.waitFor("text:api-gateway");
+    expect(showsText(app, "latency_ms")).toBe(true);
+    expect(showsText(app, "event")).toBe(false);
+  });
+
+  test("a file above 8 MB opens read-only from its first bytes; a large binary shows its first 4 KB", async () => {
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app }) => {
+        await app.press("text:big.txt");
+        await app.waitFor("id:read-only-banner", { timeout: 8000 });
+        expect(app.texts().some((t) => t.includes("8 MB"))).toBe(true);
+        await app.press("text:big.dat");
+        await app.waitFor("id:preview-hex", { timeout: 8000 });
+      },
+      (dir) => [
+        `python3 -c "open('${dir}/big.txt','w').write(('BIG_LINE '+'x'*1000+chr(10))*8600)"`,
+        `dd if=/dev/zero of=${dir}/big.dat bs=1048576 count=9 2>/dev/null`,
+      ]
+    );
+  });
+
+  test("the disk check runs again after a run that threw", async () => {
+    let runs = 0;
+    let fail: (e: unknown) => void = () => undefined;
+    const check = serialize(() => {
+      runs += 1;
+      if (runs > 1) return Promise.resolve();
+      return new Promise<void>((_, reject) => (fail = reject));
+    });
+    const first = check().catch(() => undefined);
+    void check(); // queued while the first run is in flight
+    fail(new Error("disk gone"));
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2);
+    await check();
+    expect(runs).toBe(3); // no stale rerun left over
   });
 });

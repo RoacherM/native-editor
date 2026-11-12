@@ -185,8 +185,8 @@ export function nextActiveAfterClose(
 
 /**
  * Wrap `task` so its runs never overlap: a call while one runs makes it run
- * once more afterwards (any number of such calls make one more run). App's
- * disk check of the active tab runs through this.
+ * once more afterwards (any number of such calls make one more run), also
+ * when the run threw. App's disk check of the active tab runs through this.
  */
 export function serialize(task: () => Promise<void>): () => Promise<void> {
   let running = false;
@@ -201,10 +201,10 @@ export function serialize(task: () => Promise<void>): () => Promise<void> {
       await task();
     } finally {
       running = false;
-    }
-    if (again) {
-      again = false;
-      await run();
+      if (again) {
+        again = false;
+        await run();
+      }
     }
   };
   return run;

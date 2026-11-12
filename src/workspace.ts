@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import { host } from "nsh";
 import type { CommandItem, TreeItem } from "nsh/base";
 import type { Dirent } from "fs/promises";
@@ -153,6 +154,22 @@ export function canSaveFile(file: LoadedFile): boolean {
 /** Shown above a file whose bytes are not UTF-8; such a copy is never saved. */
 export const NOT_UTF8_NOTICE = "Not UTF-8 — opened read-only";
 
+/**
+ * Files above this size are never read whole (DESIGN.md「文件大小上限」): nsh's
+ * `writeFile` takes at most 8 MiB, so a larger file could not be saved anyway.
+ */
+const MAX_EDITABLE_BYTES = 8 * 1024 * 1024;
+/** How much of a text file above `MAX_EDITABLE_BYTES` is shown, read-only. */
+const LARGE_TEXT_HEAD_BYTES = 256 * 1024;
+/** How much of a large binary file is read: what its hex dump shows. */
+const BINARY_HEAD_BYTES = 4096;
+
+/** Shown above a text file above `MAX_EDITABLE_BYTES`; such a copy is never saved. */
+export const LARGE_FILE_NOTICE = "Larger than 8 MB — showing the first 256 KB, read-only";
+
+/** Shown above a file git lists as deleted: its diff against HEAD. */
+export const DELETED_FILE_NOTICE = "Deleted — showing what was removed";
+
 const UTF8_BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
 
 function startsWithBom(bytes: Uint8Array): boolean {
@@ -184,8 +201,11 @@ export function encodeUtf8(text: string, bom: boolean): Uint8Array {
 function decodeFileText(
   classification: FileClassification,
   bytes: Uint8Array,
+  partial: boolean,
 ): { text: string; bom: boolean; readOnly: string | null } {
   if (isOpaqueFile(classification)) return { text: "", bom: false, readOnly: null };
+  // The cut may split a character: decode leniently, never save.
+  if (partial) return { text: new TextDecoder("utf-8").decode(bytes), bom: false, readOnly: LARGE_FILE_NOTICE };
   const decoded = decodeUtf8(bytes);
   if (decoded) return { ...decoded, readOnly: null };
   // Shown for reading only: the lossy text must never reach the disk.
@@ -489,11 +509,20 @@ function noticeRowId(dir: string): string {
   return `${dir}/\u0000notice`;
 }
 
-/** A flat tree of the files git reports as changed. */
-function toChangedItems(flatFiles: WorkspaceEntry[]): TreeItem[] {
-  return flatFiles
+/** A flat tree of the files git reports as changed, deleted ones (not on disk) last. */
+function toChangedItems(
+  root: string,
+  flatFiles: WorkspaceEntry[],
+  gitStatusMap: Record<string, GitStatusCode>
+): TreeItem[] {
+  const onDisk = flatFiles
     .filter((entry) => entry.gitStatus !== undefined)
     .map((entry) => ({ id: entry.path, label: entry.relPath }));
+  const listed = new Set(flatFiles.map((entry) => entry.relPath));
+  const deleted = Object.keys(gitStatusMap)
+    .filter((rel) => gitStatusMap[rel] === "D" && !listed.has(rel))
+    .map((rel) => ({ id: path.join(root, rel), label: rel }));
+  return [...onDisk, ...deleted];
 }
 
 /** A quick-open row for a file. */
@@ -585,7 +614,7 @@ export function withGitStatus(
     ...snapshot,
     flatFiles,
     gitStatusMap,
-    treeItemsChanged: toChangedItems(flatFiles),
+    treeItemsChanged: toChangedItems(snapshot.root, flatFiles, gitStatusMap),
     commandItems: flatFiles.map(toCommandItem),
   };
 }
@@ -702,20 +731,39 @@ function previewBlobUrl(
   return null;
 }
 
+const HEAD_SCRIPT =
+  "import sys\nwith open(sys.argv[1], 'rb') as f: sys.stdout.write(f.read(int(sys.argv[2])).hex())";
+
+/** The first `count` bytes of a file (fs/promises has no partial read; python3 is granted). */
+async function readFileHead(filePath: string, count: number): Promise<Uint8Array> {
+  const result = await process.run("python3", ["-c", HEAD_SCRIPT, filePath, String(count)], {
+    cwd: execCwd(),
+  });
+  if (result.code !== 0) throw new Error(result.stderr.trim() || `cannot read ${filePath}`);
+  return new Uint8Array(Buffer.from(result.stdout.trim(), "hex"));
+}
+
+/**
+ * The bytes a preview needs, and the file's size. Media and Quick Look files are
+ * shown from their path (no bytes). A file above `MAX_EDITABLE_BYTES` is read in
+ * part (`partial`): text its first `LARGE_TEXT_HEAD_BYTES`, binary its first
+ * `BINARY_HEAD_BYTES`; images are read whole (their picture needs every byte).
+ */
 async function readFileBytesAndSize(
   filePath: string,
-): Promise<{ bytes: Uint8Array; size: number }> {
+): Promise<{ bytes: Uint8Array; size: number; partial: boolean }> {
   const preKind = classifyFile(filePath).kind;
-  if (preKind === "video" || preKind === "audio") {
-    try {
-      const stat = await fs.stat(filePath);
-      return { bytes: new Uint8Array(0), size: stat.size };
-    } catch {
-      return { bytes: new Uint8Array(0), size: 0 };
-    }
+  const { size } = await fs.stat(filePath);
+  if (preKind === "video" || preKind === "audio" || preKind === "quicklook") {
+    return { bytes: new Uint8Array(0), size, partial: false };
   }
-  const bytes = await fs.readFile(filePath);
-  return { bytes, size: bytes.length };
+  if (size <= MAX_EDITABLE_BYTES || preKind === "image") {
+    const bytes = await fs.readFile(filePath);
+    return { bytes, size: bytes.length, partial: false };
+  }
+  const head = await readFileHead(filePath, BINARY_HEAD_BYTES);
+  if (classifyFile(filePath, head).kind === "binary") return { bytes: head, size, partial: true };
+  return { bytes: await readFileHead(filePath, LARGE_TEXT_HEAD_BYTES), size, partial: true };
 }
 
 const MAX_PRELOAD_FILES = 12;
@@ -841,13 +889,13 @@ export async function loadFile(
   gitStatus?: GitStatusCode,
 ): Promise<LoadedFile> {
   const diskStamp = await readDiskStamp(filePath);
-  const { bytes, size } = await readFileBytesAndSize(filePath);
+  const { bytes, size, partial } = await readFileBytesAndSize(filePath);
   const classification = classifyFile(filePath, bytes.slice(0, 4096));
   const mode =
     preferredMode && allowsMode(classification, preferredMode)
       ? preferredMode
       : classification.defaultMode;
-  const { text, bom, readOnly } = decodeFileText(classification, bytes);
+  const { text, bom, readOnly } = decodeFileText(classification, bytes, partial);
   const tableData = classification.kind === "table" ? parseTableData(text, filePath) : null;
   const hexDump = classification.kind === "binary" ? formatHexDump(bytes, 4096) : "";
   const dimensions =
@@ -895,6 +943,49 @@ export async function loadFile(
     preloadedFiles.set(filePath, loaded);
   }
   return loaded;
+}
+
+/** A file for a new tab: `loadFile`, or for a file git lists as deleted and gone from disk, its diff. */
+export async function loadTabFile(
+  filePath: string,
+  root: string,
+  preferredMode?: PreviewMode,
+  gitStatus?: GitStatusCode,
+): Promise<LoadedFile> {
+  if (gitStatus === "D" && (await readDiskStamp(filePath)) === null) {
+    return loadDeletedFile(filePath, root);
+  }
+  return loadFile(filePath, root, preferredMode, gitStatus);
+}
+
+/** A file git lists as deleted, gone from disk: an empty, unsavable copy showing its diff. */
+async function loadDeletedFile(filePath: string, root: string): Promise<LoadedFile> {
+  const classification = classifyFile(filePath);
+  const mode = allowsMode(classification, "diff") ? "diff" : classification.defaultMode;
+  return {
+    path: filePath,
+    relPath: relativePath(root, filePath),
+    name: path.basename(filePath),
+    size: 0,
+    classification,
+    mode,
+    gitStatus: "D",
+    text: "",
+    savedText: "",
+    dirty: false,
+    blobUrl: null,
+    quickLookUrl: null,
+    dimensions: null,
+    tableData: null,
+    hexDump: "",
+    diffPatch: mode === "diff" ? await getFileDiffPatch(filePath, root) : "",
+    diskStamp: null,
+    diskChanged: false,
+    diskMissing: false,
+    bom: false,
+    readOnly: DELETED_FILE_NOTICE,
+    saveError: null,
+  };
 }
 
 /**
