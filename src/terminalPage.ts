@@ -315,16 +315,32 @@ function putChar(line: MirrorLine, ch: string): void {
   line.col += 1;
 }
 
+const CURSOR_MOVES: Readonly<Record<string, (line: MirrorLine, n: number) => void>> = {
+  D: (line, n) => (line.col = Math.max(0, line.col - n)),
+  C: (line, n) => (line.col = Math.min(line.buffer.length, line.col + n)),
+  G: (line, n) => (line.col = Math.max(0, n - 1)),
+};
+
+/** `CSI K`: 2 erases the line, none or 0 from the cursor to its end. */
+function eraseInLine(line: MirrorLine, params: string): void {
+  if (params === "2") Object.assign(line, { buffer: "", col: 0 });
+  else if (params === "" || params === "0") line.buffer = line.buffer.slice(0, line.col);
+}
+
 /** Cursor moves and erases on the current line; `true` for a full-screen clear. */
 function applyCsi(line: MirrorLine, params: string, cmd: string): boolean {
-  const n = Number.parseInt(params, 10) || 1;
-  if (cmd === "D") line.col = Math.max(0, line.col - n);
-  else if (cmd === "C") line.col = Math.min(line.buffer.length, line.col + n);
-  else if (cmd === "G") line.col = Math.max(0, n - 1);
-  else if (cmd === "K" && params === "2") Object.assign(line, { buffer: "", col: 0 });
-  else if (cmd === "K" && (params === "" || params === "0")) line.buffer = line.buffer.slice(0, line.col);
-  else return cmd === "J" && (params === "2" || params === "3");
-  return false;
+  const move = Object.hasOwn(CURSOR_MOVES, cmd) ? CURSOR_MOVES[cmd] : undefined;
+  if (move) move(line, Number.parseInt(params, 10) || 1);
+  else if (cmd === "K") eraseInLine(line, params);
+  return cmd === "J" && (params === "2" || params === "3");
+}
+
+/** Text without an escape sequence cut off at its end, and that tail (held for the next chunk). */
+function splitUnfinishedEscape(text: string): { text: string; tail: string } {
+  const tail = UNFINISHED_ESCAPE.exec(text);
+  return tail && text.length - tail.index < 512
+    ? { text: text.slice(0, tail.index), tail: tail[0] }
+    : { text, tail: "" };
 }
 
 /** One character: CR, LF (ends the line into `done`), backspace, or a printable one. */
@@ -349,11 +365,9 @@ export function createTextMirror(maxLines = 1000): TextMirror {
   const keep = (lines: string[]) => (lines.length > maxLines ? lines.slice(lines.length - maxLines) : lines);
   return {
     push(text) {
-      let combined = escape + text;
-      const tail = UNFINISHED_ESCAPE.exec(combined);
-      escape = tail && combined.length - tail.index < 512 ? tail[0] : "";
-      if (escape) combined = combined.slice(0, tail!.index);
-      for (const m of combined.replace(NON_CSI_ESCAPES, "").matchAll(TERM_TOKEN)) {
+      const split = splitUnfinishedEscape(escape + text);
+      escape = split.tail;
+      for (const m of split.text.replace(NON_CSI_ESCAPES, "").matchAll(TERM_TOKEN)) {
         if (m[2] !== undefined && applyCsi(line, m[1] ?? "", m[2])) done = [];
         else if (m[3] !== undefined) applyChar(line, m[3], done);
       }

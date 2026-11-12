@@ -444,27 +444,37 @@ function endSession(tab: TermTab, session: PtySession, code: number | null | und
   deps.output(tab, [textChunk(`\r\n[${untracked(() => tab.title())}] session ended${status}\r\n`)]);
 }
 
+/** The bridge's arguments: the shell, TERM_PROGRAM, Ghostty's resources and the start size. */
+function bridgeArgs(tab: TermTab, deps: SessionDeps): string[] {
+  const app = untracked(() => deps.app());
+  const size = tab.size ?? deps.lastSize();
+  return [
+    "-u",
+    "-c",
+    PTY_BRIDGE_PY,
+    untracked(() => tab.shell().path),
+    app?.termProgram || process.env.TERM_PROGRAM || "Aed",
+    app?.resourcesDir || "",
+    String(size.rows),
+    String(size.cols),
+  ];
+}
+
+function watchBridge(tab: TermTab, session: PtySession, deps: SessionDeps): void {
+  const { child } = session;
+  child.on("stdout", (text) => readBridge(tab, session, text, deps));
+  child.on("stderr", (text) => {
+    if (deps.sessions.get(tab.id) === session) deps.output(tab, [textChunk(text.replace(/\r?\n/g, "\r\n"))]);
+  });
+  child.on("exit", (result) => endSession(tab, session, result.code, deps));
+}
+
 /** Start the PTY for a tab once; a failure shows in the terminal, not as a crash. */
 function startSession(tab: TermTab, deps: SessionDeps): void {
   if (deps.sessions.has(tab.id)) return;
   const cwd = untracked(() => deps.cwd()) || os.homedir();
-  const app = untracked(() => deps.app());
-  const size = tab.size ?? deps.lastSize();
   try {
-    const child = process.spawn(
-      "python3",
-      [
-        "-u",
-        "-c",
-        PTY_BRIDGE_PY,
-        untracked(() => tab.shell().path),
-        app?.termProgram || process.env.TERM_PROGRAM || "Aed",
-        app?.resourcesDir || "",
-        String(size.rows),
-        String(size.cols),
-      ],
-      { cwd, stdin: "pipe" }
-    );
+    const child = process.spawn("python3", bridgeArgs(tab, deps), { cwd, stdin: "pipe" });
     const session: PtySession = {
       child,
       cwd,
@@ -474,11 +484,7 @@ function startSession(tab: TermTab, deps: SessionDeps): void {
       exitCode: null,
     };
     deps.sessions.set(tab.id, session);
-    child.on("stdout", (text) => readBridge(tab, session, text, deps));
-    child.on("stderr", (text) => {
-      if (deps.sessions.get(tab.id) === session) deps.output(tab, [textChunk(text.replace(/\r?\n/g, "\r\n"))]);
-    });
-    child.on("exit", (result) => endSession(tab, session, result.code, deps));
+    watchBridge(tab, session, deps);
   } catch (error) {
     deps.output(tab, [textChunk(`[error] ${String(error)}\r\n`)]);
   }
@@ -674,6 +680,312 @@ function ShellSelectOptionRow(props: {
   );
 }
 
+/** The terminal WebView: its ref, and whether the injected runtime said `ready`. */
+interface TerminalPage {
+  view: WebViewRef | null;
+  ready: boolean;
+}
+
+/** A pane's state, shared by the functions below and its component. */
+interface TerminalModel {
+  sessions: Map<number, PtySession>;
+  tabs: Signal<TermTab[]>;
+  activeId: Signal<number>;
+  selectedShell: Signal<ShellProfile>;
+  page: TerminalPage;
+  /** Whether the terminal has the keyboard (the page says so). */
+  focused: Signal<boolean>;
+  /** The test channel is in use: the plain-text mirror is fed and shown. */
+  mirrorOn: Signal<boolean>;
+  /** The size the page last measured; new shells start with it. */
+  lastSize: TermSize;
+  nextId: () => number;
+  deps: SessionDeps;
+}
+
+/** JS for the page, dropped while it is not ready (its `ready` replays everything). */
+function inject(page: TerminalPage, js: string): void {
+  if (page.ready) page.view?.injectJavaScript(js);
+}
+
+function activeTabOf(model: TerminalModel): TermTab {
+  const list = untracked(() => model.tabs());
+  const id = untracked(() => model.activeId());
+  return list.find((tab) => tab.id === id) ?? list[0];
+}
+
+function tabOf(model: TerminalModel, id: number): TermTab | undefined {
+  return untracked(() => model.tabs()).find((tab) => tab.id === id);
+}
+
+function feedMirror(tab: TermTab, chunks: string[]): void {
+  const { text, utf8, lines } = tab.mirror;
+  for (const chunk of chunks) text.push(utf8.push(decodeBase64(chunk)));
+  lines.set([...text.lines(), text.current()]);
+}
+
+function clearMirror(tab: TermTab): void {
+  tab.mirror = createMirror(tab.mirror.lines);
+  tab.mirror.lines.set([]);
+}
+
+/** Output for a tab: kept for replay, mirrored for tests, and written to the page. */
+function showOutput(model: TerminalModel, tab: TermTab, chunks: string[]): void {
+  for (const chunk of chunks) tab.history.push(chunk);
+  if (untracked(() => model.mirrorOn())) feedMirror(tab, chunks);
+  inject(model.page, pageCall("write", tab.id, chunks));
+}
+
+function resetTab(model: TerminalModel, tab: TermTab): void {
+  tab.history.clear();
+  clearMirror(tab);
+  tab.programTitle.set("");
+  inject(model.page, pageCall("reset", tab.id));
+}
+
+function createTerminalModel(
+  firstShell: ShellProfile,
+  selectedShell: Signal<ShellProfile>,
+  cwd: Accessor<string>,
+  app: Accessor<ExternalTerminalApp | undefined>
+): TerminalModel {
+  let counter = 1;
+  const firstTab = createTermTab(counter, firstShell);
+  const model: TerminalModel = {
+    sessions: new Map(),
+    tabs: signal<TermTab[]>([firstTab]),
+    activeId: signal(firstTab.id),
+    selectedShell,
+    page: { view: null, ready: false },
+    focused: signal(false),
+    mirrorOn: signal(false),
+    lastSize: { rows: DEFAULT_ROWS, cols: DEFAULT_COLS },
+    nextId: () => ++counter,
+    deps: undefined as unknown as SessionDeps,
+  };
+  model.deps = {
+    sessions: model.sessions,
+    cwd,
+    app,
+    lastSize: () => model.lastSize,
+    output: (tab, chunks) => showOutput(model, tab, chunks),
+    reset: (tab) => resetTab(model, tab),
+  };
+  return model;
+}
+
+function focusTerminal(model: TerminalModel): void {
+  model.page.view?.focus();
+  inject(model.page, pageCall("focus"));
+}
+
+/** ⌘K while the terminal has the keyboard. */
+function clearActive(model: TerminalModel): void {
+  const tab = activeTabOf(model);
+  clearMirror(tab);
+  inject(model.page, pageCall("clear", tab.id));
+}
+
+function addTab(model: TerminalModel, shell: ShellProfile): void {
+  const tab = createTermTab(model.nextId(), shell);
+  model.tabs.update((previous) => previous.concat([tab]));
+  model.activeId.set(tab.id);
+  startSession(tab, model.deps);
+  focusTerminal(model);
+}
+
+/** Close a tab and its shell; the last tab closing opens a new one at once. */
+function closeTab(model: TerminalModel, id: number): void {
+  disposeSession(id, model.sessions);
+  inject(model.page, pageCall("close", id));
+  const remaining = untracked(() => model.tabs()).filter((tab) => tab.id !== id);
+  model.tabs.set(remaining);
+  if (untracked(() => model.activeId()) !== id) return;
+  if (remaining.length === 0) {
+    addTab(model, untracked(() => model.selectedShell()));
+    return;
+  }
+  model.activeId.set(remaining[remaining.length - 1].id);
+  focusTerminal(model);
+}
+
+/**
+ * The user picked a shell in the dropdown: it becomes the default for new
+ * tabs; the active tab switches to it unless someone typed into it, then
+ * the shell opens in a new tab instead (a used session is never killed).
+ */
+function pickShell(model: TerminalModel, shell: ShellProfile): void {
+  model.selectedShell.set(shell);
+  const tab = activeTabOf(model);
+  if (model.sessions.get(tab.id)?.used) {
+    addTab(model, shell);
+    return;
+  }
+  tab.shell.set(shell);
+  restartSession(tab, model.deps);
+  focusTerminal(model);
+}
+
+/** The page became ready: options, every tab's output so far, the active tab. */
+function replayToPage(model: TerminalModel, options: unknown): void {
+  model.page.ready = true;
+  inject(model.page, pageCall("configure", options));
+  for (const tab of untracked(() => model.tabs())) inject(model.page, pageCall("write", tab.id, tab.history.chunks()));
+  inject(model.page, pageCall("select", untracked(() => model.activeId())));
+}
+
+function createPageHandlers(model: TerminalModel, onReady: () => void): PageHandlers {
+  return {
+    ready: onReady,
+    input: (msg) => {
+      const tab = tabOf(model, msg.tab);
+      if (tab) sendInput(tab, msg, model.deps);
+    },
+    resize: (msg) => {
+      const tab = tabOf(model, msg.tab);
+      if (!tab) return;
+      model.lastSize = { rows: msg.rows, cols: msg.cols };
+      resizeSession(tab, model.lastSize, model.deps);
+    },
+    title: (msg) => tabOf(model, msg.tab)?.programTitle.set(msg.title),
+    link: (msg) => void openUrl(msg.url),
+    focus: (msg) => model.focused.set(msg.focused),
+  };
+}
+
+function onPageMessage(handlers: PageHandlers, raw: string): void {
+  const msg = parseTerminalPageMessage(raw);
+  if (msg) routePageMessage(msg, handlers);
+}
+
+/**
+ * Test channel; the packaged app's host never sends it. `aed.terminal.page`
+ * delivers a page message as if the page posted it (`tab` defaults to the
+ * active tab; headless tests run no page JS, DESIGN.md trap #10) and turns on
+ * the plain-text mirror (`id:terminal-mirror`) that tests read.
+ */
+function onTestMessage(model: TerminalModel, handlers: PageHandlers, data: unknown): void {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  if (!untracked(() => model.mirrorOn())) {
+    model.mirrorOn.set(true);
+    for (const tab of untracked(() => model.tabs())) feedMirror(tab, tab.history.chunks());
+  }
+  onPageMessage(handlers, JSON.stringify({ tab: untracked(() => model.activeId()), ...data }));
+}
+
+/** What `discoverTerminalEnvironment` found, into the pane's signals; the preferred shell is selected. */
+function applyEnvironment(
+  env: TerminalEnvironment,
+  known: {
+    shells: Signal<ShellProfile[]>;
+    selectedShell: Signal<ShellProfile>;
+    externalApps: Signal<ExternalTerminalApp[]>;
+    ghosttyCfg: Signal<GhosttyConfig>;
+  },
+  preferred: string | undefined,
+  fallback: ShellProfile
+): void {
+  if (env.shells.length > 0) {
+    known.shells.set(env.shells);
+    known.selectedShell.set(resolveShellByPath(env.shells, preferred, fallback));
+  }
+  if (env.externalApps.length > 0) known.externalApps.set(env.externalApps);
+  known.ghosttyCfg.set(env.ghostty);
+}
+
+/** The panel shows: every tab's shell starts (once), and the terminal takes the keyboard. */
+function startShown(model: TerminalModel): void {
+  for (const tab of untracked(() => model.tabs())) startSession(tab, model.deps);
+  focusTerminal(model);
+}
+
+/** The terminal font: Preferences first, then Ghostty's config, then 12 pt. */
+function terminalFont(props: TerminalPaneProps, cfg: GhosttyConfig): { fontFamily?: string; fontSize: number } {
+  const family = props.fontFamily?.() || cfg.fontFamily || undefined;
+  const size = props.fontSize?.() ?? (cfg.fontSize ? Math.round(cfg.fontSize) : 12);
+  return { fontFamily: family, fontSize: size };
+}
+
+/** Tabs, the new-tab button and the shell dropdown. */
+function TerminalToolbar(props: {
+  model: TerminalModel;
+  theme: Accessor<EditorTheme>;
+  activeTab: Accessor<TermTab>;
+  shellItems: Accessor<SelectItem[]>;
+  onPick: (shellPath: string | undefined) => void;
+}): JSX.Element {
+  return (
+    <View
+      style={{ backgroundColor: props.theme().ui.sidebar }}
+      class="h-8 pr-3 flex-row items-center justify-between gap-2 shrink-0 select-none"
+    >
+      <View class="flex-1 flex-row items-center gap-1 min-w-0 overflow-hidden">
+        <Scroll horizontal class="flex-initial">
+          <View class="flex-row items-stretch h-8">
+            <Each of={props.model.tabs()} key={(tab) => tab.id}>
+              {(tab) => (
+                <TermTabChip
+                  tab={tab}
+                  activeId={props.model.activeId}
+                  theme={props.theme}
+                  onSelect={(id) => {
+                    props.model.activeId.set(id);
+                    focusTerminal(props.model);
+                  }}
+                  onClose={(id) => closeTab(props.model, id)}
+                />
+              )}
+            </Each>
+          </View>
+        </Scroll>
+        <Button
+          testID="terminal-add-btn"
+          onPress={() => addTab(props.model, props.model.selectedShell())}
+          accessibilityLabel="New terminal tab"
+          class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0 shrink-0"
+        >
+          <Icon name="plus" size={12} tint={() => props.theme().ui.mutedForeground} />
+        </Button>
+      </View>
+
+      <View class="flex-row items-center shrink-0">
+        <Select
+          testID="terminal-shell-select"
+          items={props.shellItems()}
+          value={props.activeTab().shell().path}
+          placement="top"
+          align="end"
+          offset={6}
+          onChange={({ value }) => props.onPick(value || undefined)}
+          trigger={
+            <View
+              testID="terminal-shell-trigger"
+              style={{ backgroundColor: props.theme().ui.background }}
+              class="h-6 px-2 flex-row items-center gap-1.5 rounded"
+            >
+              <Text style={{ color: props.theme().ui.foreground }} class="text-[11px] font-mono">
+                {props.activeTab().shell().name}
+              </Text>
+              <Icon name="chevron-down" size={10} tint={() => props.theme().ui.mutedForeground} />
+            </View>
+          }
+          popupClass="w-56 rounded-lg shadow-2xl p-1"
+          popupStyle={{ backgroundColor: props.theme().ui.card }}
+          itemClass="rounded cursor-pointer"
+          renderItem={(item) => (
+            <ShellSelectOptionRow
+              value={item.value}
+              title={item.title}
+              selected={item.value === props.activeTab().shell().path}
+              theme={props.theme}
+            />
+          )}
+        />
+      </View>
+    </View>
+  );
+}
+
 /**
  * A bottom-dock terminal: one xterm per tab in one WebView, each on a PTY
  * bridge process; discovers local terminal apps (Ghostty, iTerm2, Warp,
@@ -681,19 +993,6 @@ function ShellSelectOptionRow(props: {
  * local Ghostty font settings.
  */
 export function TerminalPane(props: TerminalPaneProps): JSX.Element {
-  let counter = 1;
-  const nextId = () => ++counter;
-  const sessions = new Map<number, PtySession>();
-  let webView: WebViewRef | null = null;
-  let pageReady = false;
-  let lastSize: TermSize = { rows: DEFAULT_ROWS, cols: DEFAULT_COLS };
-  /** The page is mounted the first time the panel shows, then kept. */
-  const pageMounted = signal(false);
-  /** Whether the terminal has the keyboard (the page says so). */
-  const focused = signal(false);
-  /** The test channel is in use: the plain-text mirror is fed and shown. */
-  const mirrorOn = signal(false);
-
   const fallbackShell = defaultShellProfile();
   const shells = signal<ShellProfile[]>([fallbackShell]);
   const selectedShell = signal<ShellProfile>(
@@ -702,152 +1001,27 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   const externalApps = signal<ExternalTerminalApp[]>([]);
   const ghosttyCfg = signal<GhosttyConfig>({});
   const primaryExternal = computed(() => externalApps()[0]);
+  const model = createTerminalModel(untracked(() => selectedShell()), selectedShell, props.cwd, primaryExternal);
+  const { tabs, activeId, focused, mirrorOn } = model;
+  /** The page is mounted the first time the panel shows, then kept. */
+  const pageMounted = signal(false);
 
-  const firstTab = createTermTab(counter, untracked(() => selectedShell()));
-  const tabs = signal<TermTab[]>([firstTab]);
-  const activeId = signal(firstTab.id);
-  const activeTab = computed(() => tabs().find((tab) => tab.id === activeId()) || firstTab);
-  const tabById = (id: number) => untracked(() => tabs()).find((tab) => tab.id === id);
-
+  const activeTab = computed(() => tabs().find((tab) => tab.id === activeId()) ?? tabs()[0]);
   const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
-  const termFont = computed(() => {
-    const cfg = ghosttyCfg();
-    const family = props.fontFamily?.() || cfg.fontFamily || undefined;
-    const size = props.fontSize?.() ?? (cfg.fontSize ? Math.round(cfg.fontSize) : 12);
-    return { fontFamily: family, fontSize: size };
-  });
-  const termOptions = computed(() => buildTerminalOptions(activeTheme(), termFont()));
+  const termOptions = computed(() => buildTerminalOptions(activeTheme(), terminalFont(props, ghosttyCfg())));
   /** Built once: a new `html` value would reload the page. */
   const shellHtml = buildTerminalShellHtml(untracked(() => activeTheme().ui.background));
 
-  const inject = (js: string) => {
-    if (pageReady) webView?.injectJavaScript(js);
-  };
-  const feedMirror = (tab: TermTab, chunks: string[]) => {
-    const { text, utf8, lines } = tab.mirror;
-    for (const chunk of chunks) text.push(utf8.push(decodeBase64(chunk)));
-    lines.set([...text.lines(), text.current()]);
-  };
-  const deps: SessionDeps = {
-    sessions,
-    cwd: props.cwd,
-    app: primaryExternal,
-    lastSize: () => lastSize,
-    output: (tab, chunks) => {
-      for (const chunk of chunks) tab.history.push(chunk);
-      if (untracked(() => mirrorOn())) feedMirror(tab, chunks);
-      inject(pageCall("write", tab.id, chunks));
-    },
-    reset: (tab) => {
-      tab.history.clear();
-      tab.mirror = createMirror(tab.mirror.lines);
-      tab.mirror.lines.set([]);
-      tab.programTitle.set("");
-      inject(pageCall("reset", tab.id));
-    },
-  };
-
-  const focusTerminal = () => {
-    webView?.focus();
-    inject(pageCall("focus"));
-  };
-  const clearActive = () => {
-    const tab = untracked(() => activeTab());
-    tab.mirror = createMirror(tab.mirror.lines);
-    tab.mirror.lines.set([]);
-    inject(pageCall("clear", tab.id));
-  };
-
-  const addTab = (shell: ShellProfile) => {
-    const tab = createTermTab(nextId(), shell);
-    tabs.update((previous) => previous.concat([tab]));
-    activeId.set(tab.id);
-    startSession(tab, deps);
-    focusTerminal();
-  };
-
-  const closeTab = (id: number) => {
-    disposeSession(id, sessions);
-    inject(pageCall("close", id));
-    const remaining = untracked(() => tabs()).filter((tab) => tab.id !== id);
-    tabs.set(remaining);
-    if (untracked(() => activeId()) !== id) return;
-    if (remaining.length > 0) {
-      activeId.set(remaining[remaining.length - 1].id);
-      focusTerminal();
-      return;
-    }
-    // The last tab closed: a new one opens at once.
-    addTab(untracked(() => selectedShell()));
-  };
-
-  /**
-   * The user picked a shell in the dropdown: it becomes the default for new
-   * tabs; the active tab switches to it unless someone typed into it, then
-   * the shell opens in a new tab instead (a used session is never killed).
-   */
-  const pickShell = (shell: ShellProfile) => {
-    selectedShell.set(shell);
-    props.onShellChange?.(shell.path);
-    const tab = untracked(() => activeTab());
-    if (sessions.get(tab.id)?.used) {
-      addTab(shell);
-      return;
-    }
-    tab.shell.set(shell);
-    restartSession(tab, deps);
-    focusTerminal();
-  };
-
-  const handlers: PageHandlers = {
-    ready: () => {
-      pageReady = true;
-      inject(pageCall("configure", untracked(() => termOptions())));
-      for (const tab of untracked(() => tabs())) inject(pageCall("write", tab.id, tab.history.chunks()));
-      inject(pageCall("select", untracked(() => activeId())));
-      if (untracked(() => props.visible())) focusTerminal();
-    },
-    input: (msg) => {
-      const tab = tabById(msg.tab);
-      if (tab) sendInput(tab, msg, deps);
-    },
-    resize: (msg) => {
-      const tab = tabById(msg.tab);
-      if (!tab) return;
-      lastSize = { rows: msg.rows, cols: msg.cols };
-      resizeSession(tab, lastSize, deps);
-    },
-    title: (msg) => tabById(msg.tab)?.programTitle.set(msg.title),
-    link: (msg) => void openUrl(msg.url),
-    focus: (msg) => focused.set(msg.focused),
-  };
-  const onPageMessage = (raw: string) => {
-    const msg = parseTerminalPageMessage(raw);
-    if (msg) routePageMessage(msg, handlers);
-  };
-
-  // Test channel; the packaged app's host never sends it. `aed.terminal.page`
-  // delivers a page message as if the page posted it (`tab` defaults to the
-  // active tab; headless tests run no page JS, DESIGN.md trap #10) and turns
-  // on the plain-text mirror (`id:terminal-mirror`) that tests read.
-  host.on("aed.terminal.page", (data) => {
-    if (!data || typeof data !== "object" || Array.isArray(data)) return;
-    if (!untracked(() => mirrorOn())) {
-      mirrorOn.set(true);
-      for (const tab of untracked(() => tabs())) feedMirror(tab, tab.history.chunks());
-    }
-    onPageMessage(JSON.stringify({ tab: untracked(() => activeId()), ...data }));
+  const handlers = createPageHandlers(model, () => {
+    replayToPage(model, untracked(() => termOptions()));
+    if (untracked(() => props.visible())) focusTerminal(model);
   });
+  host.on("aed.terminal.page", (data) => onTestMessage(model, handlers, data));
 
   effect(() => {
     discoverTerminalEnvironment().then((env) => {
-      if (env.shells.length > 0) {
-        shells.set(env.shells);
-        const pref = untracked(() => props.shellPath?.());
-        selectedShell.set(resolveShellByPath(env.shells, pref, fallbackShell));
-      }
-      if (env.externalApps.length > 0) externalApps.set(env.externalApps);
-      ghosttyCfg.set(env.ghostty);
+      const known = { shells, selectedShell, externalApps, ghosttyCfg };
+      applyEnvironment(env, known, untracked(() => props.shellPath?.()), fallbackShell);
     });
   });
 
@@ -858,7 +1032,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
     const resolved = resolveShellByPath(untracked(() => shells()), extPath, fallbackShell);
     selectedShell.set(resolved);
     // Outside this effect's run: a shell spawned inside it ends when the effect runs again.
-    setTimeout(() => adoptShell(untracked(() => tabs()), resolved, deps), 0);
+    setTimeout(() => adoptShell(untracked(() => tabs()), resolved, model.deps), 0);
   });
 
   // Shells start the first time the panel shows (no hidden login shell at
@@ -869,32 +1043,29 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       return;
     }
     pageMounted.set(true);
-    setTimeout(() => {
-      for (const tab of untracked(() => tabs())) startSession(tab, deps);
-      focusTerminal();
-    }, 0);
+    setTimeout(() => startShown(model), 0);
   });
   effect(() => {
-    cleanup(() => disposeAllSessions(sessions));
+    cleanup(() => disposeAllSessions(model.sessions));
   });
 
   effect(() => {
     void props.cwd();
-    setTimeout(() => followFolder(untracked(() => tabs()), deps), 0);
+    setTimeout(() => followFolder(untracked(() => tabs()), model.deps), 0);
   });
 
   effect(() => {
-    inject(pageCall("select", activeId()));
+    inject(model.page, pageCall("select", activeId()));
   });
   effect(() => {
-    inject(pageCall("configure", termOptions()));
+    inject(model.page, pageCall("configure", termOptions()));
   });
 
   // While the terminal has the keyboard its bindings are the newest, so they
   // win: ⌘K clears it (not Quick Open), ⌘F opens no editor find bar.
   effect(() => {
     if (!focused()) return;
-    cleanup(keymap.bind({ "mod+k": clearActive, "mod+f": () => undefined }));
+    cleanup(keymap.bind({ "mod+k": () => clearActive(model), "mod+f": () => undefined }));
   });
 
   const shellItems = computed<SelectItem[]>(() =>
@@ -907,90 +1078,33 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       class="flex-1 flex-col"
       testID="terminal-pane"
     >
-      <View
-        style={{ backgroundColor: activeTheme().ui.sidebar }}
-        class="h-8 pr-3 flex-row items-center justify-between gap-2 shrink-0 select-none"
-      >
-        <View class="flex-1 flex-row items-center gap-1 min-w-0 overflow-hidden">
-          <Scroll horizontal class="flex-initial">
-            <View class="flex-row items-stretch h-8">
-              <Each of={tabs()} key={(tab) => tab.id}>
-                {(tab) => (
-                  <TermTabChip
-                    tab={tab}
-                    activeId={activeId}
-                    theme={activeTheme}
-                    onSelect={(id) => {
-                      activeId.set(id);
-                      focusTerminal();
-                    }}
-                    onClose={closeTab}
-                  />
-                )}
-              </Each>
-            </View>
-          </Scroll>
-          <Button
-            testID="terminal-add-btn"
-            onPress={() => addTab(selectedShell())}
-            accessibilityLabel="New terminal tab"
-            class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0 shrink-0"
-          >
-            <Icon name="plus" size={12} tint={() => activeTheme().ui.mutedForeground} />
-          </Button>
-        </View>
-
-        <View class="flex-row items-center shrink-0">
-          <Select
-            testID="terminal-shell-select"
-            items={shellItems()}
-            value={activeTab().shell().path}
-            placement="top"
-            align="end"
-            offset={6}
-            onChange={({ value }) => pickShell(resolveShellByPath(shells(), value ?? undefined, fallbackShell))}
-            trigger={
-              <View
-                testID="terminal-shell-trigger"
-                style={{ backgroundColor: activeTheme().ui.background }}
-                class="h-6 px-2 flex-row items-center gap-1.5 rounded"
-              >
-                <Text style={{ color: activeTheme().ui.foreground }} class="text-[11px] font-mono">
-                  {activeTab().shell().name}
-                </Text>
-                <Icon name="chevron-down" size={10} tint={() => activeTheme().ui.mutedForeground} />
-              </View>
-            }
-            popupClass="w-56 rounded-lg shadow-2xl p-1"
-            popupStyle={{ backgroundColor: activeTheme().ui.card }}
-            itemClass="rounded cursor-pointer"
-            renderItem={(item) => (
-              <ShellSelectOptionRow
-                value={item.value}
-                title={item.title}
-                selected={item.value === activeTab().shell().path}
-                theme={activeTheme}
-              />
-            )}
-          />
-        </View>
-      </View>
+      <TerminalToolbar
+        model={model}
+        theme={activeTheme}
+        activeTab={activeTab}
+        shellItems={shellItems}
+        onPick={(value) => {
+          const shell = resolveShellByPath(shells(), value, fallbackShell);
+          props.onShellChange?.(shell.path);
+          pickShell(model, shell);
+        }}
+      />
 
       <View style={{ backgroundColor: activeTheme().ui.background }} class="flex-1">
         <If when={pageMounted()}>
           <WebView
             ref={(r) => {
-              webView = r;
+              model.page.view = r;
             }}
             testID="terminal-view"
             html={shellHtml}
             class="flex-1"
             onLoad={() => {
               // A (re)loaded page knows nothing: runtime first, then its `ready` replays the tabs.
-              pageReady = false;
-              webView?.injectJavaScript(XTERM_RUNTIME_JS);
+              model.page.ready = false;
+              model.page.view?.injectJavaScript(XTERM_RUNTIME_JS);
             }}
-            onMessage={({ data }) => onPageMessage(data)}
+            onMessage={({ data }) => onPageMessage(handlers, data)}
             onBlur={() => focused.set(false)}
           />
         </If>
