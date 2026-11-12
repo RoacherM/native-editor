@@ -37,9 +37,6 @@ export interface FileClassification {
   mimeType: string;
 }
 
-/** The directory PDF preview thumbnails are cached in (inside the /tmp grant). */
-const QUICK_LOOK_DIR = "/tmp/aed-ql";
-
 /** A cell that reads as a number becomes one, so a table sorts numerically. */
 const NUMERIC_PATTERN = /^-?\d+(?:\.\d+)?$/;
 
@@ -549,29 +546,41 @@ export function probeImageDimensions(
   return text ? probeSvgDimensions(text) : null;
 }
 
-const quickLookCache = new Map<string, string>();
+/** filePath → the preview of the version last shown; a newer version's replaces it and revokes its URL. */
+const quickLookCache = new Map<string, { version: string; url: string }>();
 
-/** Generate a macOS 2x Retina preview PNG for a PDF document via CoreGraphics `sips` and return a blob: URL, or null on failure. */
-export async function generateQuickLookUrl(filePath: string, cwd: string): Promise<string | null> {
+/**
+ * Make a macOS 2x Retina preview PNG of a PDF's first page with `sips`, in
+ * `outDir` (Aed's per-user cache, DESIGN.md「术语与边界」), and return it as a
+ * blob: URL, or null on failure. The PNG is deleted as soon as it is read.
+ */
+export async function generateQuickLookUrl(
+  filePath: string,
+  cwd: string,
+  outDir: string
+): Promise<string | null> {
   try {
     const stat = await fs.stat(filePath);
-    const cacheKey = `${filePath}:${stat.mtimeMs}:${stat.size}`;
-    const cachedUrl = quickLookCache.get(cacheKey);
-    if (cachedUrl) return cachedUrl;
+    const version = `${stat.mtimeMs}:${stat.size}`;
+    const cached = quickLookCache.get(filePath);
+    if (cached?.version === version) return cached.url;
 
-    await fs.mkdir(QUICK_LOOK_DIR, { recursive: true });
-    const pngPath = path.join(
-      QUICK_LOOK_DIR,
-      `${path.basename(filePath)}-${stat.size}-${Math.trunc(stat.mtimeMs)}.png`
-    );
-    await process.run(
-      "sips",
-      ["-Z", "1800", "-s", "format", "png", filePath, "--out", pngPath],
-      { cwd }
-    );
-    const bytes = await fs.readFile(pngPath);
+    await fs.mkdir(outDir, { recursive: true });
+    const pngPath = path.join(outDir, `${crypto.randomUUID()}.png`);
+    let bytes: Uint8Array;
+    try {
+      await process.run(
+        "sips",
+        ["-Z", "1800", "-s", "format", "png", filePath, "--out", pngPath],
+        { cwd }
+      );
+      bytes = await fs.readFile(pngPath);
+    } finally {
+      await fs.unlink(pngPath).catch(() => undefined);
+    }
     const url = createBlobUrl(bytes, "image/png");
-    quickLookCache.set(cacheKey, url);
+    if (cached) URL.revokeObjectURL(cached.url);
+    quickLookCache.set(filePath, { version, url });
     return url;
   } catch {
     return null;

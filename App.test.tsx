@@ -43,6 +43,9 @@ import {
   type LoadedFile,
 } from "./src/workspace";
 import { saveInStore } from "./src/saving";
+import * as fs from "fs/promises";
+import * as os from "os";
+import { withPreviewCsp } from "./src/PreviewPane";
 import {
   buildPreviewShellHtml,
   buildPreviewThemeCss,
@@ -53,7 +56,7 @@ import {
   type PreviewBridgeDeps,
   type PreviewMessage,
 } from "./src/markdownPage";
-import { buildMermaidConfig } from "./src/mermaid";
+import { buildMermaidConfig, rememberRender } from "./src/mermaid";
 import { MARKDOWN_RUNTIME_JS } from "./src/markdownVendor.generated";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
@@ -1775,5 +1778,151 @@ describe("markdown preview runtime & bridge", () => {
     expect(cfg.themeVariables.secondaryColor).toBe("#1d1c1a");
     expect(cfg.themeVariables.tertiaryColor).toBe("#161514");
     expect(cfg.themeVariables.fontSize).toBe("13px");
+  });
+});
+
+/** Aed's per-user cache directory (DESIGN.md「术语与边界」), as the app computes it. */
+const AED_CACHE_DIR = `${os.homedir()}/Library/Caches/dev.byronwayne.aed`;
+
+describe("I-018 per-user temp files, external open & capabilities", () => {
+  test("file://localhost URLs and %XX escapes decode to the plain path", () => {
+    expect(normalizeExternalFilePath("file://localhost/tmp/My%20Notes.md")).toBe("/tmp/My Notes.md");
+    expect(normalizeExternalFilePath("file:///tmp/My%20Notes.md#L3")).toBe("/tmp/My Notes.md");
+  });
+
+  test("the Mermaid render cache keeps the newest diagrams and revokes the URL of each one it drops", () => {
+    const cache = new Map<string, string>();
+    const revoked: string[] = [];
+    const remember = (key: string) => rememberRender(cache, key, `blob:${key}`, 2, (u) => revoked.push(u));
+    remember("a");
+    remember("b");
+    remember("a"); // used again: now the newest
+    remember("c");
+    expect([...cache.keys()]).toEqual(["a", "c"]);
+    expect(revoked).toEqual(["blob:b"]);
+  });
+
+  test("standalone .mmd rendering uses Mermaid's strict security level", () => {
+    expect(buildMermaidConfig(getThemeById("industrial-paper")!, "").securityLevel).toBe("strict");
+  });
+
+  test(".html previews get a CSP that blocks scripts and remote loads, placed before any of the page's own tags", () => {
+    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; form-action 'none'">`;
+    expect(withPreviewCsp("<p>hi</p><script>evil()</script>")).toBe(`${csp}<p>hi</p><script>evil()</script>`);
+    expect(withPreviewCsp("  <!DOCTYPE html>\n<html><head><script src=https://x.io/a.js></script>")).toBe(
+      `  <!DOCTYPE html>${csp}\n<html><head><script src=https://x.io/a.js></script>`
+    );
+  });
+
+  test("the packaged Info.plist claims Default only for document types, and installing never takes over default apps by itself", async () => {
+    // Runs package-macos.sh's own Info.plist step on a throwaway plist, in the app's terminal.
+    const script = new URL("./scripts/package-macos.sh", import.meta.url).pathname;
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    const listAnyData =
+      `import json,sys; t=[x for x in json.load(sys.stdin) if 'public.data' in x['LSItemContentTypes']]; ` +
+      `print('ANYDATA_'+'_'.join(x['CFBundleTypeRole']+x['LSHandlerRank'] for x in t))`;
+    await runInTerminal(
+      app,
+      [
+        `D=$(mktemp -d)`,
+        `mkdir $D/MacOS`,
+        `python3 -I -c "import plistlib,sys; plistlib.dump({}, open(sys.argv[1], 'wb'))" $D/Info.plist`,
+        `awk "/<< 'PYEOF'/{f=1;next} /^PYEOF/{f=0} f" ${script} > $D/step.py`,
+        `python3 -I $D/step.py $D/Info.plist $D/MacOS`,
+        `plutil -extract CFBundleDocumentTypes json -o - $D/Info.plist | python3 -I -c "${listAnyData}"`,
+        `echo AUTO_$(grep -c FIRST_INSTALL ${script})`,
+        `rm -rf $D`,
+      ].join(" && "),
+      "PLIST_CHECKED"
+    );
+    expect(app.texts().some((t) => t.includes("ANYDATA_ViewerAlternate"))).toBe(true);
+    expect(app.texts().some((t) => t.includes("AUTO_0"))).toBe(true);
+  });
+
+  test("nsh.json grants no network hosts and no remote web pages, and lets the app read its queue path", () => {
+    expect(manifest.capabilities.network.hosts).toEqual([]);
+    expect(manifest.capabilities.webview.hosts).toEqual([]);
+    expect(manifest.capabilities.process.env).toContain("AED_OPEN_QUEUE");
+  });
+
+  test("an external open with :line:col jumps there; files named like `odd:2` or with spaces open as named", async () => {
+    await withScratch(
+      { "a.txt": "A_FIRST", "lines.txt": "L1\\nL2\\nL3 third", "odd:2": "ODD_NAMED" },
+      async ({ app, dir }) => {
+        await app.host.send("enqueueFinderOpen", `${dir}/lines.txt:3:2`);
+        await app.waitUntil(() => app.texts().some((t) => t.includes("Ln 3, Col 2")), {
+          timeout: 4000,
+        });
+        await app.host.send("enqueueFinderOpen", `${dir}/odd:2`);
+        await app.waitUntil(() => showsText(app, "ODD_NAMED"), { timeout: 4000 });
+        await runInTerminal(app, `printf 'SPACED_NAME\\n' > '${dir}/My Notes.txt'`, "SPACED_DONE");
+        await app.host.send("enqueueFinderOpen", `file://localhost${dir}/My%20Notes.txt`);
+        await app.waitUntil(() => showsText(app, "SPACED_NAME"), { timeout: 4000 });
+      }
+    );
+  });
+
+  test("the Finder queue is this process's own directory: read in order, entries removed, symlinks never followed", async () => {
+    // A pid above macOS's pid_max: no live Aed owns it, and the launcher's cleanup removes it.
+    const queue = `${AED_CACHE_DIR}/open-99999990`;
+    await withScratch(
+      { "a.txt": "A_FIRST", "q1.txt": "Q_ONE", "q2.txt": "Q_TWO", "q10.txt": "Q_TEN", "secret.txt": "SECRET" },
+      async ({ app, dir }) => {
+        try {
+          await runInTerminal(
+            app,
+            [
+              `rm -rf ${queue}`,
+              `mkdir -p ${queue}`,
+              `printf '%s' '${dir}/q1.txt' > ${queue}/1.path`,
+              `printf '%s' '${dir}/q10.txt' > ${queue}/10.path`,
+              `printf '%s' '${dir}/q2.txt' > ${queue}/2.path`,
+              `printf '%s' '${dir}/secret.txt' > ${dir}/pointer`,
+              `ln -s ${dir}/pointer ${queue}/3.path`,
+              `printf '%s' '${dir}/secret.txt' > ${queue}/.4.tmp`,
+            ].join(" && "),
+            "QUEUE_READY"
+          );
+          const qapp = await open("./App.tsx", {
+            platform: "macos",
+            width: 1280,
+            height: 800,
+            host: { params: { openQueue: queue } },
+          });
+          await qapp.waitFor("id:tab-select-q10.txt", { timeout: 4000 });
+          expect(qapp.shows("id:tab-select-q1.txt")).toBe(true);
+          expect(qapp.shows("id:tab-select-q2.txt")).toBe(true);
+          expect(qapp.shows("id:tab-select-secret.txt")).toBe(false);
+          // The last entry (by number, 10 after 2) is the active tab.
+          expect(showsText(qapp, "Q_TEN")).toBe(true);
+          await runInTerminal(
+            app,
+            `ls -A ${queue} | grep -v '^\\.' | wc -l | tr -d ' ' | sed 's/^/QLEFT_/'`,
+            "QUEUE_COUNTED"
+          );
+          expect(app.texts().some((t) => t.includes("QLEFT_0"))).toBe(true);
+        } finally {
+          await runInTerminal(app, `rm -rf ${queue}`, "QUEUE_CLEANED");
+        }
+      }
+    );
+  });
+
+  test("PDF previews are made in the per-user cache and the PNG is deleted once read", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:manual.pdf");
+    await app.press("text:manual.pdf");
+    await app.waitFor("id:preview-quicklook-sheet", { timeout: 8000 });
+    await runInTerminal(
+      app,
+      `test -d ${AED_CACHE_DIR}/ql && ls -A ${AED_CACHE_DIR}/ql | wc -l | tr -d ' ' | sed 's/^/QLPNG_/'`,
+      "QL_COUNTED"
+    );
+    expect(app.texts().some((t) => t.includes("QLPNG_0"))).toBe(true);
   });
 });

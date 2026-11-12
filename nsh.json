@@ -92,6 +92,7 @@
         "PWD",
         "AED_ROOT",
         "AED_OPEN_FILE",
+        "AED_OPEN_QUEUE",
         "NATIVE_EDITOR_ROOT",
         "NATIVE_EDITOR_OPEN_FILE"
       ]
@@ -101,14 +102,10 @@
     "openUrl": true,
     "host": true,
     "webview": {
-      "hosts": [
-        "*"
-      ]
+      "hosts": []
     },
     "network": {
-      "hosts": [
-        "*"
-      ]
+      "hosts": []
     }
   }
 }

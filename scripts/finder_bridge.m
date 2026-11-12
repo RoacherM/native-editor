@@ -2,6 +2,8 @@
 #import <objc/runtime.h>
 #include <stdlib.h>
 
+#include "aed_paths.h"
+
 #define NE_MIN_WINDOW_WIDTH 760.0
 #define NE_MIN_WINDOW_HEIGHT 520.0
 
@@ -69,33 +71,29 @@ static void bringAppToFront(NSApplication *app) {
   }
 }
 
-static void recordOpenedFilePath(NSString *path) {
-  if (!path || [path length] == 0) return;
-  const char *cpath = [path fileSystemRepresentation];
-  if (!cpath) return;
-  BOOL isDir = NO;
-  if ([[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir] && isDir) {
-    setenv("AED_ROOT", cpath, 1);
-  } else {
-    unsetenv("AED_ROOT");
-    unsetenv("NATIVE_EDITOR_ROOT");
-    setenv("AED_OPEN_FILE", cpath, 1);
-  }
-  FILE *fp = fopen("/tmp/aed-open.queue", "a");
-  if (fp) {
-    fprintf(fp, "%s\n", cpath);
-    fclose(fp);
+/*
+ * Cold start: queue the paths for this window. The app reads its own queue
+ * (`AED_OPEN_QUEUE`, DESIGN.md「术语与边界」); nothing goes through /tmp or
+ * through the environment, which the built-in terminal's shells inherit.
+ */
+static void queueForThisWindow(NSArray<NSString *> *paths) {
+  for (NSString *path in paths) {
+    const char *cpath = [path fileSystemRepresentation];
+    if (cpath) aedQueueAppend(getpid(), cpath);
   }
 }
 
-static void spawnStandaloneWindow(NSString *path) {
-  if (!path || [path length] == 0) return;
+/* One new tree-less window that opens all `paths` as tabs. */
+static void spawnStandaloneWindow(NSArray<NSString *> *paths) {
+  if ([paths count] == 0) return;
   NSBundle *bundle = [NSBundle mainBundle];
   NSString *bundlePath = [bundle bundlePath];
   if (bundlePath && [bundlePath hasSuffix:@".app"]) {
     NSTask *task = [[[NSTask alloc] init] autorelease];
     [task setLaunchPath:@"/usr/bin/open"];
-    [task setArguments:@[@"-n", bundlePath, @"--args", path]];
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:@"-n", bundlePath, @"--args", nil];
+    [args addObjectsFromArray:paths];
+    [task setArguments:args];
     @try {
       [task launch];
       return;
@@ -107,7 +105,7 @@ static void spawnStandaloneWindow(NSString *path) {
   if (launcherPath && [[NSFileManager defaultManager] isExecutableFileAtPath:launcherPath]) {
     NSTask *task = [[[NSTask alloc] init] autorelease];
     [task setLaunchPath:launcherPath];
-    [task setArguments:@[path]];
+    [task setArguments:paths];
     @try {
       [task launch];
     } @catch (NSException *exception) {
@@ -115,36 +113,55 @@ static void spawnStandaloneWindow(NSString *path) {
   }
 }
 
-static void handleExternalOpenPath(NSApplication *app, NSString *path) {
-  if (!path || [path length] == 0) return;
+/*
+ * One open event (N files selected in Finder) is one batch: all files open
+ * as tabs of one window (this one on a cold start, else one new window);
+ * each folder gets a window of its own.
+ */
+static void handleExternalOpenPaths(NSApplication *app, NSArray<NSString *> *paths) {
+  NSMutableArray<NSString *> *files = [NSMutableArray array];
+  NSMutableArray<NSString *> *folders = [NSMutableArray array];
+  for (NSString *path in paths) {
+    if (!path || [path length] == 0) continue;
+    BOOL isDir = NO;
+    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir];
+    [(exists && isDir ? folders : files) addObject:path];
+  }
+  if ([files count] == 0 && [folders count] == 0) return;
   BOOL isColdInitialOpen = (!gHasClaimedInitialTarget && (!gDidFinishLaunching || (CFAbsoluteTimeGetCurrent() - gDidFinishLaunchingTime) < 1.5));
   if (isColdInitialOpen) {
     gHasClaimedInitialTarget = YES;
-    recordOpenedFilePath(path);
+    if ([files count] > 0) {
+      queueForThisWindow(files);
+    } else {
+      queueForThisWindow(@[ folders[0] ]);
+      [folders removeObjectAtIndex:0];
+    }
     bringAppToFront(app);
-    return;
+  } else {
+    spawnStandaloneWindow(files);
   }
-  spawnStandaloneWindow(path);
+  for (NSString *folder in folders) {
+    spawnStandaloneWindow(@[ folder ]);
+  }
 }
 
 static BOOL ne_application_openFile(id self, SEL _cmd, NSApplication *app, NSString *filename) {
-  handleExternalOpenPath(app, filename);
+  handleExternalOpenPaths(app, filename ? @[ filename ] : @[]);
   return YES;
 }
 
 static void ne_application_openFiles(id self, SEL _cmd, NSApplication *app, NSArray<NSString *> *filenames) {
-  for (NSString *filename in filenames) {
-    handleExternalOpenPath(app, filename);
-  }
+  handleExternalOpenPaths(app, filenames ?: @[]);
   [app replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 
 static void ne_application_openURLs(id self, SEL _cmd, NSApplication *app, NSArray<NSURL *> *urls) {
+  NSMutableArray<NSString *> *paths = [NSMutableArray array];
   for (NSURL *url in urls) {
-    if ([url isFileURL]) {
-      handleExternalOpenPath(app, [url path]);
-    }
+    if ([url isFileURL] && [url path]) [paths addObject:[url path]];
   }
+  handleExternalOpenPaths(app, paths);
 }
 
 static void attachOpenHandlersToDelegate(id delegate) {
@@ -168,6 +185,13 @@ static void swizzled_setDelegate(id self, SEL _cmd, id delegate) {
 __attribute__((constructor))
 static void initFinderBridge(void) {
   unsetenv("DYLD_INSERT_LIBRARIES");
+  // This process's own queue, recomputed from the pid: an inherited value is never trusted.
+  char queueDir[PATH_MAX];
+  if (aedQueueDir(getpid(), queueDir, sizeof queueDir) == 0) {
+    setenv("AED_OPEN_QUEUE", queueDir, 1);
+  } else {
+    unsetenv("AED_OPEN_QUEUE");
+  }
   const char *initFile = getenv("AED_OPEN_FILE");
   const char *initRoot = getenv("AED_ROOT");
   if ((initFile && initFile[0] != '\0') || (initRoot && initRoot[0] != '\0')) {

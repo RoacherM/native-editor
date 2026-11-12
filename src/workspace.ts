@@ -193,7 +193,13 @@ function decodeFileText(
 }
 
 // DESIGN.md「术语与边界」
-const FINDER_OPEN_QUEUE_PATH = "/tmp/aed-open.queue";
+/** Aed's per-user cache directory; `scripts/aed_paths.h` computes the same path. */
+export function aedCacheDir(): string {
+  return path.join(os.homedir(), "Library", "Caches", "dev.byronwayne.aed");
+}
+
+/** A queue entry the native writers (`aed_paths.h`) publish; `.<seq>.tmp` files are still being written. */
+const QUEUE_ENTRY = /^(\d+)\.path$/;
 let queueLock: Promise<void> = Promise.resolve();
 
 function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -205,73 +211,140 @@ function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** Normalize an external file reference (strips `file://`, URL encoding, `#L<line>`, and `:line(:col)` suffixes). */
-export function normalizeExternalFilePath(raw: string): string {
-  let clean = raw.trim();
-  if (!clean) return "";
-  const isFileUri = clean.startsWith("file://");
-  if (isFileUri) {
-    const hashIdx = clean.indexOf("#");
-    if (hashIdx > 7) {
-      clean = clean.slice(0, hashIdx);
-    }
-    try {
-      clean = decodeURIComponent(clean.slice(7));
-    } catch {
-      clean = clean.slice(7);
-    }
-  } else {
-    clean = clean.replace(/#L\d+(?:C\d+|-L?\d+)?$/i, "");
-  }
-  const lineColMatch = clean.match(/^(.+?):(\d+)(?::(\d+))?$/);
-  if (lineColMatch) {
-    clean = lineColMatch[1];
-  }
-  return clean;
+/** A place in a file: `line` and `column` count from 1; 0 when the reference names none. */
+export interface FileLocation {
+  path: string;
+  line: number;
+  column: number;
 }
 
-function readHostOrEnvParam(
-  paramKey: string,
-  primaryEnv: string,
-  legacyEnv: string
-): string {
+const HASH_LINE = /#L(\d+)(?:C(\d+)|-L?\d+)?$/i;
+const COLON_LINE = /^(.+?):(\d+)(?::(\d+))?$/;
+
+/** `file://[localhost]/p%20q#L3` → `/p q` and its fragment `#L3`. */
+function decodeFileUrl(url: string): { filePath: string; fragment: string } {
+  let rest = url.slice("file://".length);
+  if (rest.startsWith("localhost/")) rest = rest.slice("localhost".length);
+  const hash = rest.indexOf("#");
+  const fragment = hash >= 0 ? rest.slice(hash) : "";
+  if (hash >= 0) rest = rest.slice(0, hash);
+  try {
+    return { filePath: decodeURIComponent(rest), fragment };
+  } catch {
+    return { filePath: rest, fragment };
+  }
+}
+
+/** `p#L3C2` or `p#L3-L9` → `p` at that line (a bare `#L3` too, with an empty path). */
+function splitHashLine(ref: string): FileLocation | null {
+  const hash = HASH_LINE.exec(ref);
+  if (!hash) return null;
+  return { path: ref.slice(0, hash.index), line: Number(hash[1]), column: Number(hash[2] ?? 0) };
+}
+
+/** `p#L3C2`, `p#L3-L9`, `p:3:2` or `p:3` → `p` at that line; null without such a suffix. */
+function splitLineSuffix(ref: string): FileLocation | null {
+  const hash = splitHashLine(ref);
+  if (hash?.path) return hash;
+  const colon = COLON_LINE.exec(ref);
+  return colon ? { path: colon[1], line: Number(colon[2]), column: Number(colon[3] ?? 0) } : null;
+}
+
+/**
+ * What an external reference (a path, a `file://` URL, either with a line
+ * suffix) may name, most literal first: the path exactly as written, then
+ * the path with its line suffix taken off. A file URL's `#L3` is always a
+ * fragment (`#` in a name is written `%23`).
+ */
+export function externalFileCandidates(raw: string): FileLocation[] {
+  const clean = raw.trim();
+  if (!clean) return [];
+  if (!clean.startsWith("file://")) {
+    const stripped = splitLineSuffix(clean);
+    return [{ path: clean, line: 0, column: 0 }, ...(stripped ? [stripped] : [])];
+  }
+  const { filePath, fragment } = decodeFileUrl(clean);
+  const anchored = splitHashLine(fragment);
+  const literal = { path: filePath, line: anchored?.line ?? 0, column: anchored?.column ?? 0 };
+  const stripped = splitLineSuffix(filePath);
+  return [literal, ...(stripped ? [stripped] : [])];
+}
+
+/** The path an external reference names with any line suffix taken off (markdown links, image sources). */
+export function normalizeExternalFilePath(raw: string): string {
+  return externalFileCandidates(raw).at(-1)?.path ?? "";
+}
+
+/**
+ * The file an external open means: the path as written when it exists (a
+ * file may be named `notes:12`), else the path without its line suffix,
+ * with that line. Null when neither exists.
+ */
+export async function resolveExternalFileReference(raw: string): Promise<FileLocation | null> {
+  for (const candidate of externalFileCandidates(raw)) {
+    if (await fs.exists(candidate.path)) return candidate;
+  }
+  return null;
+}
+
+/** `host.params[paramKey]`, else the first of `envNames` that is set, else "". */
+function readHostOrEnvParam(paramKey: string, ...envNames: string[]): string {
   const fromHost = host?.params?.[paramKey];
   if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
-  const fromEnv = process.env[primaryEnv] || process.env[legacyEnv];
-  return fromEnv && fromEnv.length > 0 ? fromEnv : "";
+  return envNames.map((name) => process.env[name]).find((v) => v && v.length > 0) ?? "";
 }
 
-/** Resolve initial file opened from Finder or environment. */
+/** The file reference this window was started to open (Finder, the CLI launcher), unresolved. */
 export function getInitialOpenFile(): string | null {
-  const resolved = normalizeExternalFilePath(
-    readHostOrEnvParam(
-      "openFile",
-      "AED_OPEN_FILE",
-      "NATIVE_EDITOR_OPEN_FILE"
-    )
-  );
-  return resolved.length > 0 ? resolved : null;
+  const raw = readHostOrEnvParam("openFile", "AED_OPEN_FILE", "NATIVE_EDITOR_OPEN_FILE").trim();
+  return raw.length > 0 ? raw : null;
 }
 
-/** Read and clear any file paths queued by the macOS Finder open-file bridge. */
+/**
+ * This process's own queue directory (`AED_OPEN_QUEUE`, set by the native
+ * bridge from its pid), or null when unset or not `<cache>/open-<number>`.
+ */
+export function resolveFinderQueueDir(): string | null {
+  const raw = readHostOrEnvParam("openQueue", "AED_OPEN_QUEUE");
+  const name = path.basename(raw);
+  const inCache = path.dirname(raw) === aedCacheDir();
+  return inCache && /^open-\d+$/.test(name) ? raw : null;
+}
+
+/** Read and delete one queue entry; only a regular file counts (a symlink is removed, never followed). */
+async function takeQueueEntry(entryPath: string): Promise<string> {
+  try {
+    const stat = await fs.lstat(entryPath);
+    return stat.isFile() ? new TextDecoder().decode(await fs.readFile(entryPath)) : "";
+  } catch {
+    return "";
+  } finally {
+    await fs.unlink(entryPath).catch(() => undefined);
+  }
+}
+
+/** Read and delete the references queued for this window, in the order they were queued. */
 export async function consumeFinderOpenQueue(): Promise<string[]> {
+  const dir = resolveFinderQueueDir();
+  if (!dir) return [];
   return withQueueLock(async () => {
+    let names: string[];
     try {
-      const bytes = await fs.readFile(FINDER_OPEN_QUEUE_PATH);
-      if (bytes.length === 0) return [];
-      try {
-        await fs.writeFile(FINDER_OPEN_QUEUE_PATH, "");
-      } catch {
-        // Continue even if truncating queue fails.
-      }
-      const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-      return raw
-        .split(/\r?\n/)
-        .map((line) => normalizeExternalFilePath(line))
-        .filter((line) => line.length > 0);
+      if (!(await fs.lstat(dir)).isDirectory()) return [];
+      names = await fs.readdir(dir);
     } catch {
       return [];
     }
+    const entries = names
+      .map((name) => QUEUE_ENTRY.exec(name))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .sort((a, b) => Number(a[1]) - Number(b[1]));
+    const refs: string[] = [];
+    for (const [name] of entries) {
+      const ref = await takeQueueEntry(path.join(dir, name));
+      if (ref) refs.push(ref);
+    }
+    return refs;
   });
 }
 
@@ -781,7 +854,11 @@ export async function loadFile(
     classification.kind === "image" ? probeImageDimensions(bytes, text) : null;
   const quickLookUrl =
     classification.kind === "quicklook"
-      ? await generateQuickLookUrl(filePath, execCwd(root || path.dirname(filePath)))
+      ? await generateQuickLookUrl(
+          filePath,
+          execCwd(root || path.dirname(filePath)),
+          path.join(aedCacheDir(), "ql")
+        )
       : null;
   const diffPatch = await resolveInitialDiffPatch(
     filePath,

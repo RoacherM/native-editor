@@ -85,16 +85,17 @@ import {
   isDirectoryPath,
   loadFile,
   lookupGitStatus,
-  normalizeExternalFilePath,
   pickWorkspaceFolder,
   hasChangedOnDisk,
   readDiskStamp,
   reloadFromDisk,
+  resolveExternalFileReference,
   reloadIfChangedOnDisk,
   saveFileText,
   scanWorkspace,
   shortenHomePath,
   warmWorkspaceFiles,
+  type FileLocation,
   type GitStatusCode,
   type LoadedFile,
   type WorkspaceSnapshot,
@@ -1504,12 +1505,6 @@ function setupDesktopChrome(
   });
 }
 
-function decodeDroppedUri(uri: string | undefined): string | null {
-  if (!uri) return null;
-  const normalized = normalizeExternalFilePath(uri);
-  return normalized.length > 0 ? normalized : null;
-}
-
 function tryReuseLoadedFileSync(
   current: Record<string, LoadedFile>,
   filePath: string,
@@ -2041,6 +2036,8 @@ function App(): JSX.Element {
 
   const cursorLine = signal<number>(1);
   const cursorCol = signal<number>(1);
+  /** The place an external open (`file:12:3`) asked for, until the editor shows it. */
+  const pendingReveal = signal<FileLocation | null>(null);
   const commandOpen = signal<boolean>(false);
   const commandMode = signal<"files" | "commands">("files");
 
@@ -2164,17 +2161,18 @@ function App(): JSX.Element {
    * `click`: Finder / Herdr / `AED_OPEN_FILE` — always a tree-less window (I-007).
    * `drop`: dragged onto this window — opens here as a tab; the folder and tree stay.
    */
-  const openExternalFile = async (rawPath: string, origin: ExternalOrigin = "click") => {
-    const filePath = normalizeExternalFilePath(rawPath);
-    if (!filePath) return;
+  const openExternalFile = async (rawRef: string, origin: ExternalOrigin = "click") => {
     try {
-      if (await isDirectoryPath(filePath)) {
-        switchToWorkspace(filePath);
+      const target = await resolveExternalFileReference(rawRef);
+      if (!target) return;
+      if (await isDirectoryPath(target.path)) {
+        switchToWorkspace(target.path);
         if (desktopAvailable) Window.orderFront();
         return;
       }
       if (!externalOpenKeepsTree(origin)) clearWorkspaceTree();
-      await openFileInTab(filePath);
+      pendingReveal.set(target.line > 0 ? target : null);
+      await openFileInTab(target.path);
       if (desktopAvailable) Window.orderFront();
     } catch {
       // Ignore unreadable or deleted external paths so queued opens continue.
@@ -2269,10 +2267,7 @@ function App(): JSX.Element {
 
   effect(() => {
     const stopHostQueue = host.on("enqueueFinderOpen", (payload) => {
-      if (typeof payload === "string" && payload.length > 0) {
-        const clean = normalizeExternalFilePath(payload);
-        if (clean) void openExternalFile(clean);
-      }
+      if (typeof payload === "string" && payload.length > 0) void openExternalFile(payload);
     });
     let ticks = 0;
     const timer = setInterval(() => {
@@ -2425,8 +2420,7 @@ function App(): JSX.Element {
         enforceMinWindowSize(bounds.size.width, bounds.size.height)
       }
       onFileDrop={({ uris }) => {
-        const p = decodeDroppedUri(uris[0]);
-        if (p) void openExternalFile(p, "drop");
+        if (uris[0]) void openExternalFile(uris[0], "drop");
       }}
     >
       <WindowTitleBar
@@ -2543,6 +2537,8 @@ function App(): JSX.Element {
                         cursorLine.set(line + 1);
                         cursorCol.set(col + 1);
                       }}
+                      reveal={pendingReveal}
+                      onRevealed={() => pendingReveal.set(null)}
                     />
                   </If>
                   <If when={editorSurface() === "welcome"}>
