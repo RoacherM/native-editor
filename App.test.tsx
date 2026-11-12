@@ -48,6 +48,8 @@ import {
 } from "./src/markdownPage";
 import { buildMermaidConfig } from "./src/mermaid";
 import { MARKDOWN_RUNTIME_JS } from "./src/markdownVendor.generated";
+import { XTERM_BUILD_ID, XTERM_CSS, XTERM_RUNTIME_JS } from "./src/xtermVendor.generated";
+import xtermBuild from "./vendor/xterm/dist/build.json";
 
 const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
 
@@ -1349,5 +1351,15 @@ describe("markdown preview runtime & bridge", () => {
     expect(cfg.themeVariables.secondaryColor).toBe("#1d1c1a");
     expect(cfg.themeVariables.tertiaryColor).toBe("#161514");
     expect(cfg.themeVariables.fontSize).toBe("13px");
+  });
+});
+
+describe("terminal: xterm WebView, frame protocol & PTY bridge (I-019)", () => {
+  test("the xterm runtime and its build record come from one build", () => {
+    expect(XTERM_BUILD_ID).toMatch(/^[0-9a-f]{16}$/);
+    expect(xtermBuild.buildId).toBe(XTERM_BUILD_ID);
+    expect(XTERM_RUNTIME_JS).toContain(`AedXterm={buildId:"${XTERM_BUILD_ID}"}`);
+    expect(XTERM_RUNTIME_JS).toContain("__aedTerm");
+    expect(XTERM_CSS).toContain(".xterm");
   });
 });

@@ -1,0 +1,2 @@
+# Build intermediate: its content ships inside src/xtermVendor.generated.ts.
+dist/xterm-runtime.js
