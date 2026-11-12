@@ -123,10 +123,25 @@ export function externalOpenKeepsTree(origin: ExternalOrigin): boolean {
   return origin === "drop";
 }
 
+/** The actions the unsaved-changes prompt guards. */
+export type GuardedAction = "close-tab" | "close-folder" | "switch-folder";
+
 /** A guarded action waiting on the unsaved-changes prompt. */
 export interface UnsavedGuard {
+  action: GuardedAction;
   dirtyPaths: string[];
   onProceed: () => void;
+}
+
+const GUARD_ENDINGS: Record<GuardedAction, string> = {
+  "close-tab": "before closing?",
+  "close-folder": "before closing the folder?",
+  "switch-folder": "before opening another folder?",
+};
+
+/** The prompt's question: which files, before which action. */
+export function unsavedQuestion(action: GuardedAction, names: string): string {
+  return `Save changes to ${names} ${GUARD_ENDINGS[action]}`;
 }
 
 /**

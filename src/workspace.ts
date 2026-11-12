@@ -67,6 +67,12 @@ export interface LoadedFile {
   diskStamp: string | null;
   /** The disk has a newer version than this copy's unsaved edits: a conflict the user resolves. */
   diskChanged: boolean;
+  /** The bytes started with a UTF-8 byte order mark; a save writes it back. */
+  bom: boolean;
+  /** Why this copy can never be saved (its bytes are not UTF-8), or null. */
+  readOnly: string | null;
+  /** What the last save failed with, naming the path; null after a good save. */
+  saveError: string | null;
 }
 
 /** Directories and files the scanner never descends into or lists. */
@@ -95,6 +101,62 @@ const OPAQUE_KINDS = new Set(["binary", "image", "video", "audio", "quicklook"])
 function isOpaqueFile(classification: FileClassification): boolean {
   if (classification.mimeType === "image/svg+xml") return false;
   return OPAQUE_KINDS.has(classification.kind);
+}
+
+/**
+ * Whether a file of this kind can be shown in `mode`. Opaque files (images,
+ * PDF, media, binary) have their preview only: a source or diff view of them
+ * would be an empty editor whose save wipes the file.
+ */
+export function allowsMode(classification: FileClassification, mode: PreviewMode): boolean {
+  return !isOpaqueFile(classification) || mode === classification.defaultMode;
+}
+
+/** Whether this copy may ever be written back: text Aed decoded without loss. */
+export function canSaveFile(file: LoadedFile): boolean {
+  return !isOpaqueFile(file.classification) && file.readOnly === null;
+}
+
+/** Shown above a file whose bytes are not UTF-8; such a copy is never saved. */
+export const NOT_UTF8_NOTICE = "Not UTF-8 — opened read-only";
+
+const UTF8_BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
+
+function startsWithBom(bytes: Uint8Array): boolean {
+  return bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+}
+
+/** Decode UTF-8 strictly, without a leading BOM (`bom` says it was there); null when the bytes are not UTF-8. */
+export function decodeUtf8(bytes: Uint8Array): { text: string; bom: boolean } | null {
+  const bom = startsWithBom(bytes);
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    return { text: decoder.decode(bom ? bytes.subarray(3) : bytes), bom };
+  } catch {
+    return null;
+  }
+}
+
+/** The bytes a save writes: UTF-8, behind the BOM again when the file had one. */
+export function encodeUtf8(text: string, bom: boolean): Uint8Array {
+  const body = new TextEncoder().encode(text);
+  if (!bom) return body;
+  const out = new Uint8Array(UTF8_BOM.length + body.length);
+  out.set(UTF8_BOM, 0);
+  out.set(body, UTF8_BOM.length);
+  return out;
+}
+
+/** The editable text of a file's bytes; `readOnly` says why it must never be saved. */
+function decodeFileText(
+  classification: FileClassification,
+  bytes: Uint8Array,
+): { text: string; bom: boolean; readOnly: string | null } {
+  if (isOpaqueFile(classification)) return { text: "", bom: false, readOnly: null };
+  const decoded = decodeUtf8(bytes);
+  if (decoded) return { ...decoded, readOnly: null };
+  // Shown for reading only: the lossy text must never reach the disk.
+  return { text: new TextDecoder("utf-8").decode(bytes), bom: false, readOnly: NOT_UTF8_NOTICE };
 }
 
 // DESIGN.md「术语与边界」
@@ -414,11 +476,6 @@ export async function getFileDiffPatch(filePath: string, root: string): Promise<
   }
 }
 
-/** Decode bytes as UTF-8, replacing invalid sequences rather than throwing. */
-function decodeText(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-}
-
 /** The preview source URL for an image, video, or audio file, or null for other kinds. */
 function previewBlobUrl(
   filePath: string,
@@ -575,8 +632,11 @@ export async function loadFile(
   const diskStamp = await readDiskStamp(filePath);
   const { bytes, size } = await readFileBytesAndSize(filePath);
   const classification = classifyFile(filePath, bytes.slice(0, 4096));
-  const mode = preferredMode ?? classification.defaultMode;
-  const text = isOpaqueFile(classification) ? "" : decodeText(bytes);
+  const mode =
+    preferredMode && allowsMode(classification, preferredMode)
+      ? preferredMode
+      : classification.defaultMode;
+  const { text, bom, readOnly } = decodeFileText(classification, bytes);
   const tableData = classification.kind === "table" ? parseTableData(text, filePath) : null;
   const hexDump = classification.kind === "binary" ? formatHexDump(bytes, 4096) : "";
   const dimensions =
@@ -611,6 +671,9 @@ export async function loadFile(
     diffPatch,
     diskStamp,
     diskChanged: false,
+    bom,
+    readOnly,
+    saveError: null,
   };
   if (size <= MAX_PRELOAD_BYTES && preloadedFiles.size < 32) {
     preloadedFiles.set(filePath, loaded);
@@ -618,24 +681,35 @@ export async function loadFile(
   return loaded;
 }
 
-/** Save text content to disk and return updated LoadedFile state. */
+/**
+ * Write `newText` for `file` (UTF-8, its BOM kept) and return the saved copy.
+ * What was derived from the old bytes follows the new ones: table rows, an
+ * SVG's picture and size; a git patch is dropped so the next diff view fetches
+ * it again. Throws what the write throws.
+ */
 export async function saveFileText(
   file: LoadedFile,
   newText: string,
   root: string,
 ): Promise<LoadedFile> {
-  await fs.writeFile(file.path, newText);
-  const tableData =
-    file.classification.kind === "table" ? parseTableData(newText, file.path) : file.tableData;
+  const bytes = encodeUtf8(newText, file.bom);
+  await fs.writeFile(file.path, bytes);
+  const kind = file.classification.kind;
+  const isImage = kind === "image";
   const updated: LoadedFile = {
     ...file,
+    size: bytes.length,
     text: newText,
     savedText: newText,
     dirty: false,
-    tableData,
+    tableData: kind === "table" ? parseTableData(newText, file.path) : file.tableData,
+    blobUrl: isImage ? createBlobUrl(bytes, file.classification.mimeType) : file.blobUrl,
+    dimensions: isImage ? probeImageDimensions(bytes, newText) : file.dimensions,
+    diffPatch: kind === "diff" ? newText : "",
     relPath: relativePath(root, file.path),
     diskStamp: await readDiskStamp(file.path),
     diskChanged: false,
+    saveError: null,
   };
   preloadedFiles.set(file.path, updated);
   return updated;

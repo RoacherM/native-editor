@@ -266,6 +266,7 @@ function EditorBody(props: {
         r?.focus();
       }}
       autoFocus
+      readOnly={f().readOnly !== null}
       value={f().text}
       language={f().classification.language}
       onChange={({ value }) => props.onTextChange(value)}

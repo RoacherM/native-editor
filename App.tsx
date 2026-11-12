@@ -45,8 +45,11 @@ import {
   nextActiveAfterClose,
   planWorkspaceIntent,
   serialize,
+  unsavedQuestion,
+  type GuardedAction,
   type UnsavedGuard as PendingUnsavedGuard,
 } from "./src/session";
+import { saveInStore, type FileStore, type SaveOutcome } from "./src/saving";
 import { CommandPalette, Sidebar } from "./src/Sidebar";
 import {
   discoverTerminalEnvironment,
@@ -60,6 +63,7 @@ import {
   type EditorTheme,
 } from "./src/themes";
 import {
+  allowsMode,
   consumeFinderOpenQueue,
   getFileDiffPatch,
   getInitialOpenFile,
@@ -1103,7 +1107,7 @@ function UnsavedChangesDialog(props: {
                   style={{ color: props.theme().ui.mutedForeground }}
                   class="text-xs"
                 >
-                  {`Save changes to ${names()} before closing?`}
+                  {unsavedQuestion(guard().action, names())}
                 </Text>
               </View>
               <View class="flex-row items-center justify-end gap-2 pt-1">
@@ -1201,6 +1205,63 @@ function DiskConflictBanner(props: {
         </Button>
       </View>
     </If>
+  );
+}
+
+/**
+ * Shown above the editor when the active copy cannot be saved: its last save
+ * failed (reason and path; the tab stays dirty), or its bytes are not UTF-8.
+ */
+function FileNoticeBanner(props: {
+  file: Accessor<LoadedFile | undefined>;
+  theme: Accessor<EditorTheme>;
+  onDismissSaveError: () => void;
+}): JSX.Element {
+  const saveError = computed(() => props.file()?.saveError ?? null);
+  const readOnly = computed(() => (saveError() ? null : props.file()?.readOnly ?? null));
+  return (
+    <View>
+      <If when={saveError()}>
+        {(message) => (
+          <View
+            testID="save-error-banner"
+            style={{ backgroundColor: props.theme().ui.card }}
+            class="h-9 px-3 flex-row items-center gap-3 select-none"
+          >
+            <View
+              style={{ backgroundColor: props.theme().ui.accent }}
+              class="w-1.5 h-1.5 rounded-full"
+            />
+            <Text style={{ color: props.theme().ui.foreground }} class="flex-1 text-xs truncate">
+              {message()}
+            </Text>
+            <Button
+              testID="save-error-dismiss-btn"
+              onPress={props.onDismissSaveError}
+              style={{ backgroundColor: props.theme().ui.sidebar }}
+              class="h-6 px-3 rounded border-none shadow-none"
+            >
+              <Text style={{ color: props.theme().ui.foreground }} class="text-xs">
+                Dismiss
+              </Text>
+            </Button>
+          </View>
+        )}
+      </If>
+      <If when={readOnly()}>
+        {(notice) => (
+          <View
+            testID="read-only-banner"
+            style={{ backgroundColor: props.theme().ui.card }}
+            class="h-9 px-3 flex-row items-center select-none"
+          >
+            <Text style={{ color: props.theme().ui.mutedForeground }} class="flex-1 text-xs truncate">
+              {notice()}
+            </Text>
+          </View>
+        )}
+      </If>
+    </View>
   );
 }
 
@@ -1428,6 +1489,7 @@ async function resolveModeFile(
   mode: PreviewMode,
   root: string
 ): Promise<LoadedFile> {
+  if (!allowsMode(file.classification, mode)) return file;
   const diffPatch =
     mode === "diff" && !file.diffPatch
       ? await getFileDiffPatch(file.path, root)
@@ -1475,9 +1537,12 @@ async function updateFileModeInMap(
   root: string
 ): Promise<void> {
   const file = loadedFiles()[filePath];
-  if (!file) return;
-  const updated = await resolveModeFile(file, mode, root);
-  loadedFiles.set({ ...loadedFiles(), [filePath]: updated });
+  if (!file || !allowsMode(file.classification, mode)) return;
+  const { diffPatch } = await resolveModeFile(file, mode, root);
+  // Only the mode changes: edits made while the patch loaded stay; a closed tab stays closed.
+  const latest = loadedFiles()[filePath];
+  if (!latest) return;
+  loadedFiles.set({ ...loadedFiles(), [filePath]: { ...latest, mode, diffPatch } });
 }
 
 /** A clean open tab whose file changed on disk picks up the new bytes; a dirty tab keeps the user's edits. */
@@ -1555,17 +1620,29 @@ async function resolveDiskConflict(
   loadedFiles.set({ ...loadedFiles(), [filePath]: { ...latest, ...next, diskChanged: false } });
 }
 
+function fileStoreOf(loadedFiles: Signal<Record<string, LoadedFile>>): FileStore {
+  return {
+    get: (filePath) => loadedFiles()[filePath],
+    set: (filePath, file) => loadedFiles.set({ ...loadedFiles(), [filePath]: file }),
+  };
+}
+
+/** Save one tab (src/saving.ts rules); a tab in diff mode fetches its patch again. */
 async function saveFileInMap(
   loadedFiles: Signal<Record<string, LoadedFile>>,
   filePath: string,
   root: string,
   refresh: () => Promise<void>
-): Promise<void> {
-  const file = loadedFiles()[filePath];
-  if (!file) return;
-  const updated = await saveFileText(file, file.text, root);
-  loadedFiles.set({ ...loadedFiles(), [filePath]: updated });
+): Promise<SaveOutcome> {
+  const outcome = await saveInStore(fileStoreOf(loadedFiles), filePath, (file, text) =>
+    saveFileText(file, text, root)
+  );
+  if (outcome !== "saved") return outcome;
+  if (loadedFiles()[filePath]?.mode === "diff") {
+    await updateFileModeInMap(loadedFiles, filePath, "diff", root);
+  }
   await refresh();
+  return outcome;
 }
 
 function createAppActions(opts: {
@@ -1581,7 +1658,7 @@ function createAppActions(opts: {
   resetFont: () => void;
   cycleTheme: () => void;
   activeFilePath: () => string | null;
-  saveFile: (p: string) => void;
+  saveFile: (p: string) => Promise<SaveOutcome>;
   closeTab: (p: string) => void;
   refresh: () => void;
   setFileMode: (p: string, m: PreviewMode) => void;
@@ -1610,7 +1687,7 @@ function createAppActions(opts: {
     openFontSettings: () => opts.fontDialogOpen.set(true),
     adjustFontSize: opts.adjustFontSize,
     resetFont: opts.resetFont,
-    saveCurrent: withCurrent(opts.saveFile),
+    saveCurrent: withCurrent((p) => void opts.saveFile(p)),
     closeCurrent: withCurrent((p) => opts.closeTab(p)),
     toggleTheme: opts.cycleTheme,
     refresh: opts.refresh,
@@ -1819,10 +1896,14 @@ function App(): JSX.Element {
   const getDirtyTabPaths = (): string[] =>
     openTabs().filter((p) => !!loadedFiles()[p]?.dirty);
 
-  const withUnsavedGuard = (dirtyPaths: string[], onProceed: () => void) => {
+  const withUnsavedGuard = (
+    action: GuardedAction,
+    dirtyPaths: string[],
+    onProceed: () => void
+  ) => {
     const decision = decideGuard(pendingUnsaved(), dirtyPaths);
     if (decision === "run") onProceed();
-    else if (decision === "confirm") pendingUnsaved.set({ dirtyPaths, onProceed });
+    else if (decision === "confirm") pendingUnsaved.set({ action, dirtyPaths, onProceed });
   };
 
   const performSwitchToWorkspace = async (folderPath: string) => {
@@ -1839,7 +1920,7 @@ function App(): JSX.Element {
     });
     if (plan.action === "refresh") void refresh();
     if (plan.action !== "reset") return;
-    withUnsavedGuard(getDirtyTabPaths(), () => {
+    withUnsavedGuard("switch-folder", getDirtyTabPaths(), () => {
       void performSwitchToWorkspace(plan.nextRoot);
     });
   };
@@ -1852,7 +1933,7 @@ function App(): JSX.Element {
   const closeWorkspace = () => {
     const plan = planWorkspaceIntent(workspaceRoot(), openTabs().length, { kind: "close" });
     if (plan.action !== "reset") return;
-    withUnsavedGuard(getDirtyTabPaths(), () => {
+    withUnsavedGuard("close-folder", getDirtyTabPaths(), () => {
       void performCloseWorkspace();
     });
   };
@@ -1953,11 +2034,16 @@ function App(): JSX.Element {
     if (initialRoot) {
       recordRecentWorkspace(recentWorkspaces, initialRoot);
     }
-    void (async () => {
-      const scannedInitial = await scanWorkspace(initialRoot);
-      snapshot.set(scannedInitial);
-      void warmWorkspaceFiles(scannedInitial);
-    })();
+    // Out of the effect's run: it reads `recentWorkspaces` and runs again when the
+    // preferences load, which would end the git processes of a scan started here
+    // (DESIGN.md 踩坑 8).
+    setTimeout(() => {
+      void (async () => {
+        const scannedInitial = await scanWorkspace(initialRoot);
+        snapshot.set(scannedInitial);
+        void warmWorkspaceFiles(scannedInitial);
+      })();
+    }, 0);
     void (async () => {
       const initFile = getInitialOpenFile();
       if (initFile) {
@@ -2011,7 +2097,7 @@ function App(): JSX.Element {
 
   const closeTab = (filePath: string) => {
     const isDirty = !!loadedFiles()[filePath]?.dirty;
-    withUnsavedGuard(isDirty ? [filePath] : [], () => performCloseTab(filePath));
+    withUnsavedGuard("close-tab", isDirty ? [filePath] : [], () => performCloseTab(filePath));
   };
 
   const handleOpenFolder = async () => {
@@ -2030,16 +2116,18 @@ function App(): JSX.Element {
     openFileInTab(resolvedPath);
   };
 
+  /** A save that fails stops the action and shows that tab with its save-error banner. */
   const handleSaveAndProceed = async (guard: PendingUnsavedGuard) => {
-    try {
-      for (const p of guard.dirtyPaths) {
-        await handleSave(p);
+    for (const p of guard.dirtyPaths) {
+      if ((await handleSave(p)) === "failed") {
+        pendingUnsaved.set(null);
+        activeFilePath.set(p);
+        selectedPath.set(p);
+        return;
       }
-      pendingUnsaved.set(null);
-      guard.onProceed();
-    } catch {
-      // Keep dialog open if saving fails
     }
+    pendingUnsaved.set(null);
+    guard.onProceed();
   };
 
   const handleDiscardAndProceed = (guard: PendingUnsavedGuard) => {
@@ -2215,6 +2303,14 @@ function App(): JSX.Element {
                     onResolve={(choice) =>
                       void resolveDiskConflict(loadedFiles, activeFilePath(), choice, workspaceRoot())
                     }
+                  />
+                  <FileNoticeBanner
+                    file={activeFile}
+                    theme={activeTheme}
+                    onDismissSaveError={() => {
+                      const cur = activeFile();
+                      if (cur) fileStoreOf(loadedFiles).set(cur.path, { ...cur, saveError: null });
+                    }}
                   />
                   <If when={editorSurface() === "file"}>
                     <PreviewPane

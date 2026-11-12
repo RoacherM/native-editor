@@ -35,7 +35,13 @@ import {
   fontDisplayName,
   getThemeById,
 } from "./src/themes";
-import { isBehindDisk, normalizeExternalFilePath, shortenHomePath } from "./src/workspace";
+import {
+  isBehindDisk,
+  normalizeExternalFilePath,
+  shortenHomePath,
+  type LoadedFile,
+} from "./src/workspace";
+import { saveInStore } from "./src/saving";
 import {
   buildPreviewShellHtml,
   buildPreviewThemeCss,
@@ -289,7 +295,7 @@ describe("window session state machine (src/session.ts)", () => {
     expect(deriveEditorSurface("/w", false)).toBe("workspace-empty");
     expect(deriveEditorSurface("", true)).toBe("file");
 
-    const pending = { dirtyPaths: ["/w/a.ts"], onProceed: () => {} };
+    const pending = { action: "close-tab" as const, dirtyPaths: ["/w/a.ts"], onProceed: () => {} };
     expect(decideGuard(null, [])).toBe("run");
     expect(decideGuard(null, ["/w/a.ts"])).toBe("confirm");
     expect(decideGuard(pending, [])).toBe("busy");
@@ -452,14 +458,21 @@ interface Scratch {
 
 /**
  * Run `body` in a window on a fresh scratch folder holding `files` (name → one line),
- * with `files`' first name open. The folder is removed afterwards, also on failure.
+ * with `files`' first name open. `extra` adds shell commands run after the files are
+ * written and before the window opens (binary samples, git, chmod). The folder is
+ * removed afterwards, also on failure.
  */
-async function withScratch(files: Record<string, string>, body: (s: Scratch) => Promise<void>) {
+async function withScratch(
+  files: Record<string, string>,
+  body: (s: Scratch) => Promise<void>,
+  extra: (dir: string) => string[] = () => []
+) {
   scratchCount += 1;
   const dir = `${SCRATCH_RUN}-${scratchCount}`;
   const writes = Object.entries(files).map(([n, c]) => `printf '${c}\\n' > ${dir}/${n}`);
   const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-  await runInTerminal(setup, [`rm -rf ${dir}`, `mkdir -p ${dir}`, ...writes].join(" && "), "SETUP_DONE");
+  const commands = [`rm -rf ${dir}`, `mkdir -p ${dir}`, ...writes, ...extra(dir)];
+  await runInTerminal(setup, commands.join(" && "), "SETUP_DONE");
   const app = await open("./App.tsx", {
     platform: "macos",
     width: 1280,
@@ -985,6 +998,242 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(showsText(app, FIXTURE_ROOT)).toBe(false);
   });
 
+});
+
+/** Run a command palette entry by its label. */
+async function runCommand(app: TestApp, label: string): Promise<void> {
+  await app.keyboard.press("mod+shift+p");
+  await app.waitFor("id:command-palette");
+  await app.type("id:command-palette", label);
+  await app.keyboard.press("enter");
+}
+
+/** A clean in-memory copy of a text file, for the save rules. */
+function textCopy(filePath: string, text: string): LoadedFile {
+  return {
+    path: filePath,
+    relPath: filePath.split("/").pop() ?? filePath,
+    name: filePath.split("/").pop() ?? filePath,
+    size: text.length,
+    classification: classifyFile(filePath),
+    mode: "source",
+    text,
+    savedText: text,
+    dirty: false,
+    blobUrl: null,
+    quickLookUrl: null,
+    tableData: null,
+    hexDump: "",
+    diffPatch: "",
+    diskStamp: "1:1",
+    diskChanged: false,
+    bom: false,
+    readOnly: null,
+    saveError: null,
+  };
+}
+
+describe("file safety (I-015)", () => {
+  test("saving an image, binary or PDF tab never writes to it", async () => {
+    const opaque = ["poster.png", "sample.bin", "manual.pdf"];
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app, dir }) => {
+        for (const name of opaque) {
+          await app.press(`text:${name}`);
+          await app.waitFor(`id:tab-select-${name}`);
+          await app.keyboard.press("mod+s");
+          await runCommand(app, "File: Save Current File");
+        }
+        await app.wait(300);
+        const same = opaque.map((n) => `cmp -s ${dir}/${n} ${FIXTURE_ROOT}/${n}`).join(" && ");
+        await runInTerminal(app, same, "OPAQUE_UNTOUCHED");
+      },
+      (dir) => opaque.map((n) => `cp ${FIXTURE_ROOT}/${n} ${dir}/`)
+    );
+  });
+
+  test("a file that is not UTF-8 opens read-only and is never rewritten", async () => {
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app, dir }) => {
+        await app.press("text:latin1.txt");
+        await app.waitFor("id:tab-select-latin1.txt");
+        await app.keyboard.press("mod+s");
+        await app.wait(300);
+        await runInTerminal(app, `cmp -s ${dir}/latin1.txt ${dir}/.orig/latin1.txt`, "LATIN1_UNTOUCHED");
+        await app.press("id:tab-select-latin1.txt");
+        await app.waitFor("id:read-only-banner");
+        // The editor takes no typing: the tab never becomes dirty.
+        await app.type("id:preview-editor", "X").catch(() => undefined);
+        await app.wait(100);
+        expect(showsText(app, "•")).toBe(false);
+      },
+      (dir) => [`printf 'caf\\xe9\\n' > ${dir}/latin1.txt`, `mkdir ${dir}/.orig`, `cp ${dir}/latin1.txt ${dir}/.orig/`]
+    );
+  });
+
+  test("a UTF-8 BOM survives a save", async () => {
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app, dir }) => {
+        await app.press("text:bom.txt");
+        await app.waitUntil(() => showsText(app, "BOM_V1"), { timeout: 5000 });
+        await editTab(app, "MORE");
+        await app.keyboard.press("mod+s");
+        await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
+        await runInTerminal(app, `head -c 3 ${dir}/bom.txt | xxd -p | grep -qx efbbbf`, "BOM_KEPT");
+      },
+      (dir) => [`printf '\\xef\\xbb\\xbfBOM_V1\\n' > ${dir}/bom.txt`]
+    );
+  });
+
+  test("source and diff modes are not offered for opaque files", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:poster.png");
+    for (const [name, view] of [
+      ["poster.png", "id:preview-image"],
+      ["sample.bin", "id:preview-hex"],
+    ]) {
+      await app.press(`text:${name}`);
+      await app.waitFor(view);
+      for (const label of ["View: Switch to Source Mode", "View: Switch to Diff Mode"]) {
+        await runCommand(app, label);
+        await app.wait(200);
+        expect(`${name} ${label}: ${app.shows(view)}`).toBe(`${name} ${label}: true`);
+        expect(app.shows("id:preview-editor")).toBe(false);
+        expect(app.shows("id:preview-diff")).toBe(false);
+      }
+    }
+  });
+
+  test("typing while a save is in flight stays dirty with the newest text", async () => {
+    const files = new Map<string, LoadedFile>();
+    const store = {
+      get: (p: string) => files.get(p),
+      set: (p: string, f: LoadedFile) => void files.set(p, f),
+    };
+    let finish: () => void = () => undefined;
+    const write = (file: LoadedFile, text: string) =>
+      new Promise<LoadedFile>((resolve) => {
+        finish = () => resolve({ ...file, text, savedText: text, dirty: false });
+      });
+    const edit = (p: string, text: string) => {
+      const cur = files.get(p) as LoadedFile;
+      files.set(p, { ...cur, text, dirty: text !== cur.savedText });
+    };
+    files.set("/w/a.txt", textCopy("/w/a.txt", "v1"));
+    edit("/w/a.txt", "v2");
+    const saving = saveInStore(store, "/w/a.txt", write);
+    edit("/w/a.txt", "v3"); // typed while the write is in flight
+    finish();
+    expect(await saving).toBe("saved");
+    expect(files.get("/w/a.txt")).toMatchObject({ text: "v3", savedText: "v2", dirty: true });
+    // A tab closed while its save was in flight is not written back.
+    files.set("/w/b.txt", textCopy("/w/b.txt", "b1"));
+    edit("/w/b.txt", "b2");
+    const closing = saveInStore(store, "/w/b.txt", write);
+    files.delete("/w/b.txt");
+    finish();
+    await closing;
+    expect(files.has("/w/b.txt")).toBe(false);
+    // A clean copy is never written.
+    files.set("/w/c.txt", textCopy("/w/c.txt", "c1"));
+    expect(await saveInStore(store, "/w/c.txt", write)).toBe("skipped");
+  });
+
+  test("a failed save says so and keeps the tab dirty", async () => {
+    await withScratch(
+      { "note.txt": "LOCKED_V1" },
+      async ({ app, dir }) => {
+        await editTab(app, "MINE ");
+        await app.keyboard.press("mod+s");
+        await app.waitFor("id:save-error-banner");
+        expect(showsText(app, "•")).toBe(true);
+        expect(app.texts().some((t) => t.includes(`${dir}/note.txt`))).toBe(true);
+      },
+      (dir) => [`chmod 444 ${dir}/note.txt`]
+    );
+  });
+
+  test("a saved SVG shows its new picture", async () => {
+    const svg = (w: number, h: number) =>
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}"></svg>`;
+    await withScratch(
+      { "note.txt": "NOTE_V1" },
+      async ({ app }) => {
+        await app.press("text:pic.svg");
+        await app.waitUntil(() => showsText(app, "10 × 20 · image/svg+xml"), { timeout: 5000 });
+        await app.press("id:mode-source");
+        await app.waitFor("id:preview-editor");
+        await app.clear("id:preview-editor");
+        await app.paste("id:preview-editor", { text: svg(30, 40) });
+        await app.waitUntil(() => showsText(app, "•"), { timeout: 3000 });
+        await app.keyboard.press("mod+s");
+        await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
+        await app.press("id:mode-preview");
+        await app.waitUntil(() => showsText(app, "30 × 40 · image/svg+xml"), { timeout: 3000 });
+      },
+      (dir) => [`printf '${svg(10, 20)}\\n' > ${dir}/pic.svg`]
+    );
+  });
+
+  test("the diff view follows a save", async () => {
+    await withScratch(
+      { "a.txt": "A_V1", "note.txt": "DIFF_V1" },
+      async ({ app }) => {
+        // The launch scan's git status is in (it is not killed with its effect).
+        await app.waitUntil(() => showsText(app, "M"), { timeout: 5000 });
+        await app.press("id:sidebar-filter-changed");
+        await app.press("text:note.txt");
+        await app.waitFor("id:preview-diff");
+        await runCommand(app, "View: Switch to Source Mode");
+        await app.waitFor("id:preview-editor");
+        await editTab(app, "SAVED_LINE");
+        await app.keyboard.press("mod+s");
+        await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
+        await runCommand(app, "View: Switch to Diff Mode");
+        await app.waitFor("id:preview-diff");
+        await app.waitUntil(() => app.texts().some((t) => t.includes("SAVED_LINE")), { timeout: 3000 });
+      },
+      (dir) => [
+        `git -C ${dir} init -q`,
+        `git -C ${dir} add -A`,
+        `git -C ${dir} -c user.name=t -c user.email=t@t commit -qm init`,
+        `printf 'DIFF_V2\\n' > ${dir}/note.txt`,
+      ]
+    );
+  });
+
+  test("the unsaved-changes prompt names the action it guards", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    await app.type("id:preview-editor", "// unsaved\n");
+    const asks = async (act: () => Promise<void>, question: string) => {
+      await act();
+      await app.waitFor("id:unsaved-changes-dialog");
+      expect(showsText(app, question)).toBe(true);
+      await app.press("id:unsaved-cancel-btn");
+    };
+    await asks(() => app.press("id:tab-close-main.ts"), "Save changes to main.ts before closing?");
+    await asks(() => app.keyboard.press("mod+shift+w"), "Save changes to main.ts before closing the folder?");
+    await asks(
+      () => app.dropFiles("id:app-root", ["file:///tmp"]),
+      "Save changes to main.ts before opening another folder?"
+    );
+  });
 });
 
 const PREVIEW_SPEC_MD = `# 文档标题
