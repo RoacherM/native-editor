@@ -1,5 +1,6 @@
 import * as os from "os";
 import path from "path";
+import process from "process";
 import {
   Canvas,
   cleanup,
@@ -46,6 +47,7 @@ import {
   planWorkspaceIntent,
   serialize,
   unsavedQuestion,
+  windowTitle,
   type GuardedAction,
   type UnsavedGuard as PendingUnsavedGuard,
 } from "./src/session";
@@ -112,6 +114,7 @@ const builtInCommands: CommandItem[] = [
   { id: "close-folder", label: "File: Close Folder", shortcut: "mod+shift+w", keywords: ["close", "folder", "workspace", "welcome", "home"] },
   { id: "save-file", label: "File: Save Current File", shortcut: "mod+s", keywords: ["save", "write"] },
   { id: "close-tab", label: "View: Close Current Tab", shortcut: "mod+w", keywords: ["close", "tab"] },
+  { id: "quit", label: "File: Quit Aed", shortcut: "mod+q", keywords: ["quit", "exit"] },
   { id: "toggle-theme", label: "Preferences: Cycle Color Theme", keywords: ["theme", "light", "dark", "color"] },
   { id: "refresh-workspace", label: "Explorer: Refresh Workspace", shortcut: "mod+r", keywords: ["refresh", "reload"] },
   { id: "mode-preview", label: "View: Switch to Preview Mode", keywords: ["preview"] },
@@ -1327,6 +1330,7 @@ interface AppActions {
   toggleTheme: () => void;
   refresh: () => void;
   setMode: (mode: PreviewMode) => void;
+  quit: () => void;
 }
 
 const COMMAND_HANDLERS: Record<string, (actions: AppActions) => void> = {
@@ -1339,6 +1343,7 @@ const COMMAND_HANDLERS: Record<string, (actions: AppActions) => void> = {
   "close-folder": (a) => a.closeFolder(),
   "save-file": (a) => a.saveCurrent(),
   "close-tab": (a) => a.closeCurrent(),
+  quit: (a) => a.quit(),
   "toggle-theme": (a) => a.toggleTheme(),
   "refresh-workspace": (a) => a.refresh(),
   "mode-preview": (a) => a.setMode("preview"),
@@ -1370,12 +1375,13 @@ function enforceMinWindowSize(width: number, height: number): void {
 function setupDesktopChrome(
   actions: AppActions,
   recentWorkspaces: Accessor<string[]>,
-  onSelectRecent: (folderPath: string) => void
+  onSelectRecent: (folderPath: string) => void,
+  edited: Accessor<boolean>
 ): void {
   if (!desktopAvailable) return;
   Window.setTitleBar({ style: "hidden" });
-  Window.setTitle("Aed");
   Window.setFrame({ size: { width: 1280, height: 800 } });
+  effect(() => Window.setTitle(windowTitle(edited())));
   effect(() => {
     const recentItems = recentWorkspaces().map((ws) => ({
       label: path.basename(ws) || ws,
@@ -1393,7 +1399,7 @@ function setupDesktopChrome(
           { role: "hideOthers", shortcut: "mod+alt+h" },
           { role: "showAll" },
           { type: "separator" },
-          { role: "quit", shortcut: "mod+q" },
+          { label: "Quit Aed", shortcut: "mod+q", onSelect: () => actions.quit() },
         ],
       },
       {
@@ -1662,6 +1668,7 @@ function createAppActions(opts: {
   closeTab: (p: string) => void;
   refresh: () => void;
   setFileMode: (p: string, m: PreviewMode) => void;
+  quit: () => void;
 }): AppActions {
   const withCurrent = (fn: (p: string) => void) => () => {
     const cur = opts.activeFilePath();
@@ -1692,6 +1699,28 @@ function createAppActions(opts: {
     toggleTheme: opts.cycleTheme,
     refresh: opts.refresh,
     setMode: (mode) => withCurrent((p) => opts.setFileMode(p, mode))(),
+    quit: opts.quit,
+  };
+}
+
+/**
+ * Quitting (⌘Q, the palette, and through scripts/finder_bridge.m the close
+ * button and system quits) asks about unsaved tabs first (I-016). `edited`
+ * drives the window title's edited mark. Once the user let Aed quit, the mark
+ * goes and a second request (the host's own terminate path) exits at once.
+ */
+function createQuit(
+  guard: (action: GuardedAction, dirtyPaths: string[], onProceed: () => void) => void,
+  dirtyPaths: () => string[]
+): { quit: () => void; edited: Accessor<boolean> } {
+  const approved = signal(false);
+  const exit = () => {
+    approved.set(true);
+    process.exit(0);
+  };
+  return {
+    quit: () => (approved() ? exit() : guard("quit", dirtyPaths(), exit)),
+    edited: computed(() => !approved() && dirtyPaths().length > 0),
   };
 }
 
@@ -2135,6 +2164,8 @@ function App(): JSX.Element {
     guard.onProceed();
   };
 
+  const quitting = createQuit(withUnsavedGuard, getDirtyTabPaths);
+
   const actions = createAppActions({
     workspaceRoot: () => workspaceRoot(),
     sidebarOpen,
@@ -2152,9 +2183,10 @@ function App(): JSX.Element {
     closeTab,
     refresh,
     setFileMode: handleModeChange,
+    quit: quitting.quit,
   });
 
-  setupDesktopChrome(actions, recentWorkspaces, switchToWorkspace);
+  setupDesktopChrome(actions, recentWorkspaces, switchToWorkspace, quitting.edited);
   cleanup(bindAppShortcuts(actions));
 
   const leftPad = computed(() =>

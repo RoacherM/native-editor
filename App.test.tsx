@@ -22,6 +22,7 @@ import {
   nextActiveAfterClose,
   planWorkspaceIntent,
   serialize,
+  windowTitle,
   WINDOW_TRANSITIONS,
   type WindowEvent,
   type WindowMode,
@@ -1233,6 +1234,53 @@ describe("file safety (I-015)", () => {
       () => app.dropFiles("id:app-root", ["file:///tmp"]),
       "Save changes to main.ts before opening another folder?"
     );
+  });
+});
+
+describe("quit guard (I-016)", () => {
+  // ⌘Q is the menu's (headless runs have no menu bar); the palette runs the same action.
+  // A quit the guard lets through ends the app: its next step rejects with "the app left".
+  const quitLeaves = async (app: TestApp) => {
+    await expect(app.waitFor("id:welcome-panel", { timeout: 300 })).rejects.toThrow("the app left");
+  };
+
+  test("quitting with unsaved edits asks first", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await app.press("text:main.ts");
+    await app.waitFor("id:preview-editor");
+    await app.type("id:preview-editor", "// unsaved\n");
+    await runCommand(app, "File: Quit Aed");
+    await app.waitFor("id:unsaved-changes-dialog");
+    expect(showsText(app, "Save changes to main.ts before quitting?")).toBe(true);
+    await app.press("id:unsaved-cancel-btn");
+    expect(app.shows("id:tab-select-main.ts")).toBe(true);
+    await runCommand(app, "File: Quit Aed");
+    await app.waitFor("id:unsaved-changes-dialog");
+    await app.press("id:unsaved-discard-btn");
+    await quitLeaves(app);
+  });
+
+  test("the window title carries the edited mark scripts/finder_bridge.m reads", () => {
+    expect(windowTitle(false)).toBe("Aed");
+    expect(windowTitle(true)).toBe("Aed — Edited");
+  });
+
+  test("quitting with nothing unsaved quits at once", async () => {
+    const app = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      host: { params: { workspaceRoot: FIXTURE_ROOT } },
+    });
+    await app.waitFor("text:main.ts");
+    await runCommand(app, "File: Quit Aed");
+    await quitLeaves(app);
   });
 });
 

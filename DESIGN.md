@@ -33,6 +33,7 @@ Aed（Another Editor）是基于 `nsh 0.3.0`（纯 TSX `--template ts`）构建�
 | 环境变量 / Host 参数 | `AED_ROOT` / `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置时返回 `""`（直接展示 `WelcomePanel` 开屏页并列出 `Recent` 历史工作区供点击打开，绝不自动进入旧工作区或扫 `$HOME`、`/`） |
 | 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以无文件树（`workspaceRoot = ""`）独立窗口打开的初始文件绝对路径（不写入历史工作区） |
 | Finder 队列文件 | `/tmp/aed-open.queue` | 仅用于冷启动阶段（`NSApplicationDidFinishLaunching` 前及完成后 `1.5s` 内且尚无初始目标）接收首个 AppleEvent 打开路径及宿主事件 `enqueueFinderOpen`（支持 `file://` URI、`#L<line>` 与 `:line(:col)` 后缀归一化）；当 Aed 已有运行中窗口时，再次点击外部文件由 `finder_bridge.m` 直接通过 `/usr/bin/open -n <Aed.app> --args <path>` 拉起全新的无文件树独立窗口 |
+| 窗口标题标记（JS → 原生） | 标题以 ` — Edited` 结尾（`src/session.ts` `EDITED_TITLE_SUFFIX` / `windowTitle`，即 `Aed — Edited`） | JS 告诉 `finder_bridge.m`「有未保存修改」的唯一通道：有脏 Tab 时 App 把窗口标题设为 `Aed — Edited`，否则 `Aed`；用户同意退出后立即去掉标记。原生 → JS 不另设通道：原生选中 App 自己的 ⌘Q 菜单项（`Quit Aed`，`keyEquivalent` 为 `q` + Command 且 action 不是 `terminate:`）。两边的字面量必须一致（`App.test.tsx` › the window title carries the edited mark scripts/finder_bridge.m reads）。旧版 dylib 不读标题、新版 dylib 遇到不带标记的旧 JS 都按宿主原行为退出，没有兼容负担 |
 | 临时缓存目录 | `/tmp/aed-ql` | `generateQuickLookUrl()` 存放 `sips` 转换的 PDF 预览 PNG |
 | 临时缓存目录 | `/tmp/aed-mermaid` | `src/mermaid.tsx` 缓存提取出的 `mermaid-docu-bundle.js` |
 
@@ -99,7 +100,8 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 
 - **重新打开当前目录**（`⌘O` 选同一目录、`Open Recent` 当前项、拖入当前目录）只刷新，保留 Tab（`planWorkspaceIntent` → `refresh`）。
 - **拖入文件**（`drop-file`）表示「在这里打开」：不论文件在不在当前工作区内，都作为 Tab 打开，模式不变（有工作区则保留文件树）。**外部点击**（`click-file`：Finder / Herdr / `AED_OPEN_FILE`）一律进 `loose`，保持 I-007 规则。两者由 `externalOpenKeepsTree(origin)` 区分。
-- **未保存确认框**只有两态：空闲、确认中。确认中时，新的受保护操作（关 Tab、`⌘⇧W`、切换工作区）直接丢弃（`decideGuard` → `busy`），不能替换用户正在回答的那个请求。问句按动作区分（`UnsavedGuard.action` → `unsavedQuestion`）：关 Tab「before closing?」、关文件夹「before closing the folder?」、切换文件夹「before opening another folder?」。选 `Save` 时任一文件保存失败：关掉确认框、不执行动作，切到那个 Tab，由它的保存失败横幅说明原因。
+- **未保存确认框**只有两态：空闲、确认中。确认中时，新的受保护操作（关 Tab、`⌘⇧W`、切换工作区）直接丢弃（`decideGuard` → `busy`），不能替换用户正在回答的那个请求。问句按动作区分（`UnsavedGuard.action` → `unsavedQuestion`）：关 Tab「before closing?」、关文件夹「before closing the folder?」、切换文件夹「before opening another folder?」、退出「before quitting?」。选 `Save` 时任一文件保存失败：关掉确认框、不执行动作，切到那个 Tab，由它的保存失败横幅说明原因。
+- **退出**（I-016）：`⌘Q` 是 App 自己的菜单项 `Quit Aed`（不再用 `role: "quit"`），命令面板 `File: Quit Aed` 走同一个 `actions.quit()`（`createQuit`）：有脏 Tab 先过未保存确认框，放行后 `process.exit(0)`。窗口红色关闭按钮与系统退出（Dock、注销、`osascript quit`）由 `finder_bridge.m` 在标题带 ` — Edited` 时转成选中 `Quit Aed`（见「Finder 桥接与打包流水线」）。用户放行后标记立即去掉，之后再来的退出请求（宿主自己的 terminate 路径）不再询问。
 - 关 Tab 后激活剩下的最后一个 Tab，文件树选中项同步（`nextActiveAfterClose`），所以再点同一文件能重新打开。
 
 ### 其它状态机
@@ -171,6 +173,7 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
    - Method Swizzle `NSApplication setDelegate:` 并通过 `setOrReplaceMethod` 向宿主 Delegate 注入或覆盖 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`：
      - **冷启动首个外部目标**（`NSApplicationDidFinishLaunching` 前及完成后 `1.5s` 内且未通过 `--args` 指定初始目标）：写入 `/tmp/aed-open.queue` 并唤醒当前窗口，由 `App.tsx` 以无文件树独立模式（`workspaceRoot = ""`）直接展示该文件；
      - **运行中再次点击外部文件**：调用 `/usr/bin/open -n <Aed.app> --args <path>` 拉起全新的独立 Aed 窗口进程（不带左侧文件树），并在 AppKit 层锁定窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
+   - **退出保护（I-016，文件末尾独立的一段，自带 `constructor`，不改上面的代码）**：在 `NSApplicationDidFinishLaunching` / `NSWindowDidBecomeKey` 时给宿主窗口 Delegate 的 `windowShouldClose:` 与 App Delegate 的 `applicationShouldTerminate:` 各挂一次钩子（保存原实现，各类只挂一次）。窗口标题以 ` — Edited` 结尾时：关闭按钮返回 `NO`、系统退出返回 `NSTerminateCancel`，并在下一轮 run loop 选中 App 的 `Quit Aed` 菜单项，由 JS 弹未保存确认框；标题不带标记、或菜单里找不到该项时，调用宿主原实现，行为与以前相同。无头测试测不到原生部分，需要 `--target macos` 或打包后手测。
 3. **`scripts/set_default_handlers.m`**：
    - 先通过 `LSCopyDefaultRoleHandlerForContentType` 查询当前默认打开程序，已绑定 `dev.byronwayne.aed` 的 UTI 直接跳过（避免重复触发 macOS `CoreServicesUIAgent` 确认弹窗），并对 UTI 去重、过滤未声明的 `dyn.*` 动态 UTI。
    - 默认仅注册 8 个核心文档与数据 UTI（Markdown、Mermaid、JSONL、JSON、CSV、TSV、Plain Text、Diff/Patch）；传入 `--all` 时额外注册常用源码 UTI，也可直接传入指定扩展名（如 `set_default_handlers yaml toml`）。
@@ -234,6 +237,11 @@ Aed 的行为由下面 13 个状态机决定。「显式」表示状态与转移
 11. **在 `effect` 里启动的冷启动扫描，其 `git` 子进程会被 `SIGTERM`（`nsh 0.4.0` 无头实测）**：
    - 现象：用 `host.params.workspaceRoot` / `AED_ROOT` 启动时，`Changed` 列表为空、状态栏没有分支名，直到按 `⌘R`。日志显示 `readGitStatus` / `readGitBranch` 的 `process.run` 返回 `{ code: null, signal: "SIGTERM" }`，被吞成空结果。原因同踩坑 8：冷启动 `effect` 读了 `recentWorkspaces`，偏好加载后它再运行一次，结束了第一次运行里启动的子进程。
    - 做法：冷启动扫描用 `setTimeout(..., 0)` 移出 `effect` 的运行。`App.test.tsx` › the diff view follows a save 依赖启动扫描的 Git 状态，锁住此行为。
+
+12. **退出拦截（`nsh 0.4.0` 实测）**：
+   - `nsh/desktop` 与 `nsh` 没有窗口关闭或退出钩子（只有 `Window.close()` 与 `process.exit()`）；macOS 宿主 `nsh-macos-host` 自己实现了 `windowShouldClose:` 与 `applicationShouldTerminate:`，但不交给 JS。所以关闭按钮与系统退出只能由 `finder_bridge.m` 拦截。
+   - `keymap.bind({ "mod+q": … })` 直接抛错：`"mod+q" cannot be bound: it quits the app`。`⌘Q` 只能挂在菜单项上。
+   - 无头 `nsh test` 没有菜单栏，`app.keyboard.press("mod+q")` 碰不到菜单项；测试经命令面板触发同一个动作。无头下获准的 `process.exit()` 会结束被测 App，之后的步骤以 `the app left` 失败，可以用来断言「已退出」。
 
 ---
 

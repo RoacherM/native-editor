@@ -205,3 +205,103 @@ static void initFinderBridge(void) {
                 enforceWindowMinSize([note object]);
               }];
 }
+
+// ---- Quit guard (I-016) ---------------------------------------------------
+// Self-contained: its own constructor and observers, no edits to the code
+// above. While the window title ends with " — Edited" (App.tsx sets it from
+// `windowTitle()` in src/session.ts whenever a tab has unsaved edits), the
+// close button and system quits (Dock, logout, `osascript quit`) do not end
+// the app: they choose the app's own Quit menu item (⌘Q, `actions.quit()`),
+// which asks about the unsaved files and then calls `process.exit`. Without
+// the mark, the host's own behavior runs unchanged.
+
+static NSString *const kAedEditedTitleSuffix = @" — Edited";
+static BOOL (*gAedOrigWindowShouldClose)(id, SEL, NSWindow *) = NULL;
+static NSApplicationTerminateReply (*gAedOrigShouldTerminate)(id, SEL, NSApplication *) = NULL;
+static Class gAedWindowDelegateClass = Nil;
+static Class gAedAppDelegateClass = Nil;
+
+static BOOL aedHasUnsavedEdits(void) {
+  for (NSWindow *win in [NSApp windows]) {
+    if ([[win title] hasSuffix:kAedEditedTitleSuffix]) return YES;
+  }
+  return NO;
+}
+
+// Chooses the app's Quit menu item (⌘Q, not the `terminate:` role) on the next
+// turn of the run loop. NO when the menu has none: the caller then lets the
+// host go on as before rather than block quitting for good.
+static BOOL aedChooseAppQuitItem(void) {
+  for (NSMenuItem *top in [[NSApp mainMenu] itemArray]) {
+    NSMenu *menu = [top submenu];
+    for (NSMenuItem *item in [menu itemArray]) {
+      NSEventModifierFlags mods = [item keyEquivalentModifierMask] & NSEventModifierFlagDeviceIndependentFlagsMask;
+      if (![[item keyEquivalent] isEqualToString:@"q"] || mods != NSEventModifierFlagCommand) continue;
+      if ([item action] == @selector(terminate:)) continue;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        NSInteger index = [menu indexOfItem:item];
+        if (index >= 0) [menu performActionForItemAtIndex:index];
+      });
+      return YES;
+    }
+  }
+  return NO;
+}
+
+static BOOL ne_windowShouldClose(id self, SEL _cmd, NSWindow *sender) {
+  if ([[sender title] hasSuffix:kAedEditedTitleSuffix] && aedChooseAppQuitItem()) return NO;
+  return gAedOrigWindowShouldClose ? gAedOrigWindowShouldClose(self, _cmd, sender) : YES;
+}
+
+static NSApplicationTerminateReply ne_applicationShouldTerminate(id self, SEL _cmd, NSApplication *app) {
+  if (aedHasUnsavedEdits() && aedChooseAppQuitItem()) return NSTerminateCancel;
+  return gAedOrigShouldTerminate ? gAedOrigShouldTerminate(self, _cmd, app) : NSTerminateNow;
+}
+
+// Puts `imp` on `cls` for `sel` (of `protocol`, whose types it takes) and
+// returns the implementation it replaces (the class's own or an inherited
+// one), NULL when there was none.
+static IMP aedHookMethod(Class cls, SEL sel, IMP imp, Protocol *protocol) {
+  Method m = class_getInstanceMethod(cls, sel);
+  IMP orig = m ? method_getImplementation(m) : NULL;
+  const char *types = m ? method_getTypeEncoding(m) : protocol_getMethodDescription(protocol, sel, NO, YES).types;
+  if (!types) return NULL;
+  if (!class_addMethod(cls, sel, imp, types)) method_setImplementation(m, imp);
+  return orig;
+}
+
+// Hooks each delegate class once; a class seen again keeps its first hook.
+static void aedInstallQuitGuard(void) {
+  id appDelegate = [NSApp delegate];
+  if (appDelegate && !gAedAppDelegateClass) {
+    gAedAppDelegateClass = [appDelegate class];
+    gAedOrigShouldTerminate = (NSApplicationTerminateReply (*)(id, SEL, NSApplication *))aedHookMethod(
+        gAedAppDelegateClass, @selector(applicationShouldTerminate:), (IMP)ne_applicationShouldTerminate, @protocol(NSApplicationDelegate));
+  }
+  if (gAedWindowDelegateClass) return;
+  for (NSWindow *win in [NSApp windows]) {
+    id winDelegate = [win delegate];
+    if (!winDelegate) continue;
+    gAedWindowDelegateClass = [winDelegate class];
+    gAedOrigWindowShouldClose = (BOOL (*)(id, SEL, NSWindow *))aedHookMethod(
+        gAedWindowDelegateClass, @selector(windowShouldClose:), (IMP)ne_windowShouldClose, @protocol(NSWindowDelegate));
+    return;
+  }
+}
+
+__attribute__((constructor))
+static void initQuitGuard(void) {
+  NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+  [nc addObserverForName:NSApplicationDidFinishLaunchingNotification
+                  object:nil
+                   queue:nil
+              usingBlock:^(NSNotification *note) {
+                aedInstallQuitGuard();
+              }];
+  [nc addObserverForName:NSWindowDidBecomeKeyNotification
+                  object:nil
+                   queue:nil
+              usingBlock:^(NSNotification *note) {
+                aedInstallQuitGuard();
+              }];
+}

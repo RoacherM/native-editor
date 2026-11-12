@@ -124,7 +124,7 @@ export function externalOpenKeepsTree(origin: ExternalOrigin): boolean {
 }
 
 /** The actions the unsaved-changes prompt guards. */
-export type GuardedAction = "close-tab" | "close-folder" | "switch-folder";
+export type GuardedAction = "close-tab" | "close-folder" | "switch-folder" | "quit";
 
 /** A guarded action waiting on the unsaved-changes prompt. */
 export interface UnsavedGuard {
@@ -137,11 +137,25 @@ const GUARD_ENDINGS: Record<GuardedAction, string> = {
   "close-tab": "before closing?",
   "close-folder": "before closing the folder?",
   "switch-folder": "before opening another folder?",
+  quit: "before quitting?",
 };
 
 /** The prompt's question: which files, before which action. */
 export function unsavedQuestion(action: GuardedAction, names: string): string {
   return `Save changes to ${names} ${GUARD_ENDINGS[action]}`;
+}
+
+/**
+ * The window title while tabs have unsaved edits ends with this (macOS's own
+ * wording). `scripts/finder_bridge.m` reads it: the close button and system
+ * quits (Dock, logout) of an edited window go to the Quit menu item, which
+ * asks first (DESIGN.md「术语与边界」).
+ */
+export const EDITED_TITLE_SUFFIX = " — Edited";
+
+/** The window title: `Aed`, with EDITED_TITLE_SUFFIX while edits are unsaved. */
+export function windowTitle(edited: boolean): string {
+  return edited ? `Aed${EDITED_TITLE_SUFFIX}` : "Aed";
 }
 
 /**
