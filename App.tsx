@@ -938,6 +938,15 @@ function PosterFields(props: {
         cx.arc(g.split, g.blockTop, sr, 0, Math.PI / 2);
         cx.closePath();
         cx.fill();
+        // Dashed trace: from the disc's foot (along the bottom) across the
+        // red to the top-right corner (up the right edge).
+        cx.strokeStyle = ui.border;
+        cx.lineWidth = 2;
+        cx.setLineDash([8, 6]);
+        cx.beginPath();
+        cx.moveTo(g.split, h);
+        cx.bezierCurveTo(g.split + (w - g.split) * 0.3, h, w, h * 0.3, w, 0);
+        cx.stroke();
       }}
     />
   );
