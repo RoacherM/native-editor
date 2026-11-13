@@ -494,7 +494,12 @@ impl TermView {
             io: Io::new(),
         };
         let this = TermView::alloc(mtm).set_ivars(Ivars { state: RefCell::new(state) });
-        unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        // Since macOS 14 views do not clip by default, and `drawRect:` gets
+        // dirty rects past the bounds: the background fill would paint over
+        // the terminal's toolbar and the editor above it.
+        view.setClipsToBounds(true);
+        view
     }
 
     fn state(&self) -> RefMut<'_, State> {
