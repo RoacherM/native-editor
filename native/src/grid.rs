@@ -8,7 +8,7 @@ use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSColor, NSFont, NSFontAttributeName, NSFontDescriptorSymbolicTraits,
     NSFontManager, NSFontTraitMask, NSForegroundColorAttributeName,
 };
-use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_core_text::{CTFont, CTFontOrientation};
 use objc2_foundation::{NSAttributedString, NSDictionary, NSString};
@@ -492,6 +492,10 @@ fn flush(ctx: &CGContext, fonts: &Fonts, style: Option<(Rgb, bool)>, glyphs: &mu
         return;
     }
     set_fill(ctx, fg, 1.0);
+    // CTFontDrawGlyphs applies the text matrix, which is not part of the
+    // graphics state: text drawn before (AppKit's, our fallback) leaves it
+    // moved, and the row would land that far right.
+    CGContext::set_text_matrix(Some(ctx), CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.0, ty: 0.0 });
     // SAFETY: as many positions as glyphs.
     unsafe {
         ct_font(fonts.font(bold)).draw_glyphs(
@@ -535,7 +539,9 @@ pub fn word_at(row: &[Cell], col: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Rgba, word_at};
+    use super::{Cell, Fonts, Frame, Grid, Look, Rgba, word_at};
+    use objc2_core_foundation::{CGAffineTransform, CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext, CGImageAlphaInfo};
 
     fn row(text: &str) -> Vec<Cell> {
         text.chars().map(|c| Cell { text: if c == ' ' { String::new() } else { c.to_string() }, ..Default::default() }).collect()
@@ -560,5 +566,31 @@ mod tests {
         assert_eq!(Rgba::parse("e8462b"), None);
         assert_eq!(Rgba::parse("#12345"), None);
         assert_eq!(Rgba::parse("#zzzzzz"), None);
+    }
+
+    /// The leftmost column with ink, drawing "zsh" at column 0 into a
+    /// context whose text matrix earlier text drawing left at `left_over`.
+    fn first_ink(left_over: f64) -> usize {
+        let (w, h) = (200usize, 40usize);
+        let space = CGColorSpace::new_device_rgb().unwrap();
+        // SAFETY: a context of our own size that owns its pixels.
+        let ctx = unsafe { CGBitmapContextCreate(std::ptr::null_mut(), w, h, 8, w * 4, Some(&space), CGImageAlphaInfo::PremultipliedLast.0) }.unwrap();
+        CGContext::set_text_matrix(Some(&ctx), CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: left_over, ty: 0.0 });
+        let mut fonts = Fonts::new(None, 14.0, 1.0);
+        let frame = Frame { height: h as f64, cell_w: fonts.cell_w, cell_h: fonts.cell_h };
+        let mut grid = Grid { bg: [0, 0, 0], fg: [255, 255, 255], ..Default::default() };
+        grid.rows = vec![row("zsh")];
+        let look = Look { focused: false, selection: None, marked: None };
+        grid.draw(&ctx, &mut fonts, &frame, CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64)), &look);
+        // SAFETY: the context's own w × h RGBA pixels.
+        let px = unsafe { std::slice::from_raw_parts(CGBitmapContextGetData(Some(&ctx)) as *const u8, w * h * 4) };
+        (0..w).find(|&x| (0..h).any(|y| px[(y * w + x) * 4] > 128)).unwrap()
+    }
+
+    #[test]
+    fn text_starts_in_its_cell_whatever_drew_text_before() {
+        let clean = first_ink(0.0);
+        assert!(clean < 12, "ink at {clean}");
+        assert_eq!(first_ink(30.0), clean);
     }
 }

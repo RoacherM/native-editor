@@ -295,6 +295,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
    - 原生视图里的键直接进 Rust，TSX 看不到；TSX 判断「用过」读 `TerminalSession.used`。测试通道的输入可能还在闸门里排队、没到 Rust，所以 Tab 另记 `typed`，否则排队期间换目录会重启 Shell（`App.test.tsx` › a half-typed terminal command stays, with its shell, when a folder opens）。
    - Shell 结束靠 PTY 读到 EOF 判定（读线程随后 `waitpid`）。macOS 上会话首进程退出时内核收回这个 TTY，留在后台的 `sleep 20 &`、`nohup … &` 也拦不住 EOF（`native/src/session/tests.rs` › a_shell_that_exits_ends_even_while_a_job_holds_the_terminal 实测 0.01 秒内收到 exit），所以不另起 `waitpid` 线程。
    - macOS 14 起 `NSView.clipsToBounds` 默认 NO，`drawRect:` 的脏区可以超出视图边界；终端视图按脏区铺背景，曾把上方的终端顶栏（Tab、Shell 下拉）和与编辑区的分界一起盖掉。所以 `aed.terminal` 视图创建时 `setClipsToBounds(true)`。无头测试看不到，靠真机核对。
+   - `CTFontDrawGlyphs` 会套用上下文的文本矩阵（text matrix），而文本矩阵不属于图形状态，`drawRect:` 之间不重置。AppKit 自己画字、或我们对本字体没有的字（`➜`、`✗`、中文）用 `NSAttributedString` 回退绘制之后，矩阵会留下位移，同一次重绘里后面的行和字就整体右移：表现为输出行前多一个空格、提示符后空隙变大，以及键入的 `echo` 跟旁边的字叠成 `echh`。所以 `flush` 每次画字形前把文本矩阵设回单位矩阵（`grid::tests` › text_starts_in_its_cell_whatever_drew_text_before，用位图上下文复现）。
    - Rust 程序启动时把 SIGPIPE 设成忽略，`forkpty` 的子进程会原样继承；`std::process::Command` 会替子进程复位，`forkpty` 不会，所以 `pty::exec_shell` 自己复位（› the_shell_gets_default_signals_and_a_utf8_tty）。
 
 ---
@@ -319,7 +320,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | 检查项 | 命令 | 基准指标（macOS arm64） |
 |---|---|---|
 | 类型检查 | `nsh check` | 编译 `native/` crate 加 TS 类型检查：首次约 68s，增量约 1s（`nsh 0.4.0`），0 errors |
-| 单测与桌面无头 E2E | `nsh test --trace` | 110 项（91 项 TSX + 19 项 Rust）约 2 分钟（`nsh 0.4.0`，2026-11-13 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、终端会话与真实 Shell |
+| 单测与桌面无头 E2E | `nsh test --trace` | 111 项（91 项 TSX + 20 项 Rust）约 2 分钟（`nsh 0.4.0`，2026-11-13 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、终端会话与真实 Shell |
 | libghostty-vt 固定版本 | `sh scripts/fetch-ghostty-vt.sh` | 1.0.1 zip 与 `libghostty-vt.a`（macos-arm64_x86_64）SHA-256 都对上才拷入；已有且哈希对时不下载 |
 | 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
 | 打包体积与速度 | `nsh package --target macos` | 增量打包 ~64ms，`.app` 体积 ~37 MB |
