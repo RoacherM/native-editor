@@ -217,3 +217,14 @@ fn only_a_password_read_keeps_keys_out_of_the_log() {
     wait_line(&session, |l| l == "READ_DONE");
     assert!(!session.shared.reads_password());
 }
+
+#[test]
+fn a_shell_outside_the_app_keeps_its_history_out_of_home() {
+    let session = TerminalSession::new(24, 80);
+    sh(&session);
+    type_line(&session, "echo \"H=$HISTFILE Z=$ZDOTDIR\"");
+    let line = wait_line(&session, |l| l.starts_with("H="));
+    let private = std::env::temp_dir().join(format!("aed-shell-{}", std::process::id()));
+    let private = private.to_string_lossy();
+    assert_eq!(line, format!("H={private}/.history Z={private}"));
+}

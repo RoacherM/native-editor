@@ -1008,15 +1008,35 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.waitUntil(() => showsText(app, "FIRST_CMD_RAN"), { timeout: 8000 });
   });
 
-  test("a command submitted after the shell ended starts a new shell", async () => {
+  test("test shells keep their history out of the user's home", async () => {
     const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-    await app.press("id:titlebar-toggle-terminal");
-    await app.waitFor("id:terminal-pane");
+    await runInTerminal(app, 'echo "HF=$HISTFILE"', "HIST_SHOWN");
+    const line = app.texts().find((t) => t.startsWith("HF="));
+    expect(line).toBeDefined();
+    expect(line).toContain("/aed-shell-");
+    expect(line?.startsWith(`HF=${os.homedir()}/`)).toBe(false);
+  });
+
+  test("the last tab's shell exiting closes the terminal, and opening it starts a fresh shell", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
     await runInTerminal(app, "true", "SHELL_UP");
     await termType(app, "exit\r");
-    // The bridge's exit frame carries the shell's code.
-    await app.waitUntil(() => app.texts().some((t) => t.endsWith("session ended (exit 0)")), { timeout: 8000 });
+    await app.waitUntil(() => !app.shows("id:terminal-pane"), { timeout: 8000 });
     await runInTerminal(app, "true", "SHELL_BACK");
+    expect(app.texts().some((t) => t.startsWith("1: "))).toBe(false);
+    expect(app.texts().some((t) => t.startsWith("2: "))).toBe(true);
+  });
+
+  test("a shell exiting closes only its tab", async () => {
+    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    await runInTerminal(app, "true", "FIRST_UP");
+    await app.press("id:terminal-add-btn");
+    await app.waitUntil(() => app.texts().some((t) => t.startsWith("2: ")), { timeout: 8000 });
+    await runInTerminal(app, "true", "SECOND_UP");
+    await termType(app, "exit\r");
+    await app.waitUntil(() => !app.texts().some((t) => t.startsWith("2: ")), { timeout: 8000 });
+    expect(app.shows("id:terminal-pane")).toBe(true);
+    await runInTerminal(app, "true", "FIRST_STILL_UP");
   });
 
   test("a half-typed terminal command stays, with its shell, when a folder opens", async () => {

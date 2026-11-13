@@ -1,7 +1,35 @@
 //! A login shell on a pseudo-terminal: fork, size, read, write, reap.
 //! DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
 
-use std::{ffi::CString, io, ptr};
+use std::{
+    ffi::CString,
+    io,
+    os::unix::fs::DirBuilderExt,
+    path::PathBuf,
+    ptr,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+static USER_CONFIG: AtomicBool = AtomicBool::new(false);
+
+/// The app's shells read the user's startup files and keep the user's
+/// history. Until this is called (`nsh test`, `cargo test`) a shell gets a
+/// private, empty `ZDOTDIR` and `HISTFILE` instead (`private_config`), so
+/// tests never write the user's history.
+pub fn use_user_config() {
+    USER_CONFIG.store(true, Ordering::Relaxed);
+}
+
+/// `$TMPDIR/aed-shell-<pid>` (0700): zsh reads no startup files from it and
+/// keeps its history there (`/etc/zshrc` puts `HISTFILE` in `ZDOTDIR`).
+fn private_config() -> Option<PathBuf> {
+    if USER_CONFIG.load(Ordering::Relaxed) {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("aed-shell-{}", std::process::id()));
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+    Some(dir)
+}
 
 /// What a shell starts with.
 pub struct ShellSpec<'a> {
@@ -28,7 +56,13 @@ pub struct Child {
 fn environment(spec: &ShellSpec) -> Vec<CString> {
     const OURS: [&str; 6] =
         ["TERM", "COLORTERM", "TERM_PROGRAM", "DISABLE_AUTO_TITLE", "PROMPT_EOL_MARK", "GHOSTTY_RESOURCES_DIR"];
-    let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !OURS.contains(&k.as_str())).collect();
+    let private = private_config();
+    let replaced = |k: &str| OURS.contains(&k) || (private.is_some() && (k == "ZDOTDIR" || k == "HISTFILE"));
+    let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !replaced(k)).collect();
+    if let Some(dir) = private {
+        vars.push(("ZDOTDIR".into(), dir.to_string_lossy().into_owned()));
+        vars.push(("HISTFILE".into(), dir.join(".history").to_string_lossy().into_owned()));
+    }
     vars.push(("TERM".into(), "xterm-256color".into()));
     vars.push(("COLORTERM".into(), "truecolor".into()));
     vars.push(("TERM_PROGRAM".into(), spec.term_program.into()));

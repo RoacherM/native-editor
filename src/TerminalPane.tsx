@@ -38,6 +38,8 @@ export interface TerminalPaneProps {
   theme?: Accessor<EditorTheme>;
   onShellChange?: (shellPath: string) => void;
   onFileOpen?: (filePath: string) => void;
+  /** The last tab's shell exited: the panel should close. */
+  onEmpty?: () => void;
 }
 
 export interface ExternalTerminalApp {
@@ -343,6 +345,8 @@ interface SessionDeps {
   app: Accessor<ExternalTerminalApp | undefined>;
   /** The test channel is in use: mirrors are kept current. */
   mirrorOn: Accessor<boolean>;
+  /** A tab's shell exited (not one replaced by a new shell). */
+  exited: (tab: TermTab) => void;
 }
 
 function createTermTab(id: number, initialShell: ShellProfile, deps: SessionDeps): TermTab {
@@ -387,24 +391,12 @@ function onSessionEvent(tab: TermTab, event: SessionEvent, deps: SessionDeps): v
   } else if (event.kind === "title") {
     tab.programTitle.set(event.title ?? "");
   } else if (event.kind === "exit") {
-    endSession(tab, event.code, deps);
+    // A late exit of a shell already replaced (new folder or shell) ends nothing.
+    if (!tab.session.running) deps.exited(tab);
   } else if (event.kind === "input") {
     // A key in a tab whose shell ended starts a new one.
     startSession(tab, deps);
   }
-}
-
-/**
- * The shell exited: its screen stays, with a line saying so. A late exit of
- * a shell already replaced (new folder or shell) ends nothing.
- */
-function endSession(tab: TermTab, code: number | null | undefined, deps: SessionDeps): void {
-  if (tab.session.running) return;
-  tab.startedIn = null;
-  tab.gate = null;
-  const status = code === null || code === undefined ? "" : ` (exit ${code})`;
-  tab.session.feed(`\r\n[${untracked(() => tab.title())}] session ended${status}\r\n`);
-  refreshMirror(tab, deps);
 }
 
 /** Start a tab's shell (once); a failure shows in the terminal, not as a crash. */
@@ -614,6 +606,10 @@ interface TerminalModel {
   focused: Signal<boolean>;
   /** The test channel is in use: the plain-text mirror is fed and shown. */
   mirrorOn: Signal<boolean>;
+  /** Whether the panel shows: shells start only then. */
+  visible: Accessor<boolean>;
+  /** The last tab's shell exited: the panel closes. */
+  onEmpty: () => void;
   nextId: () => number;
   deps: SessionDeps;
 }
@@ -628,22 +624,27 @@ function createTerminalModel(
   firstShell: ShellProfile,
   selectedShell: Signal<ShellProfile>,
   cwd: Accessor<string>,
-  app: Accessor<ExternalTerminalApp | undefined>
+  app: Accessor<ExternalTerminalApp | undefined>,
+  visible: Accessor<boolean>,
+  onEmpty: () => void
 ): TerminalModel {
   let counter = 1;
   const mirrorOn = signal(false);
-  const deps: SessionDeps = { cwd, app, mirrorOn };
+  const deps: SessionDeps = { cwd, app, mirrorOn, exited: (tab) => shellExited(model, tab.id) };
   const firstTab = createTermTab(counter, firstShell, deps);
-  return {
+  const model: TerminalModel = {
     tabs: signal<TermTab[]>([firstTab]),
     activeId: signal(firstTab.id),
     selectedShell,
     view: null,
     focused: signal(false),
     mirrorOn,
+    visible,
+    onEmpty,
     nextId: () => ++counter,
     deps,
   };
+  return model;
 }
 
 function focusTerminal(model: TerminalModel): void {
@@ -657,27 +658,34 @@ function clearActive(model: TerminalModel): void {
   refreshMirror(tab, model.deps);
 }
 
+/** A new active tab; its shell starts (and it takes the keyboard) if the panel shows. */
 function addTab(model: TerminalModel, shell: ShellProfile): void {
   const tab = createTermTab(model.nextId(), shell, model.deps);
   model.tabs.update((previous) => previous.concat([tab]));
   model.activeId.set(tab.id);
+  if (!untracked(() => model.visible())) return;
   startSession(tab, model.deps);
   focusTerminal(model);
 }
 
-/** Close a tab and its shell; the last tab closing opens a new one at once. */
+/** Close a tab and its shell; the last tab is replaced first (never no tab). */
 function closeTab(model: TerminalModel, id: number): void {
-  const all = untracked(() => model.tabs());
-  all.find((tab) => tab.id === id)?.session.close();
-  const remaining = all.filter((tab) => tab.id !== id);
-  model.tabs.set(remaining);
+  if (untracked(() => model.tabs()).length === 1) addTab(model, untracked(() => model.selectedShell()));
+  untracked(() => model.tabs()).find((tab) => tab.id === id)?.session.close();
+  model.tabs.update((list) => list.filter((tab) => tab.id !== id));
   if (untracked(() => model.activeId()) !== id) return;
-  if (remaining.length === 0) {
-    addTab(model, untracked(() => model.selectedShell()));
-    return;
-  }
+  const remaining = untracked(() => model.tabs());
   model.activeId.set(remaining[remaining.length - 1].id);
   focusTerminal(model);
+}
+
+/**
+ * A shell exited (Ctrl+D, `exit`): its tab closes, as in Ghostty. The last
+ * tab's closing also closes the panel; its new tab starts when it shows.
+ */
+function shellExited(model: TerminalModel, id: number): void {
+  if (untracked(() => model.tabs()).length === 1) model.onEmpty();
+  closeTab(model, id);
 }
 
 /**
@@ -868,7 +876,9 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   const externalApps = signal<ExternalTerminalApp[]>([]);
   const ghosttyCfg = signal<GhosttyConfig>({});
   const primaryExternal = computed(() => externalApps()[0]);
-  const model = createTerminalModel(untracked(() => selectedShell()), selectedShell, props.cwd, primaryExternal);
+  const model = createTerminalModel(untracked(() => selectedShell()), selectedShell, props.cwd, primaryExternal, props.visible, () =>
+    props.onEmpty?.()
+  );
   const { tabs, activeId, focused, mirrorOn } = model;
 
   const activeTab = computed(() => tabs().find((tab) => tab.id === activeId()) ?? tabs()[0]);

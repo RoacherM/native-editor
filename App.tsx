@@ -2631,6 +2631,7 @@ function App(): JSX.Element {
                   theme={activeTheme}
                   onShellChange={setShellPath}
                   onFileOpen={openFileInTab}
+                  onEmpty={() => terminalOpen.set(false)}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>

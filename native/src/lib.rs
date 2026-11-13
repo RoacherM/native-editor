@@ -26,8 +26,10 @@ fn native(registry: &mut Registry) {
 /// The `aed.terminal` view; sessions wake it to redraw.
 #[native_components(macos)]
 fn components(components: &nsh_platform_macos::Components) {
-    // Only the app registers views: headless runs and tests write no log.
+    // Only the app registers views: headless runs and tests write no log,
+    // and their shells leave the user's startup files and history alone.
     log::enable();
+    pty::use_user_config();
     session::on_change(view::wake);
     components.register("aed.terminal", std::rc::Rc::new(|cx| Box::new(view::Terminal::new(cx)) as Box<dyn nsh_platform_macos::NativeComponent>));
 }
