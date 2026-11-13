@@ -198,3 +198,22 @@ fn a_shell_that_cannot_start_says_why() {
     assert!(session.start(options("/bin/sh", "/nonexistent/dir")).is_err());
     assert!(!session.running());
 }
+
+#[test]
+fn only_a_password_read_keeps_keys_out_of_the_log() {
+    let session = TerminalSession::new(24, 80);
+    sh(&session);
+    type_line(&session, "echo AT_PROMPT");
+    wait_line(&session, |l| l == "AT_PROMPT");
+    // The line editor reads raw without echo: not a password.
+    assert!(!session.shared.reads_password());
+    type_line(&session, "stty -echo; read secret; stty echo; echo READ_DONE");
+    let until = Instant::now() + Duration::from_secs(5);
+    while !session.shared.reads_password() {
+        assert!(Instant::now() < until, "no password read seen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    type_line(&session, "hunter2");
+    wait_line(&session, |l| l == "READ_DONE");
+    assert!(!session.shared.reads_password());
+}

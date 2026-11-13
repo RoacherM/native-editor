@@ -279,6 +279,11 @@ impl Fonts {
         }
     }
 
+    /// The regular font's PostScript name (for the log).
+    pub fn name(&self) -> String {
+        self.regular.fontName().to_string()
+    }
+
     /// The cell in device pixels (libghostty's sizes).
     pub fn cell_px(&self) -> (u32, u32) {
         ((self.cell_w * self.scale).round() as u32, (self.cell_h * self.scale).round() as u32)

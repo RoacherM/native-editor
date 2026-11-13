@@ -15,7 +15,7 @@ use std::{
 
 use nsh_core::prelude::*;
 
-use crate::{ffi as g, pty};
+use crate::{ffi as g, log, pty};
 
 /// The terminal's text before a view has measured it, in pixels per cell.
 const CELL_W: u32 = 8;
@@ -239,6 +239,7 @@ impl Shared {
 
     /// Bytes for the running shell; dropped when none runs.
     pub fn send(&self, bytes: Vec<u8>) {
+        log::line(|| format!("#{} report {}", self.id, log::escape(&bytes)));
         if let Some(input) = self.input.lock().unwrap().as_ref() {
             let _ = input.send(bytes);
         }
@@ -247,6 +248,10 @@ impl Shared {
     /// What the user typed (keys, paste, mouse): it marks the shell used;
     /// with no shell, TSX hears `input` (and starts one).
     pub fn type_in(&self, bytes: Vec<u8>) {
+        if log::on() {
+            let shown = if self.reads_password() { format!("<{} bytes hidden: password prompt>", bytes.len()) } else { log::escape(&bytes) };
+            log::line(|| format!("#{} type {shown}", self.id));
+        }
         let input = self.input.lock().unwrap();
         match input.as_ref() {
             Some(tx) => {
@@ -262,6 +267,11 @@ impl Shared {
 
     pub fn running(&self) -> bool {
         self.input.lock().unwrap().is_some()
+    }
+
+    /// A program reads a password: keys stay out of the log.
+    pub fn reads_password(&self) -> bool {
+        self.core.lock().unwrap().run.as_ref().is_some_and(|run| pty::reads_password(run.child.fd))
     }
 
     fn notify(&self, change: impl FnOnce(&mut Events)) {
@@ -311,7 +321,10 @@ impl Shared {
     fn start(self: &Arc<Self>, spec: &pty::ShellSpec) -> std::io::Result<()> {
         self.stop();
         let mut core = self.core.lock().unwrap();
-        let child = pty::spawn(&pty::ShellSpec { rows: core.rows, cols: core.cols, ..*spec })?;
+        let child = pty::spawn(&pty::ShellSpec { rows: core.rows, cols: core.cols, ..*spec }).inspect_err(|e| {
+            log::line(|| format!("#{} start {} in {} failed: {e}", self.id, spec.shell, spec.cwd));
+        })?;
+        log::line(|| format!("#{} start {} in {} pid {} at {}x{}", self.id, spec.shell, spec.cwd, child.pid, core.rows, core.cols));
         core.generation += 1;
         let generation = core.generation;
         core.run = Some(Run { child });
@@ -346,6 +359,7 @@ impl Shared {
             // SAFETY: our terminal, under its lock.
             unsafe { g::ghostty_terminal_vt_write(core.term, buf.as_ptr(), n) };
             drop(core);
+            log::line(|| format!("#{} output {n} {}", self.id, log::escape(&buf[..n.min(240)])));
             self.notify(|e| e.output = true);
             self.changed();
         }
@@ -359,6 +373,7 @@ impl Shared {
         pty::close(child.fd);
         drop(core);
         let code = pty::wait(child.pid);
+        log::line(|| format!("#{} exit {code}{}", self.id, if current { "" } else { " (replaced)" }));
         if current {
             self.notify(|e| e.exit = Some(code));
         }

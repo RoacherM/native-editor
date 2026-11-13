@@ -45,6 +45,7 @@ Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文�
 | 每用户缓存目录 | `~/Library/Caches/dev.byronwayne.aed/`（`0700`） | Aed 自己的临时文件都放这里（`aedCacheDir()` / `scripts/aed_paths.h`）。原生代码用 `O_NOFOLLOW\|O_DIRECTORY` 打开后 `fstat` 校验：必须是真目录（不是符号链接）、属于当前用户，权限不是 `0700` 就改成 `0700`，否则放弃写入。App 侧 `fs/promises` 没有 `mode` / `chmod`，只在其下 `mkdir` 出 `ql/`，靠 `~/Library` 本身是 `0700`。WebKit 也把 Aed 的网页缓存放在同一目录的 `WebKit/` 下，两者互不干扰 |
 | Finder 队列 | `<缓存目录>/open-<pid>/<seq>.path` | 每个 Aed 进程一个目录，每个待打开路径一个文件（原样路径字节，无换行）。写入方先用 `O_CREAT\|O_EXCL\|O_NOFOLLOW`、`0600` 建 `.<seq>.tmp`，写完再 `renameatx_np(RENAME_EXCL)` 成 `<seq>.path`，所以读方看不到半截文件。写入方：`launcher`（命令行第 2 个起的文件）、`finder_bridge.m`（冷启动阶段收到的 AppleEvent，一批文件全部写入）。读方：`consumeFinderOpenQueue()` 只认 `<数字>.path`，按数字（不是字典序）排序，逐个 `lstat`：普通文件读出内容，其它（符号链接等）不读，两者都删除（`unlink` 只删链接本身）；`.<seq>.tmp` 不碰。`launcher` 启动时清空本 pid 的旧目录，并删除进程已不存在的 `open-<pid>` 目录（是符号链接时只删链接） |
 | QuickLook 临时图 | `<缓存目录>/ql/<随机 UUID>.png` | `generateQuickLookUrl()` 让 `sips` 把 PDF 首页写成 PNG，读进内存转成 `blob:` URL 后立即删除 PNG（`sips` 失败也删）。内存里每个文件只留最新版本（`mtimeMs:size`）的 URL，新版本生成后 `revokeObjectURL` 旧的 |
+| 终端调试日志 | `<缓存目录>/terminal.log`（`0600`，超过 2 MB 改名为 `terminal.log.1` 后重开） | `native/src/log.rs`。只在 App 里写：`aed.terminal` 组件注册时才 `log::enable()`，无头 `nsh test` 与 `cargo test` 不注册组件，不会产生这个文件。逐行记录本地时间加：按键（keyCode、字符、修饰键、是否有输入法组字）、输入法 insert/mark/unmark、发给 Shell 的字节（控制字符转义）、Shell 输出前 240 字节、按键后 1.5 秒内光标所在行的格子内容、布局（视图尺寸、字体、格子尺寸、行列数）、焦点、链接、Shell 启动与退出。程序读密码时（PTY `ECHO` 关且 `ICANON` 开，即 `getpass` / `sudo` 的读法）只记字节数，不记内容。zsh/readline 在提示符下也关 `ECHO`，但它们关了 `ICANON`，不算读密码（`session::tests` › only_a_password_read_keeps_keys_out_of_the_log）。目录由 `DirBuilder` 以 `0700` 创建，文件用 `O_NOFOLLOW` 打开，跟 App 侧一样不另做 `fstat` 校验，靠 `~/Library` 本身是 `0700`。新增文件，没有旧版本要兼容 |
 | Mermaid bundle | 无磁盘缓存 | `loadMermaidBundleJs()` 每个进程直接从 VS Code / Cursor / Antigravity 扩展目录提取一次，结果只缓存在内存（没找到不缓存，下次渲染器启动再找） |
 | Rust crate / 原生模块 | `nsh.json` `"rust": "native"`；模块 `aed/native`（`TerminalSession` 类）；原生组件 `aed.terminal`（props `session` / `fontFamily` / `fontSize` / `theme`，事件 `focused` / `link`，命令 `focus`） | TSX 与 `native/src/lib.rs` 两边的字面量必须一致。原生组件只在 macOS 宿主注册，无头 `nsh test` 里是一个空视图。终端改原生时新增，没有旧缓存或配置要兼容 |
 | 宿主事件（仅测试） | `aed.terminal.test` | `TerminalPane` 的测试通道，替代原生视图对当前 Tab 做的事（无头测试没有原生视图）：`{type:"input", data, binary?}`（当作键入，经启动闸门）、`{type:"resize", rows, cols}`、`{type:"focus", focused}`；第一次收到时打开纯文本镜像 `id:terminal-mirror`（最新 14 行）。打包宿主不发送；与 `aed.preview.eval` 同级。原名 `aed.terminal.page`（xterm 页面消息），只有测试用，改名无兼容问题 |
@@ -318,7 +319,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | 检查项 | 命令 | 基准指标（macOS arm64） |
 |---|---|---|
 | 类型检查 | `nsh check` | 编译 `native/` crate 加 TS 类型检查：首次约 68s，增量约 1s（`nsh 0.4.0`），0 errors |
-| 单测与桌面无头 E2E | `nsh test --trace` | 108 项（91 项 TSX + 17 项 Rust）约 2 分钟（`nsh 0.4.0`，2026-11-12 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、终端会话与真实 Shell |
+| 单测与桌面无头 E2E | `nsh test --trace` | 110 项（91 项 TSX + 19 项 Rust）约 2 分钟（`nsh 0.4.0`，2026-11-13 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、终端会话与真实 Shell |
 | libghostty-vt 固定版本 | `sh scripts/fetch-ghostty-vt.sh` | 1.0.1 zip 与 `libghostty-vt.a`（macos-arm64_x86_64）SHA-256 都对上才拷入；已有且哈希对时不下载 |
 | 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
 | 打包体积与速度 | `nsh package --target macos` | 增量打包 ~64ms，`.app` 体积 ~37 MB |

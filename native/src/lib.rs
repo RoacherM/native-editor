@@ -11,6 +11,7 @@ mod ffi;
 mod grid;
 #[cfg(target_os = "macos")]
 mod keys;
+mod log;
 mod pty;
 mod session;
 #[cfg(target_os = "macos")]
@@ -25,6 +26,8 @@ fn native(registry: &mut Registry) {
 /// The `aed.terminal` view; sessions wake it to redraw.
 #[native_components(macos)]
 fn components(components: &nsh_platform_macos::Components) {
+    // Only the app registers views: headless runs and tests write no log.
+    log::enable();
     session::on_change(view::wake);
     components.register("aed.terminal", std::rc::Rc::new(|cx| Box::new(view::Terminal::new(cx)) as Box<dyn nsh_platform_macos::NativeComponent>));
 }

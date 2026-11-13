@@ -125,6 +125,16 @@ unsafe fn exec_shell(
     }
 }
 
+/// Whether a program reads a password: canonical input without echo (how
+/// `getpass` and `sudo` read). Line editors (zsh, readline) also turn echo
+/// off, but read raw, so a prompt is not one.
+pub fn reads_password(fd: i32) -> bool {
+    // SAFETY: tcgetattr into our own struct; the master reports the slave's modes.
+    let mut tty: libc::termios = unsafe { std::mem::zeroed() };
+    let got = unsafe { libc::tcgetattr(fd, &mut tty) } == 0;
+    got && tty.c_lflag & libc::ECHO == 0 && tty.c_lflag & libc::ICANON != 0
+}
+
 /// The kernel's terminal size for the PTY; the shell gets SIGWINCH.
 pub fn set_size(fd: i32, rows: u16, cols: u16) {
     let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };

@@ -8,6 +8,7 @@ use std::{
     collections::HashMap,
     ptr,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use nsh_core::JsonValue;
@@ -27,7 +28,7 @@ use objc2_foundation::{NSArray, NSAttributedString, NSAttributedStringKey, NSNot
 use crate::{
     ffi as g,
     grid::{self, Changed, Fonts, Frame, Grid, Look, PAD, Render, Rgba},
-    keys,
+    keys, log,
     session::{self, Colors, Core, Shared},
 };
 
@@ -139,6 +140,8 @@ pub struct State {
     reporting: bool,
     /// Precise (trackpad) scroll not yet a whole line.
     scroll: f64,
+    /// When the user last typed: the log shows the cursor row as it redraws.
+    typed_at: Option<Instant>,
     io: Io,
 }
 
@@ -396,8 +399,9 @@ define_class!(
 
     unsafe impl NSTextInputClient for TermView {
         #[unsafe(method(insertText:replacementRange:))]
-        fn insert_text(&self, string: &AnyObject, _range: NSRange) {
+        fn insert_text(&self, string: &AnyObject, range: NSRange) {
             let text = ns_text(string);
+            self.log_input(|| format!("ime insert {:?} replace {range:?}", text));
             let mut st = self.state();
             st.marked = None;
             match st.typed.as_mut() {
@@ -412,13 +416,15 @@ define_class!(
         }
 
         #[unsafe(method(doCommandBySelector:))]
-        fn do_command_by_selector(&self, _selector: Sel) {
+        fn do_command_by_selector(&self, selector: Sel) {
             // Enter, arrows, Backspace…: `key` encodes them itself.
+            log::line(|| format!("ime command {}", selector.name().to_string_lossy()));
         }
 
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
-        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
+        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, replacement: NSRange) {
             let text = ns_text(string);
+            self.log_input(|| format!("ime mark {text:?} selected {selected:?} replace {replacement:?}"));
             let mut st = self.state();
             st.marked = (!text.is_empty()).then_some(text);
             st.marked_range = selected;
@@ -428,6 +434,7 @@ define_class!(
 
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
+            log::line(|| "ime unmark".into());
             self.state().marked = None;
             self.setNeedsDisplay(true);
         }
@@ -491,6 +498,7 @@ impl TermView {
             focused: false,
             reporting: false,
             scroll: 0.0,
+            typed_at: None,
             io: Io::new(),
         };
         let this = TermView::alloc(mtm).set_ivars(Ivars { state: RefCell::new(state) });
@@ -519,11 +527,45 @@ impl TermView {
         if bytes.is_empty() {
             return;
         }
-        let shared = self.state().shared();
+        let shared = {
+            let mut st = self.state();
+            st.typed_at = Some(Instant::now());
+            st.shared()
+        };
         if let Some(shared) = shared {
             shared.type_in(bytes);
             shared.changed();
         }
+    }
+
+    /// Whether a program reads a password: input is not logged.
+    fn secret(&self) -> bool {
+        self.state().shared().is_some_and(|s| s.reads_password())
+    }
+
+    /// An input event for the log, hidden at a password prompt.
+    fn log_input(&self, line: impl FnOnce() -> String) {
+        if !log::on() {
+            return;
+        }
+        if self.secret() {
+            log::line(|| "input <hidden: password prompt>".into());
+        } else {
+            log::line(line);
+        }
+    }
+
+    /// After typing: the cursor's row as the screen now has it (cell by
+    /// cell, so a wrong glyph or a shifted column shows).
+    fn log_cursor_row(&self, st: &State) {
+        if !log::on() || st.typed_at.is_none_or(|t| t.elapsed() > Duration::from_millis(1500)) {
+            return;
+        }
+        let Some(c) = st.grid.cursor else { return };
+        let Some(row) = st.grid.rows.get(c.y as usize) else { return };
+        let text: String = row.iter().map(|cell| if cell.text.is_empty() { "·" } else { cell.text.as_str() }).collect();
+        let text = text.trim_end_matches(['·', ' ']);
+        log::line(|| format!("screen row {} cursor col {}: {text}", c.y, c.x));
     }
 
     fn send_text(&self, text: &str) {
@@ -613,6 +655,12 @@ impl TermView {
         let cols = fit(size.width, st.fonts.cell_w, 1000.0).max(2);
         let rows = fit(size.height, st.fonts.cell_h, 500.0);
         let (cw, ch) = st.fonts.cell_px();
+        log::line(|| {
+            format!(
+                "layout view {:.0}x{:.0}pt scale {} font {:?} {}pt cell {:.2}x{:.2}pt ({cw}x{ch}px) grid {rows}x{cols}",
+                size.width, size.height, st.fonts.scale, st.fonts.name(), st.size, st.fonts.cell_w, st.fonts.cell_h
+            )
+        });
         drop(st);
         shared.resize(rows, cols, cw, ch);
     }
@@ -628,6 +676,9 @@ impl TermView {
             // SAFETY: the terminal is locked.
             unsafe { st.render.sync(core.term, &mut st.grid) }
         };
+        if !matches!(changed, Changed::None) && !shared.reads_password() {
+            self.log_cursor_row(st);
+        }
         let frame = self.frame(&st.fonts);
         let width = self.bounds().size.width;
         match changed {
@@ -658,6 +709,7 @@ impl TermView {
     }
 
     fn set_focused(&self, focused: bool) {
+        log::line(|| format!("focus {focused}"));
         let mut st = self.state();
         st.focused = focused;
         if let Some(cx) = &st.cx {
@@ -691,6 +743,12 @@ impl TermView {
     // --------------------------------------------------------------- keys
 
     fn key(&self, event: &NSEvent) {
+        self.log_input(|| {
+            let chars = event.characters().map(|s| s.to_string()).unwrap_or_default();
+            let raw = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
+            let marked = self.state().marked.clone();
+            format!("key code {:#04x} chars {chars:?} raw {raw:?} mods {:#x} repeat {} marked {marked:?}", event.keyCode(), event.modifierFlags().0, event.isARepeat())
+        });
         let flags = event.modifierFlags();
         if flags.contains(NSEventModifierFlags::Command) {
             let _: () = unsafe { msg_send![super(self), keyDown: event] };
@@ -923,6 +981,7 @@ impl TermView {
             .flatten();
         let st = self.state();
         if let (Some(text), Some(cx)) = (text, &st.cx) {
+            log::line(|| format!("link {text:?}"));
             cx.emit("link", serde_json::json!({ "text": text }));
         }
     }
