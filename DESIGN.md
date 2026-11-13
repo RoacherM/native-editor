@@ -293,6 +293,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
    - `nativeComponent` 的事件名不能和 `View` 自带的事件撞名：事件叫 `focus` 时 handler 是 `onFocus`，与内置的 `onFocus: () => void` 交叉成无参类型，`nsh check` 报 TS2322。所以视图的焦点事件叫 `focused`（`onFocused`）。
    - 原生视图里的键直接进 Rust，TSX 看不到；TSX 判断「用过」读 `TerminalSession.used`。测试通道的输入可能还在闸门里排队、没到 Rust，所以 Tab 另记 `typed`，否则排队期间换目录会重启 Shell（`App.test.tsx` › a half-typed terminal command stays, with its shell, when a folder opens）。
    - Shell 结束靠 PTY 读到 EOF 判定（读线程随后 `waitpid`）。macOS 上会话首进程退出时内核收回这个 TTY，留在后台的 `sleep 20 &`、`nohup … &` 也拦不住 EOF（`native/src/session/tests.rs` › a_shell_that_exits_ends_even_while_a_job_holds_the_terminal 实测 0.01 秒内收到 exit），所以不另起 `waitpid` 线程。
+   - macOS 14 起 `NSView.clipsToBounds` 默认 NO，`drawRect:` 的脏区可以超出视图边界；终端视图按脏区铺背景，曾把上方的终端顶栏（Tab、Shell 下拉）和与编辑区的分界一起盖掉。所以 `aed.terminal` 视图创建时 `setClipsToBounds(true)`。无头测试看不到，靠真机核对。
    - Rust 程序启动时把 SIGPIPE 设成忽略，`forkpty` 的子进程会原样继承；`std::process::Command` 会替子进程复位，`forkpty` 不会，所以 `pty::exec_shell` 自己复位（› the_shell_gets_default_signals_and_a_utf8_tty）。
 
 ---
