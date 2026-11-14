@@ -914,39 +914,31 @@ function PosterFields(props: {
         const ui = props.theme().ui;
         const g = posterGrid(raw);
         const { w, h } = g;
-        // Signal sweep: from the top-right corner one quarter ellipse curves
-        // down to the block line at the split, then straight down behind the
-        // stone disc (vertical where they meet, so the edge stays smooth).
+        // Signal sweep: everything right of the split below the stone
+        // crescent's lower curve. Its upper edge is a chord the crescent
+        // covers, so no red fringes the crescent's outer curve.
         cx.fillStyle = ui.accent;
         cx.beginPath();
         cx.moveTo(w, h);
         cx.lineTo(g.split, h);
         cx.lineTo(g.split, g.blockTop);
-        cx.ellipse(w, g.blockTop, w - g.split, g.blockTop, 0, Math.PI, Math.PI * 1.5);
+        cx.lineTo(w, 0);
         cx.closePath();
         cx.fill();
         // Ink block: bottom-left geometric field.
         cx.fillStyle = ui.foreground;
         cx.fillRect(0, g.blockTop, g.split, h - g.blockTop);
-        // Stone quarter disc: centred on the block's top-right corner, it
-        // fills the sweep's foot from the block line down and to the right.
-        const sr = Math.min(h - g.blockTop, (w - g.split) * 0.5);
+        // Stone crescent: from the block's top-right corner one quarter
+        // ellipse curves up to the top-right corner, and a curve from there
+        // runs back down to the block's foot; the red shows below it.
         cx.fillStyle = ui.border;
         cx.beginPath();
-        cx.moveTo(g.split, g.blockTop);
-        cx.lineTo(g.split + sr, g.blockTop);
-        cx.arc(g.split, g.blockTop, sr, 0, Math.PI / 2);
+        cx.moveTo(g.split, h);
+        cx.lineTo(g.split, g.blockTop);
+        cx.ellipse(w, g.blockTop, w - g.split, g.blockTop, 0, Math.PI, Math.PI * 1.5);
+        cx.bezierCurveTo(w, h * 0.3, g.split + (w - g.split) * 0.3, h, g.split, h);
         cx.closePath();
         cx.fill();
-        // Dashed trace: from the disc's foot (along the bottom) across the
-        // red to the top-right corner (up the right edge).
-        cx.strokeStyle = ui.border;
-        cx.lineWidth = 2;
-        cx.setLineDash([8, 6]);
-        cx.beginPath();
-        cx.moveTo(g.split, h);
-        cx.bezierCurveTo(g.split + (w - g.split) * 0.3, h, w, h * 0.3, w, 0);
-        cx.stroke();
       }}
     />
   );
