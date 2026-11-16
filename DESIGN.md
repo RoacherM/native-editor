@@ -62,7 +62,7 @@ Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文�
 +-----------------------------------------------------------------------------------+
 | ● ● ●                       [ 🔍 native-editor (⌘P) ]                  [◧] [◨]   | <- WindowTitleBar (≥32pt, windowDrag)
 +--------------------+--------------------------------------------------------------+
-| fixtures [All|Chg] | [M↓ README.md ×] [TS web/index.ts ×]   [Preview|Markdown|Diff]| <- SidebarHeader & TabStrip (36pt)
+| fixtures   [❐] [⎇] | [M↓ README.md ×] [TS web/index.ts ×]   [Preview|Markdown|Diff]| <- SidebarHeader & TabStrip (36pt)
 +--------------------+--------------------------------------------------------------+
 | ▾ src/             | [ ! note.ts was moved or deleted.        [Save As…] [Close] ]| <- Priority NoticeBanner (0/36pt)
 |     App.tsx      M +--------------------------------------------------------------+
@@ -98,7 +98,7 @@ Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文�
 | **L3** `src/PreviewPane.tsx` | `PreviewPane`, `resolveEditorLayout`, `formatMediaMeta`, `formatSearchCount`, `clampRevealPosition`, `reconstructBaseFromPatch`, `resolveDiffInputs`, `resolveImageBackdrop`, `sortRows`, `withPreviewCsp` | 按 `FileKind` 分发渲染：按 `${tab.id}\0${reloadSeq}` 隔离撤销栈的非受控 `<Editor>`（散文/Markdown 自动折行 `1.68x` 行高、源码不折行 `1.54x` 行高、`scrollBeyondLastLine={8}`）、带 `1px` 边框与 `1/N` 计数的 `FindBar`、支持未保存实时对比的 `DiffBody`、双向可滚动缩放的 `ImageBody`、`Intl.Collator` 排序的 `DataTable` 与 `.html` 严格 CSP 预览 |
 | **L3** `src/MarkdownPreview.tsx` · `src/mermaid.tsx` · `src/markdownPage.ts` · `vendor/markdown/` | `MarkdownPreview`, `SandboxPreviewWebView`, `DiagramViewportPill`, `DiagramErrorBanner`, `buildMermaidConfig`, `preprocessMermaidCode`, `loadMermaidBundleJs`, `planPreviewRender`, `readImageDataUrl`, `buildPreviewShellHtml`, `handlePreviewMessage` | 统一沙箱矢量预览宿主：单个 keep-alive `WebView` 同时承载 `.md`（含内嵌 Mermaid 块、TOC、KaTeX、本地图片 Base64 LRU）与独立 `.mmd`（`50%–250%` 矢量缩放、复制源码与错误横幅），无第 2 个离屏 `WebView` |
 | **L3** `src/WelcomePanel.tsx` · `src/PreferencesModal.tsx` | `WelcomePanel`, `EmptyEditorPanel`, `posterGrid`, `drawBauhausComposition`, `PreferencesModal`, `UnsavedChangesDialog` | 双栏瑞士 / 包豪斯展览海报开屏页（左栏顶底对齐 `Aed` 字标、`Recent` 台账与常驻 `Keycap` 快捷键条；右栏内嵌 `3×3` 方块与圆几何构成画布）、工作区空态页、偏好设置弹窗与未保存拦截对话框 |
-| **L3** `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | `36pt` 顶栏对齐的文件树（`All` / `Changed` `SegmentedControl`、$O(1)$ 展开集合、`Changed` 空状态与深层路径中间省略）与基于 `ModalShell` 的命令面板 |
+| **L3** `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | `36pt` 顶栏对齐的文件树（纯图标 `files` / `branch` `IconButton` 过滤切换、$O(1)$ 展开集合、`Changed` 空状态与深层路径中间省略）与基于 `ModalShell` 的命令面板 |
 | **L3** `src/TerminalPane.tsx` · `src/terminalTheme.ts` · `native/` · `vendor/ghostty-vt/` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig`, `createInputGate`, `linkTarget`, `buildTerminalTheme`, `TerminalSession` | 基于 `TabStrip` 的原生多标签 TTY 终端（libghostty-vt 1.0.1 + AppKit `aed.terminal` 视图 + Rust `forkpty`）、提示符就绪后静默高频输出通知（`setNotifyOutput(false)`）、`onceAsync` 并发环境探测与 `parseTarget` 链接跳转 |
 
 ---

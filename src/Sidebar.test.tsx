@@ -28,13 +28,18 @@ describe("Sidebar & CommandPalette Wave 2B contracts", () => {
     expect(sidebarMod.treeChevronRotation(true)).toBe("90deg");
     expect(sidebarMod.treeRowTextOverflow(false)).toBe("ellipsis");
     expect(sidebarMod.treeRowTextOverflow(true)).toBe("ellipsis-middle");
+    expect(
+      sidebarMod.resolveWorkspaceFolderName("/Users/byronwayne/Projects/dev-efficiency-2026-11"),
+    ).toBe("dev-efficiency-2026-11");
 
     const compiled = Object.values(sidebarMod).map(String).join("\n");
 
-    // Hoisted Set + Changed empty state + middle ellipsis
+    // Hoisted Set + Changed empty state + middle ellipsis + no orphaned diff glyph
     expect(compiled).toContain("new Set");
     expect(compiled).toContain("ellipsis-middle");
     expect(compiled).toContain("sidebar-changed-empty");
+    expect(compiled).not.toContain('"diff"');
+    expect(compiled).not.toContain("SIDEBAR_FILTER_ITEMS");
 
     // Single rotating chevron instead of dual <If> chevron-down / chevron-right Canvas remounts
     expect(compiled).not.toContain("chevron-down");
@@ -121,8 +126,12 @@ describe("Sidebar & CommandPalette Wave 2B contracts", () => {
 
     await app.waitFor("id:sidebar-workspace-title");
     expect(app.shows("id:sidebar-header")).toBe(true);
+    expect(app.shows("id:sidebar-filter-all")).toBe(true);
+    expect(app.shows("id:sidebar-filter-changed")).toBe(true);
     expect(app.shows("label:Show all files")).toBe(true);
     expect(app.shows("label:Show changed files")).toBe(true);
+    expect(app.shows("text:All")).toBe(false);
+    expect(app.shows("text:Changed")).toBe(false);
 
     // Switch to Changed on clean fixtures folder -> shows centered empty state
     await app.press("id:sidebar-filter-changed");

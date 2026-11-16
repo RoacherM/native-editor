@@ -249,7 +249,7 @@ describe("L2 Industrial UI headless mount & reactive state transitions", () => {
             <SurfaceButton variant="primary" label="Save" tooltip="Save file" />
             <SurfaceButton variant="secondary" size="sm" label="Cancel" />
             <SurfaceButton variant="ghost" selected label="Ghost" />
-            <IconButton icon="diff" accessibilityLabel="Show changed files" tooltip="Changed" />
+            <IconButton icon="branch" accessibilityLabel="Show changed files" tooltip="Changed files" />
             <FileBadge name="ts" />
             <Icon name="sidebar" size={12} />
             <Keycap shortcut="mod+p" />
@@ -259,7 +259,7 @@ describe("L2 Industrial UI headless mount & reactive state transitions", () => {
               items={[
                 { value: "preview", label: "Preview", testID: "mode-preview" },
                 { value: "source", label: "Code", testID: "mode-source" },
-                { value: "diff", label: "Diff", icon: "diff", testID: "mode-diff" },
+                { value: "diff", label: "Diff", icon: "branch", testID: "mode-diff" },
               ]}
             />
           </View>

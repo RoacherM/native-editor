@@ -19,7 +19,7 @@ import {
 } from "nsh/base";
 import { FileBadge, Icon } from "./icons";
 import { EDITOR_THEMES, type EditorTheme } from "./themes";
-import { Keycap, ModalShell, SegmentedControl, type SegmentedItem } from "./ui";
+import { IconButton, Keycap, ModalShell } from "./ui";
 import { lookupGitStatus, type GitStatusCode } from "./workspace";
 
 export interface SidebarProps {
@@ -60,22 +60,6 @@ const GIT_STATUS_DARK: Partial<Record<GitStatusCode, string>> = {
   U: "#4cc38a",
   D: "#e5484d",
 };
-
-const SIDEBAR_FILTER_ITEMS: readonly SegmentedItem<"all" | "changed">[] = [
-  {
-    value: "all",
-    label: "All",
-    accessibilityLabel: "Show all files",
-    testID: "sidebar-filter-all",
-  },
-  {
-    value: "changed",
-    label: "Changed",
-    icon: "diff",
-    accessibilityLabel: "Show changed files",
-    testID: "sidebar-filter-changed",
-  },
-];
 
 function getGitStatusColor(
   status: GitStatusCode | undefined,
@@ -251,12 +235,26 @@ function SidebarHeader(props: {
         </Text>
       </View>
 
-      <SegmentedControl
-        items={SIDEBAR_FILTER_ITEMS}
-        value={props.filterMode()}
-        onChange={(mode) => props.filterMode.set(mode)}
-        class="border border-border"
-      />
+      <View class="flex-row items-center gap-0.5 shrink-0">
+        <IconButton
+          icon="files"
+          iconSize={14}
+          testID="sidebar-filter-all"
+          accessibilityLabel="Show all files"
+          tooltip="All files"
+          selected={props.filterMode() === "all"}
+          onPress={() => props.filterMode.set("all")}
+        />
+        <IconButton
+          icon="branch"
+          iconSize={14}
+          testID="sidebar-filter-changed"
+          accessibilityLabel="Show changed files"
+          tooltip="Changed files"
+          selected={props.filterMode() === "changed"}
+          onPress={() => props.filterMode.set("changed")}
+        />
+      </View>
     </View>
   );
 }

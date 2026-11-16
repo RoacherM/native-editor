@@ -227,7 +227,6 @@ export function computeTabModeItems(tab: TabEntry | undefined): SegmentedItem<Pr
   return modes.map((m) => ({
     value: m,
     label: modeLabel(m, spec.rawModeLabel),
-    icon: m === "diff" ? "diff" : undefined,
     testID: `mode-${m}`,
   }));
 }

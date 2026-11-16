@@ -15,7 +15,6 @@ export type IconName =
   | "panel-bottom"
   | "files"
   | "search"
-  | "diff"
   | "chevron-right"
   | "chevron-down"
   | "close"
@@ -78,13 +77,6 @@ const GLYPHS: Record<IconName, DrawFn> = {
   search: (c) => {
     strokeCircle(c, 8.8, 8.8, 4.8);
     strokeLine(c, [12.4, 12.4, 16.5, 16.5]);
-  },
-  diff: (c) => {
-    strokeLine(c, [6, 4, 6, 10]);
-    strokeLine(c, [3, 7, 9, 7]);
-    strokeLine(c, [3, 14.5, 9, 14.5]);
-    strokeLine(c, [13, 7, 17, 7]);
-    strokeLine(c, [13, 14.5, 17, 14.5]);
   },
   "chevron-right": (c) => {
     strokeLine(c, [7.5, 5.5, 12, 10, 7.5, 14.5]);
