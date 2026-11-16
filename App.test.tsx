@@ -461,7 +461,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     });
     await returningApp.waitFor("id:welcome-recent-fixtures");
     expect(returningApp.shows("id:welcome-panel")).toBe(true);
-    expect(returningApp.shows("id:welcome-shortcut-hints")).toBe(false);
+    expect(returningApp.shows("id:welcome-shortcut-hints")).toBe(true);
     expect(returningApp.shows("id:empty-editor-panel")).toBe(false);
     expect(returningApp.shows("id:workspace-tree")).toBe(false);
     await returningApp.press("id:welcome-recent-fixtures");
