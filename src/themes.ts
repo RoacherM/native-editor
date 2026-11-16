@@ -1,5 +1,6 @@
-import type { ViewStyle } from "nsh";
+import { setTokens } from "aed/native";
 import type { EditorDecoration, EditorStyles, EditorToken } from "nsh/base";
+import { createLruCache } from "./classify";
 
 export interface SyntaxPalette {
   keyword: string;
@@ -22,12 +23,13 @@ export interface ThemeUiColors {
   foreground: string;
   mutedForeground: string;
   accent: string;
+  accentForeground: string;
   gutter: string;
   activeLine: string;
   selection: string;
-  /** The status bar's plane and text; without them it takes `sidebar` and `mutedForeground`. */
-  statusBar?: string;
-  statusBarForeground?: string;
+  /** Distinct status bar plane and text so adjacent `sidebar` surfaces stay separate. */
+  statusBar: string;
+  statusBarForeground: string;
 }
 
 export interface SyntaxClasses {
@@ -52,17 +54,41 @@ export interface EditorTheme {
   syntaxClasses: SyntaxClasses;
 }
 
-/** A font family's short display name: Nerd Font patch suffixes dropped. */
+/** Compat export kept for `App.test.tsx` until Wave 2B cleans up test imports. */
 export function fontDisplayName(family: string): string {
   const name = family.replace(/\s+Nerd Font(?:\s+(?:Mono|Propo))?$/i, "").trim();
   return name || "Mono";
+}
+
+function buildSyntaxClasses(syntax: SyntaxPalette): SyntaxClasses {
+  return {
+    keyword: `text-[${syntax.keyword}] font-semibold`,
+    string: `text-[${syntax.string}]`,
+    number: `text-[${syntax.number}]`,
+    comment: `text-[${syntax.comment}] italic`,
+    property: `text-[${syntax.property}]`,
+    type: `text-[${syntax.type}] font-semibold`,
+    function: `text-[${syntax.function}]`,
+    constant: `text-[${syntax.constant}] font-semibold`,
+    operator: `text-[${syntax.operator}]`,
+    tag: `text-[${syntax.tag}]`,
+  };
+}
+
+function defineTheme(
+  spec: Omit<EditorTheme, "syntaxClasses">
+): EditorTheme {
+  return {
+    ...spec,
+    syntaxClasses: buildSyntaxClasses(spec.syntax),
+  };
 }
 
 export const DEFAULT_THEME_ID = "industrial-paper";
 
 export const EDITOR_THEMES: readonly EditorTheme[] = [
   // DESIGN.md「界面设计语言（Industrial）」: paper, ink, one signal red, stone.
-  {
+  defineTheme({
     id: "industrial-paper",
     name: "Industrial Paper",
     appearance: "light",
@@ -74,6 +100,7 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#141414",
       mutedForeground: "#6d685f",
       accent: "#d7381e",
+      accentForeground: "#ffffff",
       gutter: "#efebe3",
       activeLine: "#e7e2d8",
       selection: "#d7381e2e",
@@ -92,20 +119,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#6d685f",
       tag: "#c62d14",
     },
-    syntaxClasses: {
-      keyword: "text-[#c62d14] font-semibold",
-      string: "text-[#4d5e2e]",
-      number: "text-[#b45309]",
-      comment: "text-[#8c8578] italic",
-      property: "text-[#2f4b63]",
-      type: "text-[#141414] font-semibold",
-      function: "text-[#141414]",
-      constant: "text-[#c62d14]",
-      operator: "text-[#6d685f]",
-      tag: "text-[#c62d14]",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "industrial-carbon",
     name: "Industrial Carbon",
     appearance: "dark",
@@ -117,6 +132,7 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#ede8de",
       mutedForeground: "#8f897e",
       accent: "#e8462b",
+      accentForeground: "#0e0e0d",
       gutter: "#161514",
       activeLine: "#1e1d1b",
       selection: "#e8462b33",
@@ -135,20 +151,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#8f897e",
       tag: "#f06a4f",
     },
-    syntaxClasses: {
-      keyword: "text-[#f06a4f] font-semibold",
-      string: "text-[#b5c28f]",
-      number: "text-[#e0a96d]",
-      comment: "text-[#6f6a61] italic",
-      property: "text-[#9fb4c7]",
-      type: "text-[#ede8de] font-semibold",
-      function: "text-[#ede8de]",
-      constant: "text-[#f06a4f]",
-      operator: "text-[#8f897e]",
-      tag: "text-[#f06a4f]",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "kanagawa-dragon",
     name: "Kanagawa Dragon",
     appearance: "dark",
@@ -160,9 +164,12 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#c5c9c5",
       mutedForeground: "#737c73",
       accent: "#8ba4b0",
+      accentForeground: "#121111",
       gutter: "#151313",
       activeLine: "#221f1f",
       selection: "#2d4f6780",
+      statusBar: "#0d0c0c",
+      statusBarForeground: "#9e9b93",
     },
     syntax: {
       keyword: "#c4746e",
@@ -176,20 +183,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#c4b28a",
       tag: "#e46876",
     },
-    syntaxClasses: {
-      keyword: "text-rose-400",
-      string: "text-emerald-300",
-      number: "text-fuchsia-300",
-      comment: "text-stone-500 italic",
-      property: "text-teal-300",
-      type: "text-amber-200",
-      function: "text-sky-300",
-      constant: "text-orange-300 font-semibold",
-      operator: "text-amber-300",
-      tag: "text-rose-400",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "tokyo-night",
     name: "Tokyo Night",
     appearance: "dark",
@@ -201,9 +196,12 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#c0caf5",
       mutedForeground: "#565f89",
       accent: "#7aa2f7",
+      accentForeground: "#16161e",
       gutter: "#171822",
       activeLine: "#222436",
       selection: "#33467c88",
+      statusBar: "#11121a",
+      statusBarForeground: "#9aa5ce",
     },
     syntax: {
       keyword: "#bb9af7",
@@ -217,20 +215,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#89ddff",
       tag: "#f7768e",
     },
-    syntaxClasses: {
-      keyword: "text-purple-400",
-      string: "text-lime-300",
-      number: "text-orange-400",
-      comment: "text-slate-500 italic",
-      property: "text-cyan-300",
-      type: "text-teal-300",
-      function: "text-blue-400",
-      constant: "text-amber-400 font-semibold",
-      operator: "text-sky-300",
-      tag: "text-rose-400",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "catppuccin-mocha",
     name: "Catppuccin Mocha",
     appearance: "dark",
@@ -242,9 +228,12 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#cdd6f4",
       mutedForeground: "#6c7086",
       accent: "#cba6f7",
+      accentForeground: "#181825",
       gutter: "#1a1a29",
       activeLine: "#27273a",
       selection: "#45475a88",
+      statusBar: "#11111b",
+      statusBarForeground: "#a6adc8",
     },
     syntax: {
       keyword: "#cba6f7",
@@ -258,20 +247,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#94e2d5",
       tag: "#f38ba8",
     },
-    syntaxClasses: {
-      keyword: "text-violet-300",
-      string: "text-green-300",
-      number: "text-orange-300",
-      comment: "text-zinc-500 italic",
-      property: "text-sky-300",
-      type: "text-yellow-200",
-      function: "text-blue-300",
-      constant: "text-pink-300 font-semibold",
-      operator: "text-teal-300",
-      tag: "text-pink-400",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "one-dark",
     name: "One Dark Pro",
     appearance: "dark",
@@ -283,9 +260,12 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#abb2bf",
       mutedForeground: "#5c6370",
       accent: "#61afef",
+      accentForeground: "#181a1f",
       gutter: "#242830",
       activeLine: "#2c313c",
       selection: "#3e445199",
+      statusBar: "#181a1f",
+      statusBarForeground: "#9da5b4",
     },
     syntax: {
       keyword: "#c678dd",
@@ -299,20 +279,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#56b6c2",
       tag: "#e06c75",
     },
-    syntaxClasses: {
-      keyword: "text-fuchsia-400",
-      string: "text-emerald-400",
-      number: "text-amber-400",
-      comment: "text-slate-500 italic",
-      property: "text-red-400",
-      type: "text-yellow-300",
-      function: "text-sky-400",
-      constant: "text-amber-400 font-semibold",
-      operator: "text-cyan-400",
-      tag: "text-red-400",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "rose-pine",
     name: "Rosé Pine",
     appearance: "dark",
@@ -324,9 +292,12 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#e0def4",
       mutedForeground: "#6e6a86",
       accent: "#c4a7e7",
+      accentForeground: "#191724",
       gutter: "#171521",
       activeLine: "#232034",
       selection: "#403d5288",
+      statusBar: "#13111c",
+      statusBarForeground: "#9c98b5",
     },
     syntax: {
       keyword: "#31748f",
@@ -340,20 +311,8 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#908caa",
       tag: "#eb6f92",
     },
-    syntaxClasses: {
-      keyword: "text-cyan-400",
-      string: "text-amber-300",
-      number: "text-rose-300",
-      comment: "text-slate-500 italic",
-      property: "text-teal-200",
-      type: "text-amber-200",
-      function: "text-purple-300",
-      constant: "text-rose-300 font-semibold",
-      operator: "text-indigo-300",
-      tag: "text-rose-400",
-    },
-  },
-  {
+  }),
+  defineTheme({
     id: "github-light",
     name: "GitHub Light",
     appearance: "light",
@@ -365,9 +324,12 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       foreground: "#1f2328",
       mutedForeground: "#656d76",
       accent: "#0969da",
+      accentForeground: "#ffffff",
       gutter: "#f6f8fa",
       activeLine: "#f0f4f8",
       selection: "#0969da28",
+      statusBar: "#eaeef2",
+      statusBarForeground: "#424a53",
     },
     syntax: {
       keyword: "#cf222e",
@@ -381,19 +343,7 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       operator: "#cf222e",
       tag: "#116329",
     },
-    syntaxClasses: {
-      keyword: "text-red-600",
-      string: "text-blue-900",
-      number: "text-blue-600",
-      comment: "text-slate-500 italic",
-      property: "text-emerald-700",
-      type: "text-amber-700",
-      function: "text-purple-700",
-      constant: "text-blue-700 font-semibold",
-      operator: "text-red-600",
-      tag: "text-emerald-700",
-    },
-  },
+  }),
 ];
 
 export function getThemeById(id?: string | null): EditorTheme {
@@ -405,6 +355,49 @@ export function getThemeById(id?: string | null): EditorTheme {
     (t) => t.name.toLowerCase() === normalized || normalized.includes(t.id.split("-")[0])
   );
   return byName ?? EDITOR_THEMES[0];
+}
+
+/** Maps an `EditorTheme` onto NSH's semantic token names (`nsh.json` `theme.cssVars`). */
+export function buildThemeTokens(theme: EditorTheme): Record<string, string> {
+  const { ui, appearance } = theme;
+  return {
+    background: ui.background,
+    foreground: ui.foreground,
+    card: ui.card,
+    "card-foreground": ui.foreground,
+    popover: ui.card,
+    "popover-foreground": ui.foreground,
+    primary: ui.accent,
+    "primary-foreground": ui.accentForeground,
+    secondary: ui.sidebar,
+    "secondary-foreground": ui.foreground,
+    muted: ui.sidebar,
+    "muted-foreground": ui.mutedForeground,
+    accent: ui.activeLine,
+    "accent-foreground": ui.foreground,
+    destructive: appearance === "light" ? "#d7381e" : "#e8462b",
+    border: ui.border,
+    input: ui.border,
+    ring: ui.accent,
+    sidebar: ui.sidebar,
+    "sidebar-foreground": ui.mutedForeground,
+    "sidebar-primary": ui.accent,
+    "sidebar-primary-foreground": ui.accentForeground,
+    "sidebar-accent": ui.activeLine,
+    "sidebar-accent-foreground": ui.foreground,
+    "sidebar-border": ui.border,
+    "sidebar-ring": ui.accent,
+  };
+}
+
+/** Pushes `theme`'s semantic tokens to `aed/native` (`setTokens`); no-ops if no surface is mounted. */
+export async function syncThemeTokens(theme: EditorTheme): Promise<void> {
+  const colors = buildThemeTokens(theme);
+  try {
+    await setTokens(colors);
+  } catch {
+    // Pure unit tests run without a mounted Core surface.
+  }
 }
 
 export function buildEditorThemeStyles(theme: EditorTheme): EditorStyles {
@@ -450,10 +443,10 @@ const CODE_KEYWORDS = new Set([
   "def", "elif", "except", "lambda", "pass", "raise", "with", "global",
   "nonlocal", "assert", "del", "package", "func", "chan", "defer",
   "go", "select", "fallthrough", "range", "map", "local", "then",
-  "end", "elseif", "repeat", "until", "select", "from", "where",
-  "insert", "into", "values", "update", "set", "join", "left",
-  "right", "inner", "outer", "on", "group", "by", "order", "limit",
-  "create", "table", "drop", "alter", "index", "view", "and", "or", "not",
+  "end", "elseif", "repeat", "until", "insert", "into", "values",
+  "update", "set", "join", "left", "right", "inner", "outer", "on",
+  "group", "by", "order", "limit", "create", "table", "drop", "alter",
+  "index", "view", "and", "or", "not",
 ]);
 
 const CODE_CONSTANTS = new Set([
@@ -472,6 +465,14 @@ const CODE_TYPES = new Set([
 
 const MAX_DECORATED_LINES = 600;
 const MAX_DECORATIONS = 4000;
+const MAX_DECORATION_CACHE_ENTRIES = 48;
+const MAX_CACHEABLE_HEAD_LEN = 262_144;
+
+function normalizeColorClass(colorOrClass: string): string {
+  if (colorOrClass.startsWith("text-")) return colorOrClass;
+  if (colorOrClass.startsWith("#")) return `text-[${colorOrClass}]`;
+  return "";
+}
 
 function makeDeco(
   line: number,
@@ -488,13 +489,20 @@ function makeDeco(
     },
     token,
   };
-  if (colorOrClass.startsWith("text-")) {
-    const classParts = [colorOrClass];
-    if (extra?.italic && !colorOrClass.includes("italic")) classParts.push("italic");
-    if (extra?.bold && !colorOrClass.includes("font-")) classParts.push("font-semibold");
-    deco.class = classParts.join(" ");
+  const baseClass = normalizeColorClass(colorOrClass);
+  if (baseClass) {
+    const parts = [baseClass];
+    if (extra?.italic && !baseClass.includes("italic")) parts.push("italic");
+    if (extra?.bold && !baseClass.includes("font-")) parts.push("font-semibold");
+    deco.class = parts.join(" ");
   }
   return deco;
+}
+
+function matchGroupStart(match: RegExpExecArray, grp: number, text: string): number {
+  if (grp <= 0) return match.index;
+  const offset = match[0].indexOf(text);
+  return match.index + (offset > 0 ? offset : 0);
 }
 
 function pushRegexMatches(
@@ -507,13 +515,12 @@ function pushRegexMatches(
   extra?: { italic?: boolean; bold?: boolean; group?: number }
 ): void {
   regex.lastIndex = 0;
-  let match: RegExpExecArray | null = regex.exec(lineText);
+  const grp = extra?.group ?? 0;
+  let match = regex.exec(lineText);
   while (match !== null && out.length < MAX_DECORATIONS) {
-    const grp = extra?.group ?? 0;
     const text = match[grp];
-    if (text && text.length > 0) {
-      const offsetInMatch = grp > 0 ? match[0].indexOf(text) : 0;
-      const start = match.index + Math.max(0, offsetInMatch);
+    if (text) {
+      const start = matchGroupStart(match, grp, text);
       out.push(makeDeco(lineIdx, start, start + text.length, color, token, extra));
     }
     if (match[0].length === 0) regex.lastIndex += 1;
@@ -566,23 +573,18 @@ function decorateJsonLine(
       return " ".repeat(full.length);
     }
   );
-  pushRegexMatches(
-    out,
-    lineIdx,
-    maskedLine,
-    JSON_NUMBER_REGEX,
-    palette.number,
-    "number"
-  );
-  pushRegexMatches(
-    out,
-    lineIdx,
-    maskedLine,
-    JSON_CONST_REGEX,
-    palette.constant,
-    "built",
-    { bold: true }
-  );
+  pushRegexMatches(out, lineIdx, maskedLine, JSON_NUMBER_REGEX, palette.number, "number");
+  pushRegexMatches(out, lineIdx, maskedLine, JSON_CONST_REGEX, palette.constant, "built", {
+    bold: true,
+  });
+}
+
+function nextNonSpaceIndex(lineText: string, from: number): number {
+  let idx = from;
+  while (idx < lineText.length && lineText.charCodeAt(idx) <= 32) {
+    idx += 1;
+  }
+  return idx;
 }
 
 function decorateConfigLine(
@@ -591,13 +593,14 @@ function decorateConfigLine(
   lineText: string,
   palette: SyntaxPalette
 ): void {
-  const trimmed = lineText.trimStart();
-  const indent = lineText.length - trimmed.length;
-  if (trimmed.startsWith("#") || trimmed.startsWith(";")) {
+  const indent = nextNonSpaceIndex(lineText, 0);
+  const first = lineText.charCodeAt(indent);
+  if (first === 35 || first === 59) {
     out.push(makeDeco(lineIdx, indent, lineText.length, palette.comment, "comment", { italic: true }));
     return;
   }
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+  const end = lineText.trimEnd();
+  if (first === 91 && end.endsWith("]")) {
     out.push(makeDeco(lineIdx, indent, lineText.length, palette.tag, "title", { bold: true }));
     return;
   }
@@ -643,14 +646,18 @@ function decorateSubtitleLine(
   }
 }
 
+function isPropertyColon(lineText: string, endCol: number): boolean {
+  const afterIdx = nextNonSpaceIndex(lineText, endCol);
+  return lineText.charCodeAt(afterIdx) === 58 && lineText.charCodeAt(afterIdx + 1) !== 58;
+}
+
 function classifyCodeIdentifier(
   word: string,
   lineText: string,
   endCol: number,
   palette: SyntaxPalette
 ): { color: string; token: EditorToken; bold?: boolean } | null {
-  const after = lineText.slice(endCol).trimStart();
-  if (after[0] === ":" && after[1] !== ":") {
+  if (isPropertyColon(lineText, endCol)) {
     return { color: palette.property, token: "attr" };
   }
   if (CODE_KEYWORDS.has(word)) {
@@ -662,7 +669,7 @@ function classifyCodeIdentifier(
   if (CODE_TYPES.has(word) || CODE_PASCAL_REGEX.test(word)) {
     return { color: palette.type, token: "built" };
   }
-  if (lineText[endCol] === "(") {
+  if (lineText.charCodeAt(endCol) === 40) {
     return { color: palette.function, token: "title" };
   }
   return null;
@@ -717,30 +724,11 @@ function decorateCodeLine(
   palette: SyntaxPalette
 ): void {
   const maskedCode = extractStringsAndComments(out, lineIdx, lineText, language, palette);
+  pushRegexMatches(out, lineIdx, maskedCode, CODE_TAG_REGEX, palette.tag, "keyword");
+  pushRegexMatches(out, lineIdx, maskedCode, CODE_NUMBER_REGEX, palette.number, "number");
 
-  // JSX / HTML / XML tags
-  pushRegexMatches(
-    out,
-    lineIdx,
-    maskedCode,
-    CODE_TAG_REGEX,
-    palette.tag,
-    "keyword"
-  );
-
-  // Numbers
-  pushRegexMatches(
-    out,
-    lineIdx,
-    maskedCode,
-    CODE_NUMBER_REGEX,
-    palette.number,
-    "number"
-  );
-
-  // Identifiers (properties, keywords, types, constants, functions)
   CODE_WORD_REGEX.lastIndex = 0;
-  let match: RegExpExecArray | null = CODE_WORD_REGEX.exec(maskedCode);
+  let match = CODE_WORD_REGEX.exec(maskedCode);
   while (match !== null && out.length < MAX_DECORATIONS) {
     const word = match[0];
     const endCol = match.index + word.length;
@@ -772,42 +760,45 @@ const SPECIAL_LINE_DECORATORS: Record<string, LineDecorator> = {
   vtt: decorateSubtitleLine,
 };
 
-const MAX_DECORATION_CACHE_ENTRIES = 48;
-const MAX_CACHEABLE_TEXT_LEN = 200_000;
-const SYNTAX_DECORATION_CACHE = new Map<string, EditorDecoration[]>();
-
-function getCachedSyntaxDecorations(key: string): EditorDecoration[] | undefined {
-  const hit = SYNTAX_DECORATION_CACHE.get(key);
-  if (!hit) return undefined;
-  SYNTAX_DECORATION_CACHE.delete(key);
-  SYNTAX_DECORATION_CACHE.set(key, hit);
-  return hit;
+interface CachedSyntaxEntry {
+  head600: string;
+  decos: EditorDecoration[];
 }
 
-function setCachedSyntaxDecorations(key: string, value: EditorDecoration[]): void {
-  if (SYNTAX_DECORATION_CACHE.size >= MAX_DECORATION_CACHE_ENTRIES) {
-    const oldestKey = SYNTAX_DECORATION_CACHE.keys().next().value;
-    if (oldestKey !== undefined) SYNTAX_DECORATION_CACHE.delete(oldestKey);
+const SYNTAX_DECORATION_CACHE = createLruCache<string, CachedSyntaxEntry>(
+  MAX_DECORATION_CACHE_ENTRIES
+);
+
+function sliceHeadLines(text: string, maxLines: number): string {
+  let pos = 0;
+  for (let i = 0; i < maxLines; i += 1) {
+    const nl = text.indexOf("\n", pos);
+    if (nl < 0) return text;
+    pos = nl + 1;
   }
-  SYNTAX_DECORATION_CACHE.set(key, value);
+  return text.slice(0, pos - 1);
+}
+
+function stripTrailingCr(line: string): string {
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
 
 function decorateBoundedLines(
-  text: string,
+  headText: string,
   lang: string,
   palette: SyntaxPalette
 ): EditorDecoration[] {
-  const special = SPECIAL_LINE_DECORATORS[lang];
   const decorateLine: LineDecorator =
-    special ?? ((acc, idx, line, pal) => decorateCodeLine(acc, idx, line, lang, pal));
+    SPECIAL_LINE_DECORATORS[lang] ??
+    ((acc, idx, line, pal) => decorateCodeLine(acc, idx, line, lang, pal));
   const out: EditorDecoration[] = [];
   let pos = 0;
   let lineIdx = 0;
 
   while (lineIdx < MAX_DECORATED_LINES && out.length < MAX_DECORATIONS) {
-    const nl = text.indexOf("\n", pos);
-    const end = nl < 0 ? text.length : nl;
-    const rawLine = text.slice(pos, end).replace(/\r$/, "");
+    const nl = headText.indexOf("\n", pos);
+    const end = nl < 0 ? headText.length : nl;
+    const rawLine = stripTrailingCr(headText.slice(pos, end));
     if (rawLine.length > 0 && rawLine.length <= 1000) {
       decorateLine(out, lineIdx, rawLine, palette);
     }
@@ -818,21 +809,47 @@ function decorateBoundedLines(
   return out;
 }
 
+function resolveSyntaxPalette(
+  syntaxClassesOrTheme: SyntaxPalette | EditorTheme
+): SyntaxPalette {
+  return "syntaxClasses" in syntaxClassesOrTheme
+    ? syntaxClassesOrTheme.syntaxClasses
+    : syntaxClassesOrTheme;
+}
+
+function buildSyntaxSlotKey(
+  head600: string,
+  lang: string,
+  palette: SyntaxPalette,
+  cacheKey?: string
+): string | null {
+  if (head600.length > MAX_CACHEABLE_HEAD_LEN) return null;
+  if (cacheKey) {
+    return `k:${cacheKey}\0${lang}\0${palette.keyword}\0${palette.string}`;
+  }
+  return `u:${lang}\0${palette.keyword}\0${palette.string}\0${head600}`;
+}
+
 export function computeSyntaxDecorations(
   text: string,
   language: string,
-  palette: SyntaxPalette
+  syntaxClassesOrTheme: SyntaxPalette | EditorTheme,
+  cacheKey?: string
 ): EditorDecoration[] {
   if (!text || language === "plaintext") return [];
   const lang = language.toLowerCase();
-  if (text.length > MAX_CACHEABLE_TEXT_LEN) {
-    return decorateBoundedLines(text, lang, palette);
-  }
-  const cacheKey = `${lang}\0${palette.keyword}\0${palette.string}\0${text}`;
-  const cached = getCachedSyntaxDecorations(cacheKey);
-  if (cached) return cached;
+  const palette = resolveSyntaxPalette(syntaxClassesOrTheme);
+  const head600 = sliceHeadLines(text, MAX_DECORATED_LINES);
+  const slotKey = buildSyntaxSlotKey(head600, lang, palette, cacheKey);
 
-  const out = decorateBoundedLines(text, lang, palette);
-  setCachedSyntaxDecorations(cacheKey, out);
-  return out;
+  if (slotKey) {
+    const cached = SYNTAX_DECORATION_CACHE.get(slotKey);
+    if (cached && cached.head600 === head600) return cached.decos;
+  }
+
+  const decos = decorateBoundedLines(head600, lang, palette);
+  if (slotKey) {
+    SYNTAX_DECORATION_CACHE.set(slotKey, { head600, decos });
+  }
+  return decos;
 }
