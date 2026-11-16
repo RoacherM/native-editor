@@ -2,7 +2,7 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import process from "process";
-import { type SessionEvent, TerminalSession } from "aed/native";
+import { type SessionEvent, type ShellOptions, TerminalSession } from "aed/native";
 import type { Accessor, JSX, NativeComponentRef, Signal } from "nsh";
 import {
   cleanup,
@@ -12,21 +12,32 @@ import {
   keymap,
   nativeComponent,
   openUrl,
-  Scroll,
   signal,
   Text,
   untracked,
   View,
 } from "nsh";
-import { Button, Select, type SelectItem } from "nsh/base";
+import { Select, type SelectItem } from "nsh/base";
 import { Icon } from "./icons";
+import { parseTarget, resolveTarget, type StatFn, type TargetOptions } from "./target";
 import { buildTerminalTheme, type TerminalTheme } from "./terminalTheme";
 import { EDITOR_THEMES, type EditorTheme } from "./themes";
+import { IconButton, TabStrip } from "./ui";
+import { deferOutOfEffect, onceAsync, statDisk } from "./workspace";
 
 // DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」. The terminal's tabs: a
 // `TerminalSession` each (libghostty-vt and the shell on its PTY, native/),
 // the native `aed.terminal` view that shows the active one, and the test
 // channel.
+
+export interface TerminalFileLocation {
+  line: number;
+  column: number;
+}
+
+export type TerminalFileOpenHandler =
+  | ((filePath: string, location?: TerminalFileLocation) => unknown)
+  | ((filePath: string, openInDiff?: boolean) => unknown);
 
 export interface TerminalPaneProps {
   cwd: Accessor<string>;
@@ -37,7 +48,7 @@ export interface TerminalPaneProps {
   shellPath?: Accessor<string>;
   theme?: Accessor<EditorTheme>;
   onShellChange?: (shellPath: string) => void;
-  onFileOpen?: (filePath: string) => void;
+  onFileOpen?: TerminalFileOpenHandler;
   /** The last tab's shell exited: the panel should close. */
   onEmpty?: () => void;
 }
@@ -67,6 +78,13 @@ export interface TerminalEnvironment {
   externalApps: ExternalTerminalApp[];
   shells: ShellProfile[];
   ghostty: GhosttyConfig;
+}
+
+export interface TerminalEnvIo {
+  home: string;
+  envShell?: string;
+  readText: (filePath: string) => Promise<string | null>;
+  pathExists: (targetPath: string) => Promise<boolean>;
 }
 
 interface TermTab {
@@ -105,24 +123,26 @@ export interface InputGate<T> {
  * Some shell setups drop input typed while they start (the TTY echoes it, then
  * the line editor flushes it). The gate queues input until the shell's first
  * output is followed by SHELL_QUIET_MS of quiet (the prompt is drawn), or
- * SHELL_READY_MAX_MS passed. `schedule` / `cancel` are injectable for tests.
- * Opening again is harmless: the queue is already empty.
+ * SHELL_READY_MAX_MS passed. `schedule` / `cancel` are injectable for tests,
+ * and `onOpen` runs once when the gate opens.
  */
 export function createInputGate<T>(
   write: (data: T) => void,
   schedule: (fn: () => void, ms: number) => unknown = setTimeout,
-  cancel: (handle: unknown) => void = (h) => clearTimeout(h as ReturnType<typeof setTimeout>)
+  cancel: (handle: unknown) => void = (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+  onOpen?: () => void,
 ): InputGate<T> {
   let ready = false;
   let quiet: unknown;
   const queued: T[] = [];
   const open = () => {
+    if (ready) return;
     ready = true;
     cancel(quiet);
     cancel(fallback);
     for (const data of queued.splice(0)) write(data);
+    onOpen?.();
   };
-  // A shell that stays silent still gets its input.
   const fallback = schedule(open, SHELL_READY_MAX_MS);
   return {
     send: (data) => (ready ? write(data) : void queued.push(data)),
@@ -141,17 +161,22 @@ export function createInputGate<T>(
  * command: every key reaches the shell at once) keeps its directory, input
  * and whatever runs in it. DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
  */
-export function shouldFollowCwd(session: { cwd: string; used: boolean } | undefined, cwd: string): boolean {
+export function shouldFollowCwd(
+  session: { cwd: string; used: boolean } | undefined,
+  cwd: string,
+): boolean {
   return !!session && !session.used && session.cwd !== cwd;
 }
 
-const TERMINAL_APP_CANDIDATES: {
+interface TerminalAppCandidate {
   id: string;
   name: string;
   relBundle: string;
   termProgram: string;
   resourcesSubpath?: string;
-}[] = [
+}
+
+const TERMINAL_APP_CANDIDATES: readonly TerminalAppCandidate[] = [
   {
     id: "ghostty",
     name: "Ghostty",
@@ -201,137 +226,176 @@ const SHELL_CANDIDATES = [
   "/bin/sh",
 ];
 
-async function pathExists(targetPath: string): Promise<boolean> {
-  try {
-    await fs.stat(targetPath);
-    return true;
-  } catch {
-    return false;
-  }
+const SYSTEM_TERMINAL_BUNDLE = "/System/Applications/Utilities/Terminal.app";
+
+function defaultTerminalEnvIo(): TerminalEnvIo {
+  return {
+    home: os.homedir(),
+    envShell: process.env.SHELL,
+    readText: async (filePath) => {
+      try {
+        const bytes = await fs.readFile(filePath);
+        return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      } catch {
+        return null;
+      }
+    },
+    pathExists: async (targetPath) => (await statDisk(targetPath)) !== null,
+  };
 }
 
-function applyGhosttyConfigEntry(
-  cfg: GhosttyConfig,
-  key: string,
-  val: string
-): void {
-  if (key === "font-family" && !cfg.fontFamily) cfg.fontFamily = val;
-  else if (key === "font-size") {
-    const n = Number(val);
-    if (!Number.isNaN(n) && n >= 9 && n <= 28) cfg.fontSize = n;
-  } else if (key === "theme") cfg.theme = val;
-  else if (key === "cursor-color") cfg.cursorColor = val;
-  else if (key === "command") cfg.command = val;
+function parseGhosttyFontSize(val: string): number | undefined {
+  const n = Number(val);
+  return !Number.isNaN(n) && n >= 9 && n <= 28 ? n : undefined;
+}
+
+const GHOSTTY_CONFIG_APPLIERS: Record<string, (cfg: GhosttyConfig, val: string) => void> = {
+  "font-family": (cfg, val) => {
+    if (!cfg.fontFamily) cfg.fontFamily = val;
+  },
+  "font-size": (cfg, val) => {
+    const size = parseGhosttyFontSize(val);
+    if (size !== undefined) cfg.fontSize = size;
+  },
+  theme: (cfg, val) => {
+    cfg.theme = val;
+  },
+  "cursor-color": (cfg, val) => {
+    cfg.cursorColor = val;
+  },
+  command: (cfg, val) => {
+    cfg.command = val;
+  },
+};
+
+function parseGhosttyConfigLine(line: string): [string, string] | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  const eq = trimmed.indexOf("=");
+  if (eq < 0) return null;
+  const key = trimmed.slice(0, eq).trim();
+  const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+  return key && val ? [key, val] : null;
 }
 
 /** Parse Ghostty's key = value config text. */
 export function parseGhosttyConfig(raw: string): GhosttyConfig {
   const cfg: GhosttyConfig = {};
   for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq < 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
-    if (val) applyGhosttyConfigEntry(cfg, key, val);
+    const entry = parseGhosttyConfigLine(line);
+    if (entry) GHOSTTY_CONFIG_APPLIERS[entry[0]]?.(cfg, entry[1]);
   }
   return cfg;
 }
 
-async function loadGhosttyConfig(home: string): Promise<GhosttyConfig> {
+async function loadGhosttyConfig(
+  home: string,
+  readText: (filePath: string) => Promise<string | null>,
+): Promise<GhosttyConfig> {
   const paths = [
     path.join(home, ".config/ghostty/config.ghostty"),
     path.join(home, ".config/ghostty/config"),
-    path.join(
-      home,
-      "Library/Application Support/com.mitchellh.ghostty/config.ghostty"
-    ),
+    path.join(home, "Library/Application Support/com.mitchellh.ghostty/config.ghostty"),
     path.join(home, "Library/Application Support/com.mitchellh.ghostty/config"),
   ];
+  const rawContents = await Promise.all(paths.map((p) => readText(p)));
   let merged: GhosttyConfig = {};
-  for (const p of paths) {
-    try {
-      const bytes = await fs.readFile(p);
-      const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-      merged = { ...merged, ...parseGhosttyConfig(text) };
-    } catch {
-      // Config file not present at this path
-    }
+  for (const text of rawContents) {
+    if (text !== null) merged = { ...merged, ...parseGhosttyConfig(text) };
   }
   return merged;
 }
 
+async function probeTerminalCandidate(
+  cand: TerminalAppCandidate,
+  appDirs: readonly string[],
+  pathExists: (targetPath: string) => Promise<boolean>,
+): Promise<ExternalTerminalApp | null> {
+  const bundlePaths = appDirs.map((dir) => path.join(dir, cand.relBundle));
+  const hits = await Promise.all(bundlePaths.map((bp) => pathExists(bp)));
+  const idx = hits.indexOf(true);
+  if (idx < 0) return null;
+  const bundlePath = bundlePaths[idx];
+  return {
+    id: cand.id,
+    name: cand.name,
+    bundlePath,
+    termProgram: cand.termProgram,
+    resourcesDir: cand.resourcesSubpath ? path.join(bundlePath, cand.resourcesSubpath) : undefined,
+  };
+}
+
 async function detectExternalTerminals(
-  home: string
+  home: string,
+  pathExists: (targetPath: string) => Promise<boolean>,
 ): Promise<ExternalTerminalApp[]> {
   const appDirs = ["/Applications", path.join(home, "Applications")];
-  const found: ExternalTerminalApp[] = [];
-  for (const cand of TERMINAL_APP_CANDIDATES) {
-    for (const dir of appDirs) {
-      const bundlePath = path.join(dir, cand.relBundle);
-      if (await pathExists(bundlePath)) {
-        found.push({
-          id: cand.id,
-          name: cand.name,
-          bundlePath,
-          termProgram: cand.termProgram,
-          resourcesDir: cand.resourcesSubpath
-            ? path.join(bundlePath, cand.resourcesSubpath)
-            : undefined,
-        });
-        break;
-      }
-    }
-  }
-  const sysTerm = "/System/Applications/Utilities/Terminal.app";
-  if (await pathExists(sysTerm)) {
+  const [candidates, hasSysTerm] = await Promise.all([
+    Promise.all(
+      TERMINAL_APP_CANDIDATES.map((cand) => probeTerminalCandidate(cand, appDirs, pathExists)),
+    ),
+    pathExists(SYSTEM_TERMINAL_BUNDLE),
+  ]);
+  const found = candidates.filter((app): app is ExternalTerminalApp => app !== null);
+  if (hasSysTerm) {
     found.push({
       id: "apple-terminal",
       name: "Terminal",
-      bundlePath: sysTerm,
+      bundlePath: SYSTEM_TERMINAL_BUNDLE,
       termProgram: "Apple_Terminal",
     });
   }
   return found;
 }
 
-function defaultShellProfile(): ShellProfile {
-  const envShell = process.env.SHELL || "/bin/zsh";
-  return { name: path.basename(envShell) || "shell", path: envShell };
+function defaultShellProfile(envShell = process.env.SHELL): ShellProfile {
+  const shellPath = envShell || "/bin/zsh";
+  return { name: path.basename(shellPath) || "shell", path: shellPath };
+}
+
+function collectUniqueShellPaths(
+  ghosttyCommand: string | undefined,
+  envShell: string | undefined,
+): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const raw of [ghosttyCommand, envShell, ...SHELL_CANDIDATES]) {
+    if (!raw) continue;
+    const clean = raw.trim().split(/\s+/)[0];
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    ordered.push(clean);
+  }
+  return ordered;
 }
 
 async function detectShellProfiles(
-  ghosttyCommand?: string
+  ghosttyCommand: string | undefined,
+  envShell: string | undefined,
+  pathExists: (targetPath: string) => Promise<boolean>,
 ): Promise<ShellProfile[]> {
-  const seen = new Set<string>();
-  const profiles: ShellProfile[] = [];
-  const addIfValid = async (shellPath: string | undefined) => {
-    if (!shellPath) return;
-    const clean = shellPath.trim().split(/\s+/)[0];
-    if (!clean || seen.has(clean)) return;
-    if (await pathExists(clean)) {
-      seen.add(clean);
-      profiles.push({ name: path.basename(clean), path: clean });
-    }
-  };
-  await addIfValid(ghosttyCommand);
-  await addIfValid(process.env.SHELL);
-  for (const cand of SHELL_CANDIDATES) {
-    await addIfValid(cand);
-  }
-  return profiles.length > 0 ? profiles : [defaultShellProfile()];
+  const candidates = collectUniqueShellPaths(ghosttyCommand, envShell);
+  const hits = await Promise.all(candidates.map((cand) => pathExists(cand)));
+  const profiles = candidates
+    .filter((_, idx) => hits[idx])
+    .map((clean) => ({ name: path.basename(clean), path: clean }));
+  return profiles.length > 0 ? profiles : [defaultShellProfile(envShell)];
 }
 
-export async function discoverTerminalEnvironment(): Promise<TerminalEnvironment> {
-  const home = os.homedir();
-  const ghostty = await loadGhosttyConfig(home);
+export async function probeTerminalEnvironment(
+  io: TerminalEnvIo = defaultTerminalEnvIo(),
+): Promise<TerminalEnvironment> {
+  const ghostty = await loadGhosttyConfig(io.home, io.readText);
   const [externalApps, shells] = await Promise.all([
-    detectExternalTerminals(home),
-    detectShellProfiles(ghostty.command),
+    detectExternalTerminals(io.home, io.pathExists),
+    detectShellProfiles(ghostty.command, io.envShell, io.pathExists),
   ]);
   return { externalApps, shells, ghostty };
 }
+
+export const discoverTerminalEnvironment: () => Promise<TerminalEnvironment> = onceAsync(() =>
+  probeTerminalEnvironment(),
+);
 
 /** A shell's size until the view has measured the terminal. */
 const DEFAULT_ROWS = 32;
@@ -399,21 +463,43 @@ function onSessionEvent(tab: TermTab, event: SessionEvent, deps: SessionDeps): v
   }
 }
 
+function buildShellStartOptions(tab: TermTab, deps: SessionDeps): ShellOptions {
+  const cwd = untracked(() => deps.cwd()) || os.homedir();
+  const app = untracked(() => deps.app());
+  return {
+    shell: untracked(() => tab.shell().path),
+    cwd,
+    termProgram: app?.termProgram || process.env.TERM_PROGRAM || "Aed",
+    resourcesDir: app?.resourcesDir || "",
+  };
+}
+
+export function createSessionInputGate(
+  session: Pick<TerminalSession, "write" | "setNotifyOutput">,
+  mirrorOn: Accessor<boolean>,
+  schedule?: (fn: () => void, ms: number) => unknown,
+  cancel?: (handle: unknown) => void,
+): InputGate<Uint8Array> {
+  return createInputGate(
+    (data: Uint8Array) => session.write(data),
+    schedule,
+    cancel,
+    () => {
+      if (!untracked(mirrorOn)) session.setNotifyOutput(false);
+    },
+  );
+}
+
 /** Start a tab's shell (once); a failure shows in the terminal, not as a crash. */
 function startSession(tab: TermTab, deps: SessionDeps): void {
   if (tab.session.running) return;
-  const cwd = untracked(() => deps.cwd()) || os.homedir();
-  const app = untracked(() => deps.app());
+  const options = buildShellStartOptions(tab, deps);
   try {
-    tab.session.start({
-      shell: untracked(() => tab.shell().path),
-      cwd,
-      termProgram: app?.termProgram || process.env.TERM_PROGRAM || "Aed",
-      resourcesDir: app?.resourcesDir || "",
-    });
-    tab.startedIn = cwd;
+    tab.session.setNotifyOutput(true);
+    tab.session.start(options);
+    tab.startedIn = options.cwd;
     tab.typed = false;
-    tab.gate = createInputGate((data: Uint8Array) => tab.session.write(data));
+    tab.gate = createSessionInputGate(tab.session, deps.mirrorOn);
   } catch (error) {
     tab.session.feed(`[error] ${String(error)}\r\n`);
   }
@@ -451,105 +537,107 @@ function followFolder(tabs: TermTab[], deps: SessionDeps): void {
   const dir = untracked(() => deps.cwd()) || os.homedir();
   for (const tab of tabs) {
     // `used`, not `typedInto`: a used shell that just ended (its exit not handled yet) keeps its screen.
-    const shell = tab.startedIn === null ? undefined : { cwd: tab.startedIn, used: tab.session.used || tab.typed };
+    const shell =
+      tab.startedIn === null
+        ? undefined
+        : { cwd: tab.startedIn, used: tab.session.used || tab.typed };
     if (shouldFollowCwd(shell, dir)) restartSession(tab, deps);
   }
 }
 
 /**
- * What a ⌘-clicked word opens: a web link, or a file (`src/a.ts:12:3`, its
- * line and column dropped) relative to `dir`, the shell's start directory.
+ * Pure target summary for a ⌘-clicked word or OSC 8 hyperlink: external URL or
+ * stripped local file path relative to `dir` (preserving `App.test.tsx` shape).
  */
-export function linkTarget(text: string, dir: string, home: string): { url: string } | { file: string } | null {
-  if (/^https?:\/\/\S+$/i.test(text)) return { url: text };
-  const file = text.replace(/:\d+(:\d+)?$/, "").replace(/^~(?=\/|$)/, home);
-  return file ? { file: path.resolve(dir, file) } : null;
+export function linkTarget(
+  text: string,
+  dir: string,
+  home: string,
+): { url: string } | { file: string } | null {
+  const parsed = parseTarget(text, { baseDir: dir, homeDir: home });
+  if (parsed.kind === "external") return { url: parsed.url };
+  if (parsed.kind === "candidates") {
+    const stripped = parsed.items[parsed.items.length - 1];
+    return stripped ? { file: stripped.path } : null;
+  }
+  if (/^ftp:\/\/\S+$/i.test(text)) return { file: path.resolve(dir, text) };
+  return null;
+}
+
+export interface TerminalLinkDeps {
+  stat: StatFn;
+  openExternal: (url: string) => void;
+  onFileOpen?: TerminalFileOpenHandler;
+}
+
+function invokeFileOpen(
+  onFileOpen: TerminalFileOpenHandler | undefined,
+  filePath: string,
+  line: number,
+  column: number,
+): void {
+  if (!onFileOpen) return;
+  const openWithLoc = onFileOpen as (
+    targetPath: string,
+    location?: TerminalFileLocation,
+  ) => unknown;
+  if (line > 0) {
+    openWithLoc(filePath, { line, column: column > 0 ? column : 1 });
+  } else {
+    openWithLoc(filePath);
+  }
 }
 
 /**
- * ⌘-click in the terminal: a web link opens in the browser, an existing file
- * in a tab. Paths are relative to where the tab's shell started (else `cwd`).
+ * Resolve a terminal ⌘-click or OSC 8 hyperlink (`src/a.ts:12:3`, `src/a.ts#L12`,
+ * `~/foo.ts:9`, `file:///Users/.../a.ts#L5`, `https://...`) via `resolveTarget`.
  */
-async function openLink(text: string, tab: TermTab, cwd: string, onFileOpen?: (filePath: string) => void): Promise<void> {
-  const target = linkTarget(text, tab.startedIn ?? (cwd || os.homedir()), os.homedir());
-  if (!target) return;
-  if ("url" in target) {
-    void openUrl(target.url);
+export async function openTerminalLink(
+  raw: string,
+  opts: TargetOptions,
+  deps: TerminalLinkDeps,
+): Promise<void> {
+  const resolved = await resolveTarget(raw, opts, deps.stat);
+  if (!resolved) return;
+  if (resolved.kind === "external") {
+    deps.openExternal(resolved.url);
     return;
   }
-  try {
-    if ((await fs.stat(target.file)).isFile()) onFileOpen?.(target.file);
-  } catch {
-    // Not a file: the word was not a path.
+  if (!resolved.isDirectory) {
+    invokeFileOpen(deps.onFileOpen, resolved.path, resolved.line, resolved.column);
   }
+}
+
+function openLink(
+  text: string,
+  tab: TermTab,
+  cwd: string,
+  onFileOpen?: TerminalFileOpenHandler,
+): Promise<void> {
+  const baseDir = tab.startedIn ?? (cwd || os.homedir());
+  return openTerminalLink(
+    text,
+    { baseDir, homeDir: os.homedir() },
+    {
+      stat: (candidatePath) => statDisk(candidatePath),
+      openExternal: (url) => void openUrl(url),
+      onFileOpen,
+    },
+  );
 }
 
 function resolveShellByPath(
   list: ShellProfile[],
   targetPath: string | undefined,
-  fallback: ShellProfile
+  fallback: ShellProfile,
 ): ShellProfile {
   if (!targetPath) return list[0] || fallback;
-  const matched = list.find(
-    (s) => s.path === targetPath || s.name === targetPath
-  );
+  const matched = list.find((s) => s.path === targetPath || s.name === targetPath);
   if (matched) return matched;
   return { name: path.basename(targetPath) || "shell", path: targetPath };
 }
 
-function TermTabChip(props: {
-  tab: Accessor<TermTab>;
-  activeId: Accessor<number>;
-  theme: Accessor<EditorTheme>;
-  onSelect: (id: number) => void;
-  onClose: (id: number) => void;
-}): JSX.Element {
-  const isActive = computed(() => props.tab().id === props.activeId());
-  return (
-    <View
-      style={{
-        backgroundColor: isActive()
-          ? props.theme().ui.background
-          : "transparent",
-      }}
-      class="h-8 px-3 flex-row items-center gap-2 shrink-0 select-none"
-    >
-      <If when={isActive()}>
-        <View
-          style={{ backgroundColor: props.theme().ui.accent }}
-          class="absolute left-0 right-0 top-0 h-[2px]"
-        />
-      </If>
-      <View onPress={() => props.onSelect(props.tab().id)} role="button">
-        <Text
-          style={{
-            color: isActive()
-              ? props.theme().ui.foreground
-              : props.theme().ui.mutedForeground,
-          }}
-          class={`text-xs font-mono ${
-            isActive() ? "font-medium" : "font-normal"
-          }`}
-        >
-          {props.tab().title()}
-        </Text>
-      </View>
-      <View
-        onPress={() => props.onClose(props.tab().id)}
-        role="button"
-        class="h-4 w-4 items-center justify-center rounded"
-      >
-        <Icon
-          name="close"
-          size={10}
-          tint={() => props.theme().ui.mutedForeground}
-        />
-      </View>
-    </View>
-  );
-}
-
-function ShellSelectOptionRow(props: {
+export function ShellSelectOptionRow(props: {
   value: string;
   title: string;
   selected: boolean;
@@ -559,19 +647,13 @@ function ShellSelectOptionRow(props: {
   return (
     <View
       testID={`shell-option-${shellName}`}
-      style={{
-        backgroundColor: props.selected
-          ? props.theme().ui.selection
-          : "transparent",
-      }}
-      class="h-7 px-3 rounded flex-row items-center justify-between gap-2 select-none"
+      style={props.selected ? { backgroundColor: props.theme().ui.selection } : undefined}
+      class="h-7 px-3 rounded flex-row items-center justify-between gap-2 select-none group-focus:bg-foreground/10"
     >
       <View class="flex-row items-center gap-2 min-w-0 flex-1">
         <Text
           style={{ color: props.theme().ui.foreground }}
-          class={`text-xs font-mono shrink-0 ${
-            props.selected ? "font-medium" : "font-normal"
-          }`}
+          class={`text-xs font-mono shrink-0 ${props.selected ? "font-medium" : "font-normal"}`}
         >
           {shellName}
         </Text>
@@ -584,11 +666,7 @@ function ShellSelectOptionRow(props: {
       </View>
       <View class="w-4 items-center justify-center shrink-0">
         <If when={props.selected}>
-          <Icon
-            name="check"
-            size={12}
-            tint={() => props.theme().ui.accent}
-          />
+          <Icon name="check" size={12} tint={() => props.theme().ui.accent} />
         </If>
       </View>
     </View>
@@ -626,7 +704,7 @@ function createTerminalModel(
   cwd: Accessor<string>,
   app: Accessor<ExternalTerminalApp | undefined>,
   visible: Accessor<boolean>,
-  onEmpty: () => void
+  onEmpty: () => void,
 ): TerminalModel {
   let counter = 1;
   const mirrorOn = signal(false);
@@ -670,8 +748,12 @@ function addTab(model: TerminalModel, shell: ShellProfile): void {
 
 /** Close a tab and its shell; the last tab is replaced first (never no tab). */
 function closeTab(model: TerminalModel, id: number): void {
-  if (untracked(() => model.tabs()).length === 1) addTab(model, untracked(() => model.selectedShell()));
-  untracked(() => model.tabs()).find((tab) => tab.id === id)?.session.close();
+  if (untracked(() => model.tabs()).length === 1) {
+    addTab(model, untracked(() => model.selectedShell()));
+  }
+  untracked(() => model.tabs())
+    .find((tab) => tab.id === id)
+    ?.session.close();
   model.tabs.update((list) => list.filter((tab) => tab.id !== id));
   if (untracked(() => model.activeId()) !== id) return;
   const remaining = untracked(() => model.tabs());
@@ -707,7 +789,18 @@ function pickShell(model: TerminalModel, shell: ShellProfile): void {
 
 /** Test-channel input as bytes: `binary` gives one byte per character. */
 function inputBytes(data: string, binary: boolean): Uint8Array {
-  return binary ? Uint8Array.from(data, (c) => c.charCodeAt(0)) : new TextEncoder().encode(data);
+  return binary
+    ? Uint8Array.from(data, (c) => c.charCodeAt(0))
+    : new TextEncoder().encode(data);
+}
+
+function enableTestMirror(model: TerminalModel): void {
+  if (untracked(() => model.mirrorOn())) return;
+  model.mirrorOn.set(true);
+  for (const tab of untracked(() => model.tabs())) {
+    tab.session.setNotifyOutput(true);
+    refreshMirror(tab, model.deps);
+  }
 }
 
 /**
@@ -719,15 +812,15 @@ function inputBytes(data: string, binary: boolean): Uint8Array {
  */
 function onTestMessage(model: TerminalModel, data: unknown): void {
   if (!data || typeof data !== "object" || Array.isArray(data)) return;
-  if (!untracked(() => model.mirrorOn())) {
-    model.mirrorOn.set(true);
-    for (const tab of untracked(() => model.tabs())) refreshMirror(tab, model.deps);
-  }
+  enableTestMirror(model);
   const msg = data as Record<string, unknown>;
   TEST_MESSAGES[String(msg.type)]?.(model, activeTabOf(model), msg);
 }
 
-const TEST_MESSAGES: Record<string, (model: TerminalModel, tab: TermTab, msg: Record<string, unknown>) => void> = {
+const TEST_MESSAGES: Record<
+  string,
+  (model: TerminalModel, tab: TermTab, msg: Record<string, unknown>) => void
+> = {
   input: (model, tab, msg) => {
     if (typeof msg.data !== "string") return;
     startSession(tab, model.deps);
@@ -735,24 +828,28 @@ const TEST_MESSAGES: Record<string, (model: TerminalModel, tab: TermTab, msg: Re
     tab.gate?.send(inputBytes(msg.data, msg.binary === true));
   },
   resize: (_model, tab, msg) => {
-    if (typeof msg.rows === "number" && typeof msg.cols === "number") tab.session.resize(msg.rows, msg.cols);
+    if (typeof msg.rows === "number" && typeof msg.cols === "number") {
+      tab.session.resize(msg.rows, msg.cols);
+    }
   },
   focus: (model, _tab, msg) => {
     if (typeof msg.focused === "boolean") model.focused.set(msg.focused);
   },
 };
 
+interface KnownEnvironmentSignals {
+  shells: Signal<ShellProfile[]>;
+  selectedShell: Signal<ShellProfile>;
+  externalApps: Signal<ExternalTerminalApp[]>;
+  ghosttyCfg: Signal<GhosttyConfig>;
+}
+
 /** What `discoverTerminalEnvironment` found, into the pane's signals; the preferred shell is selected. */
 function applyEnvironment(
   env: TerminalEnvironment,
-  known: {
-    shells: Signal<ShellProfile[]>;
-    selectedShell: Signal<ShellProfile>;
-    externalApps: Signal<ExternalTerminalApp[]>;
-    ghosttyCfg: Signal<GhosttyConfig>;
-  },
+  known: KnownEnvironmentSignals,
   preferred: string | undefined,
-  fallback: ShellProfile
+  fallback: ShellProfile,
 ): void {
   if (env.shells.length > 0) {
     known.shells.set(env.shells);
@@ -769,10 +866,13 @@ function startShown(model: TerminalModel): void {
 }
 
 /** The terminal font: Preferences first, then Ghostty's config, then 12 pt. */
-function terminalFont(props: TerminalPaneProps, cfg: GhosttyConfig): { fontFamily?: string; fontSize: number } {
+function terminalFont(
+  props: TerminalPaneProps,
+  cfg: GhosttyConfig,
+): { fontFamily?: string; fontSize: number } {
   const family = props.fontFamily?.() || cfg.fontFamily || undefined;
-  const size = props.fontSize?.() ?? (cfg.fontSize ? Math.round(cfg.fontSize) : 12);
-  return { fontFamily: family, fontSize: size };
+  const fallbackSize = cfg.fontSize ? Math.round(cfg.fontSize) : 12;
+  return { fontFamily: family, fontSize: props.fontSize?.() ?? fallbackSize };
 }
 
 /** Tabs, the new-tab button and the shell dropdown. */
@@ -784,74 +884,71 @@ function TerminalToolbar(props: {
   onPick: (shellPath: string | undefined) => void;
 }): JSX.Element {
   return (
-    <View
-      style={{ backgroundColor: props.theme().ui.sidebar }}
-      class="h-8 pr-3 flex-row items-center justify-between gap-2 shrink-0 select-none"
-    >
-      <View class="flex-1 flex-row items-center gap-1 min-w-0 overflow-hidden">
-        <Scroll horizontal class="flex-initial">
-          <View class="flex-row items-stretch h-8">
-            <Each of={props.model.tabs()} key={(tab) => tab.id}>
-              {(tab) => (
-                <TermTabChip
-                  tab={tab}
-                  activeId={props.model.activeId}
-                  theme={props.theme}
-                  onSelect={(id) => {
-                    props.model.activeId.set(id);
-                    focusTerminal(props.model);
-                  }}
-                  onClose={(id) => closeTab(props.model, id)}
+    <TabStrip
+      heightClass="h-8"
+      mono
+      items={props.model.tabs()}
+      activeId={props.model.activeId()}
+      getId={(tab) => tab.id}
+      getLabel={(tab) => tab.title()}
+      getTestKey={(tab) => tab.id}
+      selectTestIdPrefix="terminal-tab"
+      closeTestIdPrefix="terminal-tab-close"
+      onSelect={(id) => {
+        props.model.activeId.set(Number(id));
+        focusTerminal(props.model);
+      }}
+      onClose={(id) => closeTab(props.model, Number(id))}
+      trailing={
+        <View class="flex-row items-center gap-1.5 px-2 shrink-0">
+          <IconButton
+            icon="plus"
+            iconSize={12}
+            testID="terminal-add-btn"
+            accessibilityLabel="New terminal tab"
+            onPress={() => addTab(props.model, props.model.selectedShell())}
+          />
+          <Select
+            testID="terminal-shell-select"
+            accessibilityLabel="Select shell"
+            items={props.shellItems()}
+            value={props.activeTab().shell().path}
+            placement="top"
+            align="end"
+            offset={6}
+            onChange={({ value }) => props.onPick(value || undefined)}
+            trigger={
+              <View
+                testID="terminal-shell-trigger"
+                style={{ backgroundColor: props.theme().ui.background }}
+                class="h-6 px-2 flex-row items-center gap-1.5 rounded"
+              >
+                <Text style={{ color: props.theme().ui.foreground }} class="text-[11px] font-mono">
+                  {props.activeTab().shell().name}
+                </Text>
+                <Icon
+                  name="chevron-down"
+                  size={10}
+                  tint={() => props.theme().ui.mutedForeground}
                 />
-              )}
-            </Each>
-          </View>
-        </Scroll>
-        <Button
-          testID="terminal-add-btn"
-          onPress={() => addTab(props.model, props.model.selectedShell())}
-          accessibilityLabel="New terminal tab"
-          class="h-6 w-6 items-center justify-center rounded bg-transparent border-none shadow-none p-0 shrink-0"
-        >
-          <Icon name="plus" size={12} tint={() => props.theme().ui.mutedForeground} />
-        </Button>
-      </View>
-
-      <View class="flex-row items-center shrink-0">
-        <Select
-          testID="terminal-shell-select"
-          items={props.shellItems()}
-          value={props.activeTab().shell().path}
-          placement="top"
-          align="end"
-          offset={6}
-          onChange={({ value }) => props.onPick(value || undefined)}
-          trigger={
-            <View
-              testID="terminal-shell-trigger"
-              style={{ backgroundColor: props.theme().ui.background }}
-              class="h-6 px-2 flex-row items-center gap-1.5 rounded"
-            >
-              <Text style={{ color: props.theme().ui.foreground }} class="text-[11px] font-mono">
-                {props.activeTab().shell().name}
-              </Text>
-              <Icon name="chevron-down" size={10} tint={() => props.theme().ui.mutedForeground} />
-            </View>
-          }
-          popupClass="w-56 rounded-lg shadow-2xl p-1"
-          popupStyle={{ backgroundColor: props.theme().ui.card }}
-          itemClass="rounded cursor-pointer"
-          renderItem={(item) => (
-            <ShellSelectOptionRow
-              value={item.value}
-              title={item.title}
-              selected={item.value === props.activeTab().shell().path}
-              theme={props.theme}
-            />
-          )}
-        />
-      </View>
-    </View>
+              </View>
+            }
+            popupClass="w-56 rounded-lg shadow-2xl p-1"
+            popupStyle={{ backgroundColor: props.theme().ui.card }}
+            itemClass="group rounded"
+            renderItem={(item) => (
+              <ShellSelectOptionRow
+                value={item.value}
+                title={item.title}
+                selected={item.value === props.activeTab().shell().path}
+                theme={props.theme}
+              />
+            )}
+          />
+        </View>
+      }
+      class="border-b border-border"
+    />
   );
 }
 
@@ -859,7 +956,62 @@ function TerminalToolbar(props: {
 const Terminal = nativeComponent<
   { session: number; fontFamily?: string; fontSize: number; theme: TerminalTheme },
   { focused: { focused: boolean }; link: { text: string } }
->("aed.terminal", { props: ["session", "fontFamily", "fontSize", "theme"], events: ["focused", "link"] });
+>("aed.terminal", {
+  props: ["session", "fontFamily", "fontSize", "theme"],
+  events: ["focused", "link"],
+});
+
+function bindTerminalLifecycleEffects(
+  model: TerminalModel,
+  known: KnownEnvironmentSignals,
+  props: TerminalPaneProps,
+  fallbackShell: ShellProfile,
+): void {
+  cleanup(host.on("aed.terminal.test", (data) => onTestMessage(model, data)));
+
+  effect(() => {
+    void discoverTerminalEnvironment().then((env) => {
+      applyEnvironment(env, known, untracked(() => props.shellPath?.()), fallbackShell);
+    });
+  });
+
+  // A new default shell from Preferences: unused tabs take it.
+  effect(() => {
+    const extPath = props.shellPath?.();
+    if (!extPath) return;
+    const resolved = resolveShellByPath(untracked(() => known.shells()), extPath, fallbackShell);
+    known.selectedShell.set(resolved);
+    deferOutOfEffect(() => adoptShell(untracked(() => model.tabs()), resolved, model.deps));
+  });
+
+  // Shells start the first time the panel shows (outside effect pass: DESIGN.md trap #8).
+  effect(() => {
+    if (!props.visible()) {
+      model.focused.set(false);
+      return;
+    }
+    deferOutOfEffect(() => startShown(model));
+  });
+}
+
+function bindTerminalFolderAndKeyEffects(model: TerminalModel, props: TerminalPaneProps): void {
+  effect(() => {
+    cleanup(() => {
+      for (const tab of untracked(() => model.tabs())) tab.session.close();
+    });
+  });
+
+  effect(() => {
+    void props.cwd();
+    deferOutOfEffect(() => followFolder(untracked(() => model.tabs()), model.deps));
+  });
+
+  // While the terminal has the keyboard its bindings win: ⌘K clears, ⌘F suppresses find bar.
+  effect(() => {
+    if (!model.focused()) return;
+    cleanup(keymap.bind({ "mod+k": () => clearActive(model), "mod+f": () => undefined }));
+  });
+}
 
 /**
  * A bottom-dock terminal: a libghostty-vt terminal per tab, drawn by a
@@ -871,69 +1023,37 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
   const fallbackShell = defaultShellProfile();
   const shells = signal<ShellProfile[]>([fallbackShell]);
   const selectedShell = signal<ShellProfile>(
-    resolveShellByPath([fallbackShell], untracked(() => props.shellPath?.()), fallbackShell)
+    resolveShellByPath([fallbackShell], untracked(() => props.shellPath?.()), fallbackShell),
   );
   const externalApps = signal<ExternalTerminalApp[]>([]);
   const ghosttyCfg = signal<GhosttyConfig>({});
   const primaryExternal = computed(() => externalApps()[0]);
-  const model = createTerminalModel(untracked(() => selectedShell()), selectedShell, props.cwd, primaryExternal, props.visible, () =>
-    props.onEmpty?.()
+  const model = createTerminalModel(
+    untracked(() => selectedShell()),
+    selectedShell,
+    props.cwd,
+    primaryExternal,
+    props.visible,
+    () => props.onEmpty?.(),
   );
-  const { tabs, activeId, focused, mirrorOn } = model;
 
-  const activeTab = computed(() => tabs().find((tab) => tab.id === activeId()) ?? tabs()[0]);
+  const activeTab = computed(
+    () => model.tabs().find((tab) => tab.id === model.activeId()) ?? model.tabs()[0],
+  );
   const activeTheme = computed(() => props.theme?.() ?? EDITOR_THEMES[0]);
   const font = computed(() => terminalFont(props, ghosttyCfg()));
   const termTheme = computed(() => buildTerminalTheme(activeTheme()));
-
-  host.on("aed.terminal.test", (data) => onTestMessage(model, data));
-
-  effect(() => {
-    discoverTerminalEnvironment().then((env) => {
-      const known = { shells, selectedShell, externalApps, ghosttyCfg };
-      applyEnvironment(env, known, untracked(() => props.shellPath?.()), fallbackShell);
-    });
-  });
-
-  // A new default shell from Preferences: unused tabs take it.
-  effect(() => {
-    const extPath = props.shellPath?.();
-    if (!extPath) return;
-    const resolved = resolveShellByPath(untracked(() => shells()), extPath, fallbackShell);
-    selectedShell.set(resolved);
-    setTimeout(() => adoptShell(untracked(() => tabs()), resolved, model.deps), 0);
-  });
-
-  // Shells start the first time the panel shows (no hidden login shell at
-  // launch), outside the effect's run (DESIGN.md trap #8).
-  effect(() => {
-    if (!props.visible()) {
-      focused.set(false);
-      return;
-    }
-    setTimeout(() => startShown(model), 0);
-  });
-  effect(() => {
-    cleanup(() => {
-      for (const tab of untracked(() => tabs())) tab.session.close();
-    });
-  });
-
-  effect(() => {
-    void props.cwd();
-    setTimeout(() => followFolder(untracked(() => tabs()), model.deps), 0);
-  });
-
-  // While the terminal has the keyboard its bindings are the newest, so they
-  // win: ⌘K clears it (not Quick Open), ⌘F opens no editor find bar.
-  effect(() => {
-    if (!focused()) return;
-    cleanup(keymap.bind({ "mod+k": () => clearActive(model), "mod+f": () => undefined }));
-  });
-
   const shellItems = computed<SelectItem[]>(() =>
-    shells().map((s) => ({ value: s.path, title: s.name, subtitle: s.path }))
+    shells().map((s) => ({ value: s.path, title: s.name, subtitle: s.path })),
   );
+
+  bindTerminalLifecycleEffects(
+    model,
+    { shells, selectedShell, externalApps, ghosttyCfg },
+    props,
+    fallbackShell,
+  );
+  bindTerminalFolderAndKeyEffects(model, props);
 
   return (
     <View
@@ -964,17 +1084,24 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
           fontFamily={font().fontFamily}
           fontSize={font().fontSize}
           theme={termTheme()}
-          onFocused={(event: { focused: boolean }) => focused.set(event.focused)}
+          onFocused={(event: { focused: boolean }) => model.focused.set(event.focused)}
           onLink={(event: { text: string }) =>
-            void openLink(event.text, untracked(() => activeTab()), untracked(() => props.cwd()), props.onFileOpen)
+            void openLink(
+              event.text,
+              untracked(() => activeTab()),
+              untracked(() => props.cwd()),
+              props.onFileOpen,
+            )
           }
         />
-        <If when={mirrorOn()}>
+        <If when={model.mirrorOn()}>
           <View testID="terminal-mirror" class="absolute inset-0 flex-col overflow-hidden">
-            {/* The newest lines, one row each, so all of them stay on screen for `app.texts()`. */}
             <Each of={activeTab().mirror().slice(-MIRROR_ROWS)} key="index">
               {(line) => (
-                <Text style={{ color: activeTheme().ui.foreground }} class="font-mono text-[8px] leading-none line-clamp-1">
+                <Text
+                  style={{ color: activeTheme().ui.foreground }}
+                  class="font-mono text-[8px] leading-none line-clamp-1"
+                >
                   {line()}
                 </Text>
               )}
