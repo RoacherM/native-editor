@@ -330,9 +330,17 @@ async function termTest(app: TestApp, message: Record<string, unknown>): Promise
 /** Keys typed into the active terminal tab (`\r` is Enter). */
 const termType = (app: TestApp, data: string) => termTest(app, { type: "input", data });
 
+async function toggleTerminal(app: TestApp): Promise<void> {
+  if (app.shows("id:titlebar-toggle-terminal")) {
+    await app.press("id:titlebar-toggle-terminal");
+  } else {
+    await app.keyboard.press("mod+j");
+  }
+}
+
 async function runInTerminal(app: TestApp, cmd: string, marker: string): Promise<void> {
   if (!app.shows("id:terminal-pane")) {
-    await app.press("id:titlebar-toggle-terminal");
+    await toggleTerminal(app);
     await app.waitFor("id:terminal-pane");
   }
   await termType(app, `${cmd} && echo ${marker}\r`);
@@ -443,6 +451,8 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(cleanApp.shows("id:statusbar-theme-trigger")).toBe(false);
     expect(cleanApp.shows("id:statusbar-font-trigger")).toBe(false);
     expect(cleanApp.shows("id:titlebar-toggle-theme")).toBe(false);
+    expect(cleanApp.shows("id:titlebar-toggle-sidebar")).toBe(false);
+    expect(cleanApp.shows("id:titlebar-toggle-terminal")).toBe(false);
     expect(cleanApp.shows("text:main")).toBe(false);
 
     // Shrinking viewport below minimum window dimensions must not crush the poster grid
@@ -467,6 +477,8 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await returningApp.press("id:welcome-recent-fixtures");
     await returningApp.waitFor("id:empty-editor-panel");
     expect(returningApp.shows("id:workspace-tree")).toBe(true);
+    expect(returningApp.shows("id:titlebar-toggle-sidebar")).toBe(true);
+    expect(returningApp.shows("id:titlebar-toggle-terminal")).toBe(true);
   });
 
   test("renders multi-format & multimedia previews, switches modes, searches files, and runs PTY commands", async () => {
@@ -740,9 +752,12 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     });
     await looseApp.waitFor("id:preview-markdown");
     expect(looseApp.shows("id:workspace-tree")).toBe(false);
+    expect(looseApp.shows("id:titlebar-toggle-sidebar")).toBe(false);
+    expect(looseApp.shows("id:titlebar-toggle-terminal")).toBe(true);
     await looseApp.press("id:tab-close-README.md");
     await looseApp.waitFor("id:welcome-panel");
     expect(looseApp.shows("id:welcome-panel")).toBe(true);
+    expect(looseApp.shows("id:titlebar-toggle-terminal")).toBe(false);
   });
   test("dropping any file onto a workspace window opens it as a tab and keeps the file tree", async () => {
     await withScratch({ "note.txt": "NOTE_V1" }, async ({ app }) => {
@@ -870,8 +885,9 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
 
   test("a terminal the user has not typed into moves to the folder that opens", async () => {
     const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-    await app.press("id:titlebar-toggle-terminal");
+    await toggleTerminal(app);
     await app.waitFor("id:terminal-pane");
+    expect(app.shows("id:titlebar-toggle-terminal")).toBe(true);
     await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
     await app.waitFor("id:workspace-tree");
     await runInTerminal(app, "pwd", "PWD_DONE");
@@ -885,7 +901,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
 
   test("a command submitted the moment the terminal opens still runs", async () => {
     const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-    await app.press("id:titlebar-toggle-terminal");
+    await toggleTerminal(app);
     await app.waitFor("id:terminal-pane");
     await termType(app, "echo FIRST_CMD_RAN\r");
     await app.waitUntil(() => showsText(app, "FIRST_CMD_RAN"), { timeout: 8000 });
@@ -924,7 +940,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
 
   test("a half-typed terminal command stays, with its shell, when a folder opens", async () => {
     const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-    await app.press("id:titlebar-toggle-terminal");
+    await toggleTerminal(app);
     await app.waitFor("id:terminal-pane");
     // Keys go to the shell at once: a half-typed command is in its line editor.
     await termType(app, "echo DRAFT_KEPT");

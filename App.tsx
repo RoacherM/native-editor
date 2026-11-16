@@ -49,16 +49,19 @@ function WindowTitleBar(props: { session: WorkspaceSession }): JSX.Element {
           <Text class="text-xs text-muted-foreground truncate">{s.folderLabel()}</Text>
         </SurfaceButton>
       </View>
-      <View class="flex-row items-center gap-1 shrink-0">
-        <IconButton
-          icon="sidebar" iconSize={14} testID="titlebar-toggle-sidebar" accessibilityLabel="Toggle sidebar"
-          disabled={!s.workspaceRoot()} selected={s.sidebarOpen() && Boolean(s.workspaceRoot())}
-          onPress={s.actions.toggleSidebar}
-        />
-        <IconButton
-          icon="panel-bottom" iconSize={14} testID="titlebar-toggle-terminal" accessibilityLabel="Toggle terminal"
-          selected={s.terminalOpen()} onPress={s.actions.toggleTerminal}
-        />
+      <View style={{ width: 60 }} class="flex-row items-center justify-end gap-1 shrink-0">
+        <If when={Boolean(s.workspaceRoot())}>
+          <IconButton
+            icon="sidebar" iconSize={14} testID="titlebar-toggle-sidebar" accessibilityLabel="Toggle sidebar"
+            selected={s.sidebarOpen()} onPress={s.actions.toggleSidebar}
+          />
+        </If>
+        <If when={s.editorSurface() !== "welcome" || s.terminalOpen()}>
+          <IconButton
+            icon="panel-bottom" iconSize={14} testID="titlebar-toggle-terminal" accessibilityLabel="Toggle terminal"
+            selected={s.terminalOpen()} onPress={s.actions.toggleTerminal}
+          />
+        </If>
       </View>
     </View>
   );

@@ -195,7 +195,11 @@ describe("TerminalPane Wave 2B unit & headless contracts", () => {
 
   test("headless E2E: TabStrip keeps id:terminal-add-btn and label:Select shell reachable when tabs overflow", async () => {
     const app = await open("../App.tsx", { platform: "macos", width: 1280, height: 800 });
-    await app.press("id:titlebar-toggle-terminal");
+    if (app.shows("id:titlebar-toggle-terminal")) {
+      await app.press("id:titlebar-toggle-terminal");
+    } else {
+      await app.keyboard.press("mod+j");
+    }
     await app.waitFor("id:terminal-pane");
     await app.setViewport(780, 600);
 
