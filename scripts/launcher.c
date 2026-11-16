@@ -60,48 +60,112 @@ static int argToPath(const char *arg, char *out, size_t size, char *fragment, si
     snprintf(fragment, fragSize, "%s", hash);
     *hash = '\0';
   }
+  char *query = strchr(out, '?');
+  if (query) *query = '\0';
   percentDecode(out);
   return 0;
 }
 
-/* Strip `#L<line>[C<col>|-L<n>]` from `buf` (at `buf` itself too: a URL fragment); 1 when stripped. */
-/* `#L<line>`, `#L<line>C<col>` or `#L<line>-[L]<n>` at the very end of `buf` (src/workspace.ts HASH_LINE). */
-static int stripHashLine(char *buf, long *line, long *col) {
-  char *hashL = NULL;
-  for (char *p = strstr(buf, "#L"); p; p = strstr(p + 1, "#L")) hashL = p;
-  if (!hashL || hashL == buf || !isdigit((unsigned char)hashL[2])) return 0;
+/* Parse `#L<line>`, `#L<line>C<col>` or `#L<line>-[L]<n>` starting at `s`; 1 when matched. */
+static int parseHashLine(const char *s, long *line, long *col) {
+  if (!s || s[0] != '#' || (s[1] != 'L' && s[1] != 'l') || !isdigit((unsigned char)s[2])) return 0;
   char *end = NULL;
-  long l = strtol(hashL + 2, &end, 10), c = 0;
-  if (*end == 'C' && isdigit((unsigned char)end[1])) {
+  long l = strtol(s + 2, &end, 10), c = 0;
+  if (l <= 0) return 0;
+  if ((*end == 'C' || *end == 'c') && isdigit((unsigned char)end[1])) {
     c = strtol(end + 1, &end, 10);
   } else if (*end == '-') {
-    char *n = end + 1 + (end[1] == 'L');
+    const char *n = end + 1 + (end[1] == 'L' || end[1] == 'l');
     if (isdigit((unsigned char)*n)) strtol(n, &end, 10);
   }
   if (*end != '\0') return 0;
   *line = l;
   *col = c;
-  *hashL = '\0';
   return 1;
 }
 
-/* Strip `#L<line>[C<col>|-L<n>]` and `:line(:col)` from the end of `buf`; report line/col (0 when absent). */
-static void stripLineColSuffix(char *buf, long *line, long *col) {
+/*
+ * Resolve `candidate` to an existing path in `resolved` (most literal first):
+ * 1) `candidate` as written (a real file named `foo:10` wins)
+ * 2) without a trailing `#L<line>[C<col>]`
+ * 3) without one trailing `:<line>` (`foo:10:20` opens `foo:10` at line 20)
+ * 4) without `:<line>:<col>` (`a.ts:12:3` opens `a.ts` at line 12, col 3)
+ */
+static int resolveCandidate(char *candidate, const char *fragment, char *resolved, long *line, long *col) {
   *line = 0;
   *col = 0;
-  if (stripHashLine(buf, line, col)) return;
-  char *lastColon = strrchr(buf, ':');
-  if (!lastColon || lastColon == buf || !isDigitsOnly(lastColon + 1)) return;
+  parseHashLine(fragment, line, col);
+  if (realpath(candidate, resolved)) return 0;
+
+  char *hash = strrchr(candidate, '#');
+  long sLine = 0, sCol = 0;
+  if (hash && hash > candidate && parseHashLine(hash, &sLine, &sCol)) {
+    *hash = '\0';
+    if (!realpath(candidate, resolved)) return -1;
+    if (*line == 0) {
+      *line = sLine;
+      *col = sCol;
+    }
+    return 0;
+  }
+
+  char *lastColon = strrchr(candidate, ':');
+  if (!lastColon || lastColon == candidate || !isDigitsOnly(lastColon + 1)) return -1;
   long last = strtol(lastColon + 1, NULL, 10);
   *lastColon = '\0';
-  char *prevColon = strrchr(buf, ':');
-  if (prevColon && prevColon != buf && isDigitsOnly(prevColon + 1)) {
-    *line = strtol(prevColon + 1, NULL, 10);
-    *col = last;
-    *prevColon = '\0';
-  } else {
-    *line = last;
+  if (last > 0 && realpath(candidate, resolved)) {
+    if (*line == 0) {
+      *line = last;
+      *col = 0;
+    }
+    return 0;
   }
+
+  char *prevColon = strrchr(candidate, ':');
+  if (!prevColon || prevColon == candidate || !isDigitsOnly(prevColon + 1)) return -1;
+  long prev = strtol(prevColon + 1, NULL, 10);
+  *prevColon = '\0';
+  if (prev > 0 && realpath(candidate, resolved)) {
+    if (*line == 0) {
+      *line = prev;
+      *col = last;
+    }
+    return 0;
+  }
+  return -1;
+}
+
+static int isUnescapedUriPathChar(unsigned char c) {
+  return isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~';
+}
+
+/*
+ * Plain path when `line <= 0`; otherwise an unambiguous `file://<encoded>#L<line>[C<col>]`
+ * URI so colons or `#` inside real filenames never collide with location suffixes.
+ */
+static int formatTargetRef(const char *resolved, long line, long col, char *out, size_t size) {
+  if (line <= 0) {
+    int n = snprintf(out, size, "%s", resolved);
+    return (n > 0 && (size_t)n < size) ? 0 : -1;
+  }
+  if (size < 16) return -1;
+  memcpy(out, "file://", 7);
+  size_t pos = 7;
+  static const char hex[] = "0123456789ABCDEF";
+  for (const unsigned char *p = (const unsigned char *)resolved; *p; p++) {
+    if (isUnescapedUriPathChar(*p)) {
+      if (pos + 1 >= size) return -1;
+      out[pos++] = (char)*p;
+    } else {
+      if (pos + 3 >= size) return -1;
+      out[pos++] = '%';
+      out[pos++] = hex[*p >> 4];
+      out[pos++] = hex[*p & 0x0F];
+    }
+  }
+  int tail = col > 0 ? snprintf(out + pos, size - pos, "#L%ldC%ld", line, col)
+                     : snprintf(out + pos, size - pos, "#L%ld", line);
+  return (tail > 0 && pos + (size_t)tail < size) ? 0 : -1;
 }
 
 typedef struct {
@@ -110,27 +174,13 @@ typedef struct {
   char *root;
 } OpenTargets;
 
-/*
- * Resolve one argument. The literal path wins when it exists (a file may be
- * named `notes:12`); only otherwise is a line suffix stripped, and then the
- * line travels on as `:line(:col)` for the app to jump to.
- */
 static void recordArgPath(const char *arg, OpenTargets *targets) {
   if (!arg || arg[0] == '-' || arg[0] == '\0') return;
   char candidate[PATH_MAX], fragment[64], resolved[PATH_MAX];
   if (argToPath(arg, candidate, sizeof candidate, fragment, sizeof fragment) != 0) return;
   long line = 0, col = 0;
-  // A file URL's `#L3` is always a fragment: `#` in a name is written %23.
-  stripHashLine(fragment, &line, &col);
-  if (!realpath(candidate, resolved)) {
-    long suffixLine = 0, suffixCol = 0;
-    stripLineColSuffix(candidate, &suffixLine, &suffixCol);
-    if (!realpath(candidate, resolved)) return;
-    if (line == 0) {
-      line = suffixLine;
-      col = suffixCol;
-    }
-  }
+  if (resolveCandidate(candidate, fragment, resolved, &line, &col) != 0) return;
+
   struct stat st;
   if (stat(resolved, &st) != 0) return;
   if (S_ISDIR(st.st_mode)) {
@@ -138,15 +188,9 @@ static void recordArgPath(const char *arg, OpenTargets *targets) {
     return;
   }
   if (!S_ISREG(st.st_mode) || targets->fileCount >= MAX_OPEN_FILES) return;
-  char withLine[PATH_MAX + 48];
-  if (line > 0 && col > 0) {
-    snprintf(withLine, sizeof withLine, "%s:%ld:%ld", resolved, line, col);
-  } else if (line > 0) {
-    snprintf(withLine, sizeof withLine, "%s:%ld", resolved, line);
-  } else {
-    snprintf(withLine, sizeof withLine, "%s", resolved);
-  }
-  targets->files[targets->fileCount++] = strdup(withLine);
+  char formatted[PATH_MAX * 3 + 64];
+  if (formatTargetRef(resolved, line, col, formatted, sizeof formatted) != 0) return;
+  targets->files[targets->fileCount++] = strdup(formatted);
 }
 
 /*

@@ -1,6 +1,6 @@
 ---
 title: Aed 架构与模块契约
-description: 基于 Native Shell (nsh 0.3.0) 的 macOS 原生多格式预览器、代码编辑器与内置 PTY 终端（Aed — Another Editor）架构、持久化契约与实测踩坑记录。
+description: 基于 Native Shell (nsh 0.4.0) 的 macOS 原生多格式预览器、代码编辑器与内置 PTY 终端（Aed — Another Editor）架构、持久化契约与实测踩坑记录。
 ---
 
 # Aed 架构与模块契约
@@ -39,13 +39,14 @@ Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文�
 | `Storage` 键 | `aed.shell` | 默认 Shell 绝对路径（如 `/bin/zsh`）；未设置时回退旧键 `native-editor.shell` |
 | `Storage` 键 | `aed.recentWorkspaces` | JSON 字符串数组（最多保留最近 5 个显式打开的非 `/` 工作区目录，单独打开外部文件不写入）；未设置时回退旧键 `native-editor.recentWorkspaces`，解析失败回退 `[]`。App 启动时先读入已存列表，之后的记录（`AED_ROOT` 启动目录、切换目录）都排在读取之后（`rememberWorkspace`），不会用空列表覆盖它（I-017） |
 | 环境变量 / Host 参数 | `AED_ROOT` / `NATIVE_EDITOR_ROOT` / `host.params.workspaceRoot` | 启动时初始工作区目录；均未设置时返回 `""`（直接展示 `WelcomePanel` 开屏页并列出 `Recent` 历史工作区供点击打开，绝不自动进入旧工作区或扫 `$HOME`、`/`） |
-| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以无文件树（`workspaceRoot = ""`）独立窗口打开的第一个文件。值可以带 `:line(:col)` 后缀（`launcher` 解析出行列时附上），由 `resolveExternalFileReference()` 先按原样找文件，找不到才剥后缀并跳到该行（不写入历史工作区）。`launcher` 启动时先清掉继承来的 `AED_OPEN_FILE` / `AED_ROOT` / `AED_OPEN_QUEUE` / `NATIVE_EDITOR_*`，只按本次参数重新设置（Aed 内置终端里的 Shell 和 `finder_bridge.m` 的 `open -n` 都会继承当前窗口的值） |
-| 窗口标题标记（JS → 原生） | 标题以 ` — Edited` 结尾（`src/session.ts` `EDITED_TITLE_SUFFIX` / `windowTitle`，即 `Aed — Edited`） | JS 告诉 `finder_bridge.m`「有未保存修改」的唯一通道：有脏 Tab 时 App 把窗口标题设为 `Aed — Edited`，否则 `Aed`；用户同意退出后立即去掉标记，下一轮事件循环再 `process.exit`（`src/session.ts` `runApprovedQuit`，让新标题先生效）；`process.exit` 抛错，或 `QUIT_SETTLE_MS`（2 秒）后进程仍在（宿主取消了退出），标记按脏 Tab 恢复，保护重新生效。原生 → JS 不另设通道：原生选中 App 自己的 ⌘Q 菜单项（`Quit Aed`，`keyEquivalent` 为 `q` + Command 且 action 不是 `terminate:`）。两边的字面量必须一致（`App.test.tsx` › the window title carries the edited mark scripts/finder_bridge.m reads）。旧版 dylib 不读标题、新版 dylib 遇到不带标记的旧 JS 都按宿主原行为退出，没有兼容负担 |
+| 环境变量 / Host 参数 | `AED_OPEN_FILE` / `NATIVE_EDITOR_OPEN_FILE` / `host.params.openFile` | 启动时直接以无文件树（`workspaceRoot = ""`）独立窗口打开的第一个文件。带行号或列号时由 `launcher` 百分号编码为无歧义的 `file://<abs-path>#L<line>`（或 `#L<line>C<col>`）URI（避免磁盘上真有 `foo:10` 时 `foo:10:20` 被拼成 `/abs/foo:10:20` 产生二次剥离歧义；旧格式 `:line(:col)` 与纯绝对路径仍完全兼容），由 `resolveExternalFileReference()` / `parseTarget()` 解析跳转（不写入历史工作区）。`launcher` 启动时先清掉继承来的 `AED_OPEN_FILE` / `AED_ROOT` / `AED_OPEN_QUEUE` / `NATIVE_EDITOR_*`，只按本次参数重新设置（Aed 内置终端里的 Shell 和 `finder_bridge.m` 的 `open -n` 都会继承当前窗口的值） |
+| 窗口标题标记（JS → 原生） | 标题以 ` — Edited` 结尾（`src/session.ts` `EDITED_TITLE_SUFFIX` / `windowTitle`，即 `Aed — Edited`） | JS 告诉 `finder_bridge.m`「有未保存修改」的唯一通道：有脏 Tab 时 App 把窗口标题设为 `Aed — Edited`，否则 `Aed`；用户同意退出后立即去掉标记，下一轮事件循环再 `process.exit`（`src/session.ts` `runApprovedQuit`，让新标题先生效）；`process.exit` 抛错，或 `QUIT_SETTLE_MS`（2 秒）后进程仍在（宿主取消了退出），标记按脏 Tab 恢复，保护重新生效。原生 → JS 不另设通道：原生选中 App 自己的 ⌘Q 菜单项（`Quit Aed`，`keyEquivalent` 为 `q` + Command 且 action 不是 `terminate:`）。两边的字面量必须一致（`src/session.test.ts` › the window title carries the edited mark scripts/finder_bridge.m reads）。旧版 dylib 不读标题、新版 dylib 遇到不带标记的旧 JS 都按宿主原行为退出，没有兼容负担 |
 | 环境变量 / Host 参数 | `AED_OPEN_QUEUE` / `host.params.openQueue` | 本进程的 Finder 队列目录，`launcher` 在 `execv` 前设置，`libFinderBridge.dylib` 构造函数按 `getpid()` 重算并覆盖（不信任传入值）；`nsh.json` `process.env` 白名单需含此名。App 只接受形如 `<缓存目录>/open-<数字>` 的值（`resolveFinderQueueDir`，两边先 `path.normalize`：原生按 `$HOME` 原样拼接，`/Users/x/` 会得到 `//Library`），否则不读队列。`host.params.openQueue` 只供测试注入 |
 | 每用户缓存目录 | `~/Library/Caches/dev.byronwayne.aed/`（`0700`） | Aed 自己的临时文件都放这里（`aedCacheDir()` / `scripts/aed_paths.h`）。原生代码用 `O_NOFOLLOW\|O_DIRECTORY` 打开后 `fstat` 校验：必须是真目录（不是符号链接）、属于当前用户，权限不是 `0700` 就改成 `0700`，否则放弃写入。App 侧 `fs/promises` 没有 `mode` / `chmod`，只在其下 `mkdir` 出 `ql/`，靠 `~/Library` 本身是 `0700`。WebKit 也把 Aed 的网页缓存放在同一目录的 `WebKit/` 下，两者互不干扰 |
-| Finder 队列 | `<缓存目录>/open-<pid>/<seq>.path` | 每个 Aed 进程一个目录，每个待打开路径一个文件（原样路径字节，无换行）。写入方先用 `O_CREAT\|O_EXCL\|O_NOFOLLOW`、`0600` 建 `.<seq>.tmp`，写完再 `renameatx_np(RENAME_EXCL)` 成 `<seq>.path`，所以读方看不到半截文件。写入方：`launcher`（命令行第 2 个起的文件）、`finder_bridge.m`（冷启动阶段收到的 AppleEvent，一批文件全部写入）。读方：`consumeFinderOpenQueue()` 只认 `<数字>.path`，按数字（不是字典序）排序，逐个 `lstat`：普通文件读出内容，其它（符号链接等）不读，两者都删除（`unlink` 只删链接本身）；`.<seq>.tmp` 不碰。`launcher` 启动时清空本 pid 的旧目录，并删除进程已不存在的 `open-<pid>` 目录（是符号链接时只删链接） |
+| Finder 队列 | `<缓存目录>/open-<pid>/<seq>.path` | 每个 Aed 进程一个目录，每个待打开目标一个文件（无换行：无行号时为绝对路径，带行列定位或 URL 片段时为百分号编码的 `file://<abs-path>#L<line>[C<col>]`）。写入方先用 `O_CREAT\|O_EXCL\|O_NOFOLLOW`、`0600` 建 `.<seq>.tmp`，写完再 `renameatx_np(RENAME_EXCL)` 成 `<seq>.path`，所以读方看不到半截文件。写入方：`launcher`（命令行第 2 个起的文件）、`finder_bridge.m`（冷启动阶段收到的 AppleEvent，或运行态复用 `home`/`loose` 窗口时写入本进程队列）。读方：`consumeFinderOpenQueue()` 只认 `<数字>.path`，按数字（不是字典序）排序，逐个 `lstat`：普通文件读出内容，其它（符号链接等）不读，两者都删除（`unlink` 只删链接本身）；`.<seq>.tmp` 与 `state` 不碰。`launcher` 启动时清空本 pid 的旧目录，并删除进程已不存在的 `open-<pid>` 目录（是符号链接时只删链接） |
+| 窗口模式状态文件（JS → 原生） | `<缓存目录>/open-<pid>/state`（`0600`） | 本进程当前窗口会话模式快照：`home`、`loose` 或 `workspace\n<root>`。`finder_bridge.m` 在非冷启动收到外部打开文件事件时，以 `O_NOFOLLOW` 只读检查本进程 `state`：若以 `home` 或 `loose` 开头且 `[NSApp mainMenu]` 中存在标题为 `"Open Queued Files"` 的菜单项，则将外部文件追加到 `getpid()` 的队列、触发 `"Open Queued Files"` 并置前当前窗口，复用现有空闲/无树窗口而不额外拉起 `open -n` 新进程；若 `state` 为 `workspace`、缺失、不可读，或菜单项尚未注册（旧版 JS 兼容），则回退 `open -n <Aed.app> --args …` |
 | QuickLook 临时图 | `<缓存目录>/ql/<随机 UUID>.png` | `generateQuickLookUrl()` 让 `sips` 把 PDF 首页写成 PNG，读进内存转成 `blob:` URL 后立即删除 PNG（`sips` 失败也删）。内存里每个文件只留最新版本（`mtimeMs:size`）的 URL，新版本生成后 `revokeObjectURL` 旧的 |
-| 终端调试日志 | `<缓存目录>/terminal.log`（`0600`，超过 2 MB 改名为 `terminal.log.1` 后重开） | `native/src/log.rs`。只在 App 里写：`aed.terminal` 组件注册时才 `log::enable()`，无头 `nsh test` 与 `cargo test` 不注册组件，不会产生这个文件。逐行记录本地时间加：按键（keyCode、字符、修饰键、是否有输入法组字）、输入法 insert/mark/unmark、发给 Shell 的字节（控制字符转义）、Shell 输出前 240 字节、按键后 1.5 秒内光标所在行的格子内容、布局（视图尺寸、字体、格子尺寸、行列数）、焦点、链接、Shell 启动与退出。程序读密码时（PTY `ECHO` 关且 `ICANON` 开，即 `getpass` / `sudo` 的读法）只记字节数，不记内容。zsh/readline 在提示符下也关 `ECHO`，但它们关了 `ICANON`，不算读密码（`session::tests` › only_a_password_read_keeps_keys_out_of_the_log）。目录由 `DirBuilder` 以 `0700` 创建，文件用 `O_NOFOLLOW` 打开，跟 App 侧一样不另做 `fstat` 校验，靠 `~/Library` 本身是 `0700`。新增文件，没有旧版本要兼容 |
+| 环境变量 / 终端调试日志 | `AED_TERMINAL_LOG` · `<缓存目录>/terminal.log`（`0600`，超过 2 MB 改名为 `terminal.log.1` 后重开） | `native/src/lib.rs` + `native/src/log.rs`。生产环境默认关闭：仅当环境变量 `AED_TERMINAL_LOG` 显式设为非空值（如 `AED_TERMINAL_LOG=1`）且 `aed.terminal` 组件注册时才启用 `log::enable()`；未设置、为空或无头 `nsh test` / `cargo test` 均不打开文件、零磁盘 I/O。启用时逐行记录本地时间加：按键（keyCode、字符、修饰键、是否有输入法组字）、输入法 insert/mark/unmark、发给 Shell 的字节（控制字符转义）、Shell 输出前 240 字节、按键后 1.5 秒内光标所在行的格子内容、布局（视图尺寸、字体、格子尺寸、行列数）、焦点、链接、Shell 启动与退出。程序读密码时（PTY `ECHO` 关且 `ICANON` 开，即 `getpass` / `sudo` 的读法）只记字节数，不记内容。zsh/readline 在提示符下也关 `ECHO`，但它们关了 `ICANON`，不算读密码（`session::tests` › only_a_password_read_keeps_keys_out_of_the_log）。目录在打开日志时以 `0700` 创建，文件用 `O_NOFOLLOW` 打开并在内存中累计写入字节触发轮转。旧 `terminal.log` 文件在未开启 `AED_TERMINAL_LOG` 时保持原样不读写 |
 | 测试 Shell 的私有目录 | `$TMPDIR/aed-shell-<pid>/`（`0700`，`std::env::temp_dir()`，macOS 上是每用户的 `/var/folders/…/T/`） | `native/src/pty.rs` `private_config`。只有 App 注册原生视图时调用 `pty::use_user_config()`，此后 Shell 用用户自己的启动文件和历史；之前（无头 `nsh test`、`cargo test`）每个 Shell 的 `ZDOTDIR` 和 `HISTFILE`（`<目录>/.history`）都指向这里，替换继承来的同名变量。macOS `/etc/zshrc` 无条件设 `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history`，所以只设 `HISTFILE` 拦不住 zsh，要靠 `ZDOTDIR`；bash 认继承的 `HISTFILE`。效果：测试不再写用户的 `~/.zsh_history` / `~/.bash_history`（曾写入 4836 行），也不再加载用户的 `~/.zshrc`（oh-my-zsh 自动建议曾把测试命令当补全显示）。目录不删，留在系统临时目录里由系统清理。新增，无兼容问题（`session::tests` › a_shell_outside_the_app_keeps_its_history_out_of_home、`App.test.tsx` › test shells keep their history out of the user's home） |
 | Mermaid bundle | 无磁盘缓存 | `loadMermaidBundleJs()` 每个进程直接从 VS Code / Cursor / Antigravity 扩展目录提取一次，结果只缓存在内存（没找到不缓存，下次渲染器启动再找） |
 | Rust crate / 原生模块 | `nsh.json` `"rust": "native"`；模块 `aed/native`（`TerminalSession` 类）；原生组件 `aed.terminal`（props `session` / `fontFamily` / `fontSize` / `theme`，事件 `focused` / `link`，命令 `focus`） | TSX 与 `native/src/lib.rs` 两边的字面量必须一致。原生组件只在 macOS 宿主注册，无头 `nsh test` 里是一个空视图。终端改原生时新增，没有旧缓存或配置要兼容 |
@@ -116,7 +117,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | `workspace` | 有工作区 | 文件树 + Tab；无 Tab 时 `EmptyEditorPanel` |
 | `loose` | 无工作区，有 Tab | 无文件树的单文件窗口 |
 
-转移表是 `WINDOW_TRANSITIONS`（`Record<模式, Record<事件, 模式>>`）。加模式或事件不补表，`nsh check` 报错；`App.test.tsx` › every WINDOW_TRANSITIONS cell matches the rules App.tsx runs 用 App 调用的同一组函数重放每一格。规则：
+转移表是 `WINDOW_TRANSITIONS`（`Record<模式, Record<事件, 模式>>`）。加模式或事件不补表，`nsh check` 报错；`src/session.test.ts` › every WINDOW_TRANSITIONS cell matches the rules App.tsx runs 用 App 调用的同一组函数重放每一格。规则：
 
 - **重新打开当前目录**（`⌘O` 选同一目录、`Open Recent` 当前项、拖入当前目录）只刷新，保留 Tab（`planWorkspaceIntent` → `refresh`）。
 - **拖入文件**（`drop-file`）表示「在这里打开」：不论文件在不在当前工作区内，都作为 Tab 打开，模式不变（有工作区则保留文件树）。**外部点击**（`click-file`：Finder / Herdr / `AED_OPEN_FILE`）一律进 `loose`，保持 I-007 规则。两者由 `externalOpenKeepsTree(origin)` 区分。
@@ -154,8 +155,12 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
    - `video`（`.mp4`, `.mov`, `.m4v`, `.webm`）、`audio`（`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`）与 Quick Look 类（PDF、Office）在 `loadFile()` 中只调用 `fs.stat()` 获取字节数，按路径预览（`<Video src={filePath} />`、`sips`），绝不 `fs.readFile` 读入内存。
    - 图片（`.png`, `.jpg`, `.gif`, `.webp`, `.avif`, `.svg`）通过 `fs.readFile` 构造 `URL.createObjectURL(new Blob([bytes], { type }))`，由 `nsh-js` 在 Rust 侧零拷贝读取 `Blob` 的 `Arc<[u8]>`。
    - 未知扩展名文件按前 4 KB 判定，含 `\0` 字节则归类为 `binary`，展示只读 4 KB Hex + ASCII 视图。
-   - **文件大小上限（`src/workspace.ts` `readFileBytesAndSize`，I-017）**：`MAX_EDITABLE_BYTES = 8 MiB`（`nsh 0.4.0` `fs.writeFile` 最多写 8 MiB，更大的文件本来也存不回去）。不超过上限的文件整读。超过上限的非图片文件不整读：先读前 4 KB（`BINARY_HEAD_BYTES`）判定，二进制只留这 4 KB 给 Hex 视图；文本读前 256 KiB（`LARGE_TEXT_HEAD_BYTES`）只读显示，`readOnly = "Larger than 8 MB — showing the first 256 KB, read-only"`（`id:read-only-banner`，永不写回）。`nsh 0.4.0` 的 `fs/promises` 没有部分读取，所以开头的字节由已授权的 `python3` 读出、以十六进制经 stdout 传回（`readFileHead`）。图片仍整读（`blob:` 需要全部字节；`fs.readFile` 超过 64 MiB 会失败，失败显示在 `id:open-error-banner`）。
    - **文本解码与保存回写（`src/workspace.ts` `decodeUtf8` / `encodeUtf8` / `saveFileText`）**：文本按 UTF-8 严格解码（`TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`，开头的 BOM 先剥掉并记在 `LoadedFile.bom`）。解码失败（GBK、Latin-1 等）时用替换字符显示，但副本标为只读（`readOnly = "Not UTF-8 — opened read-only"`）：编辑器 `readOnly`，编辑区上方显示 `id:read-only-banner`，永远不写回。保存写入 UTF-8 字节，`bom` 为真时先写回 BOM。保存后由新字节重算派生数据：表格行、SVG 的 `blobUrl` 与尺寸；`diffPatch` 清空（`.diff`/`.patch` 文件除外，它就是正文），下次进入 Diff 时重新拉取，保存时正处于 Diff 的 Tab 立即重拉。不透明类型从不写回（见「状态机清单」#4）。
+
+### 文件大小上限
+
+`src/workspace.ts` `readFileBytesAndSize`（I-017）：`MAX_EDITABLE_BYTES = 8 MiB`（`nsh 0.4.0` `fs.writeFile` 最多写 8 MiB，更大的文件本来也存不回去）。不超过上限的文件整读。超过上限的非图片文件不整读：先读前 4 KB（`BINARY_HEAD_BYTES`）判定，二进制只留这 4 KB 给 Hex 视图；文本读前 256 KiB（`LARGE_TEXT_HEAD_BYTES`）只读显示，`readOnly = "Larger than 8 MB — showing the first 256 KB, read-only"`（`id:read-only-banner`，永不写回）。`nsh 0.4.0` 的 `fs/promises` 没有部分读取，所以开头的字节由已授权的 `python3` 读出、以十六进制经 stdout 传回（`readFileHead`）。图片仍整读（`blob:` 需要全部字节；`fs.readFile` 超过 64 MiB 会失败，失败显示在 `id:open-error-banner`）。
+
 2. **模式胶囊按钮显示规则（`App.tsx` `hasRichPreview`）**：
    - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
 3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
@@ -202,22 +207,23 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 
 1. **`scripts/launcher.c`（主可执行文件 `Contents/MacOS/Aed`）**：
    - 原 `Aed` 二进制被重命名为 `AedCore`。
-   - `launcher` 解析命令行参数：`file://[localhost]/…` 做百分号解码（`%00` 不解码），`#L<line>[C<col>]` 一律当片段；路径先按原样 `realpath`，存在就不剥任何后缀（文件可以叫 `notes:12`），不存在才剥 `#L<line>` / `:line(:col)` 再试，剥出的行列以 `:line:col` 附在路径后交给 App 跳转。有文件参数时文件优先：第 1 个写入 `AED_OPEN_FILE`（清除 `AED_ROOT` / `NATIVE_EDITOR_ROOT`），第 2 个起写入本进程自己的队列 `open-<pid>`（`execv` 后 pid 不变），同一个窗口全部作为 Tab 打开；没有文件参数时第 1 个目录写入 `AED_ROOT`。随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
+   - `launcher` 解析命令行参数：`file://[localhost]/…` 先剥离 `#L<line>[C<col>]` 片段与 `?query` 再做百分号解码（`%00` 不解码）；路径按「字面路径 → 剥 `#L<line>[C<col>]` → 剥单段 `:line` → 剥双段 `:line:col`」依次尝试 `realpath`，存在就不剥更多后缀（文件可以叫 `notes:12`，传 `notes:12:20` 可跳到它的第 20 行）。解析出 `line > 0` 时统一编码为无歧义的 `file://<percent-encoded-abs-path>#L<line>[C<col>]` URI 交给 App 跳转；无行号时直接写绝对路径。有文件参数时文件优先：第 1 个写入 `AED_OPEN_FILE`（清除 `AED_ROOT` / `NATIVE_EDITOR_ROOT`），第 2 个起写入本进程自己的队列 `open-<pid>`（`execv` 后 pid 不变），同一个窗口全部作为 Tab 打开；没有文件参数时第 1 个目录写入 `AED_ROOT`。随后设置 `DYLD_INSERT_LIBRARIES=@executable_path/libFinderBridge.dylib` 并 `execv("AedCore")`。
 2. **`scripts/finder_bridge.m`（`libFinderBridge.dylib`）**：
-   - 在 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警）。
-   - Method Swizzle `NSApplication setDelegate:` 并通过 `setOrReplaceMethod` 向宿主 Delegate 注入或覆盖 `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`：
+   - 单一 `__attribute__((constructor))` 初始化时**立即调用 `unsetenv("DYLD_INSERT_LIBRARIES")`**（防止用户在内置终端里运行的子进程继承该环境变量导致崩溃或告警），并通过统一的 `neHookMethod` 挂接 `NSApplication setDelegate:` 及窗口/应用 Delegate 方法。
+   - `application:openFile:`、`application:openFiles:`、`application:openURLs:` 与 `windowWillResize:toSize:`：
+     - `application:openURLs:` 对带 `#fragment` 的本地 `file:` URL 保留完整 `[url absoluteString]`（如 `file:///path/a.ts#L42`），否则取 `[url path]`。
      - 一次打开事件（Finder 里选中 N 个文件）是一批：所有文件进同一个窗口作为 Tab，每个文件夹各开一个窗口。
      - **冷启动首个外部目标**（`NSApplicationDidFinishLaunching` 前及完成后 `1.5s` 内且未通过 `--args` 指定初始目标）：这一批文件全部写入本进程队列 `open-<pid>`（没有文件时写第 1 个文件夹）并唤醒当前窗口，由 `App.tsx` 以无文件树独立模式（`workspaceRoot = ""`）直接展示；
-     - **运行中再次点击外部文件**：调用一次 `/usr/bin/open -n <Aed.app> --args <path1> <path2> …` 拉起一个全新的独立 Aed 窗口进程（不带左侧文件树），由它的 `launcher` 按上条分发，并在 AppKit 层锁定窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
-   - **退出保护（I-016，文件末尾独立的一段，自带 `constructor`，不改上面的代码）**：在 `NSApplicationDidFinishLaunching` / `NSWindowDidBecomeKey` 时给宿主窗口 Delegate 的 `windowShouldClose:` 与 App Delegate 的 `applicationShouldTerminate:` 各挂一次钩子（保存原实现，各类只挂一次）。窗口标题以 ` — Edited` 结尾时：关闭按钮返回 `NO`、系统退出返回 `NSTerminateCancel`，并在下一轮 run loop 选中 App 的 `Quit Aed` 菜单项，由 JS 弹未保存确认框；标题不带标记、或菜单里找不到该项时，调用宿主原实现，行为与以前相同。菜单项在下一轮 run loop 重新查找后再触发（App 可能在此期间重建菜单）。**JS 无响应兜底**：上次转交后 4 秒内（`AED_QUIT_RETRY_SECONDS`）又来一次关闭或退出、标题仍带标记时，弹原生 `NSAlert`「Quit Aed without saving?」（`Cancel` / `Quit Anyway`），选 `Quit Anyway` 走宿主原实现，避免页面卡死时只能强制退出。无头测试测不到原生部分，需要 `--target macos` 或打包后手测。
+     - **运行中再次点击外部文件**：先只读检查 `<缓存目录>/open-<pid>/state`——若本窗口处于 `home` 或 `loose` 模式且 `[NSApp mainMenu]` 中存在 `"Open Queued Files"` 菜单项，则直接将文件写入 `getpid()` 队列、触发 `"Open Queued Files"` 并置前当前窗口；否则调用一次 `/usr/bin/open -n <Aed.app> --args <path1> <path2> …` 拉起独立 Aed 窗口进程（不带左侧文件树），并在 AppKit 层锁定窗口最小尺寸为 `760 × 520`（`setContentMinSize:` / `setMinSize:`）。
+   - **退出保护（I-016）**：在 `NSApplicationDidFinishLaunching` / `NSWindowDidBecomeKey` 时给宿主窗口 Delegate 的 `windowShouldClose:` 与 App Delegate 的 `applicationShouldTerminate:` 各挂一次钩子（保存原实现，各类只挂一次）。窗口标题以 ` — Edited` 结尾时：关闭按钮返回 `NO`、系统退出返回 `NSTerminateCancel`，并在下一轮 run loop 选中 App 的 `Quit Aed` 菜单项，由 JS 弹未保存确认框；标题不带标记、或菜单里找不到该项时，调用宿主原实现，行为与以前相同。菜单项在下一轮 run loop 重新查找后再触发（App 可能在此期间重建菜单）。**JS 无响应兜底**：上次转交后 4 秒内（`AED_QUIT_RETRY_SECONDS`）又来一次关闭或退出、标题仍带标记时，弹原生 `NSAlert`「Quit Aed without saving?」（`Cancel` / `Quit Anyway`），选 `Quit Anyway` 走宿主原实现，避免页面卡死时只能强制退出。无头测试测不到原生部分，需要 `--target macos` 或打包后手测。
 3. **`scripts/set_default_handlers.m`**：
    - 先通过 `LSCopyDefaultRoleHandlerForContentType` 查询当前默认打开程序，已绑定 `dev.byronwayne.aed` 的 UTI 直接跳过（避免重复触发 macOS `CoreServicesUIAgent` 确认弹窗），并对 UTI 去重、过滤未声明的 `dyn.*` 动态 UTI。
    - 默认仅注册 8 个核心文档与数据 UTI（Markdown、Mermaid、JSONL、JSON、CSV、TSV、Plain Text、Diff/Patch）；传入 `--all` 时额外注册常用源码 UTI，也可直接传入指定扩展名（如 `set_default_handlers yaml toml`）。
-   - 只在用户要求时运行：`sh scripts/package-macos.sh --set-default`，或 DMG 里的 `Install & Set Default.command`（I-018 前首次安装会自动运行，不问用户就接管默认文本编辑器）。`install.sh` 目前仍在每次安装后运行它，并提示「set as default document editor」。
+   - 只在用户显式要求时运行：`sh scripts/package-macos.sh --set-default`、`sh install.sh --set-default`，或 DMG 里的 `Install & Set Default.command`（普通安装绝不自动接管默认文本编辑器）。
    - `Info.plist` 的 `CFBundleDocumentTypes`：文本、源码、Markdown、JSON、CSV 等具体类型为 `Editor` / `Default`；`public.data`（任意文件）单独一组，为 `Viewer` / `Alternate`，只让 Aed 出现在「打开方式」里，不声明自己是所有文件的默认编辑器。
-4. **跨版本 macOS 兼容性锁定（`LSMinimumSystemVersion = 11.0` + `LC_BUILD_VERSION` `minos = 11.0.0`）**：
-   - `scripts/package-macos.sh` 统一设置 `MACOSX_DEPLOYMENT_TARGET=11.0` 并为所有 `clang` 编译命令传 `-mmacosx-version-min=11.0`，同时将 `Info.plist` 的 `LSMinimumSystemVersion` 设为 `"11.0"`，并将 `Contents/MacOS/` 下全部 Mach-O 二进制的 `LC_BUILD_VERSION`（`cmd = 0x32`）归一化为 `minos = 11.0.0`、`sdk = 14.0.0`。
-   - `install.sh` 在用户机器落盘 `/Applications/Aed.app` 后，同样执行 `Info.plist` 与 Mach-O `LC_BUILD_VERSION` 归一化及本机 `codesign --force --deep --sign -` 重签名，再调用 `lsregister -f` 刷新 LaunchServices 缓存，确保在 macOS 11+ 全系列 Apple Silicon 系统上 `open /Applications/Aed.app` 均不会触发 `-10825`（`kLSIncompatibleSystemVersionErr`）。
+4. **单源打包校验与跨版本 macOS 兼容性锁定（`LSMinimumSystemVersion = 11.0` + `LC_BUILD_VERSION` `minos = 11.0.0`）**：
+   - `scripts/package-macos.sh` 是唯一的 `.app` 补丁源：统一设置 `MACOSX_DEPLOYMENT_TARGET=11.0` 并为所有 `clang` 编译命令传 `-mmacosx-version-min=11.0`，将 `Info.plist` 的 `LSMinimumSystemVersion` 设为 `"11.0"`，将 `Contents/MacOS/` 下全部 Mach-O 二进制的 `LC_BUILD_VERSION`（`cmd = 0x32`）归一化为 `minos = 11.0.0`、`sdk = 14.0.0`，签名并执行 `codesign --verify --deep --strict`。传入 `--build-only`（可配合 `--skip-tests`）时在完成 `.nsh/out/Aed.app` 构建与签名校验后直接退出，不写 `/Applications`、不调 `lsregister`/`set_default_handlers`、不打 DMG/ZIP。
+   - `install.sh` 下载已补丁的发布归档落盘 `/Applications/Aed.app` 后，仅清理扩展属性、调用系统 `codesign --force --deep --sign -` 重签名并刷新 `lsregister -f`，不再内联重复的 Mach-O / SuperBlob 补丁脚本；确保在 macOS 11+ 全系列 Apple Silicon 系统上 `open /Applications/Aed.app` 均不会触发 `-10825`（`kLSIncompatibleSystemVersionErr`）。
 
 ---
 
@@ -235,17 +241,17 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | 预览阅读排版与 TOC 强调 | Markdown 预览遵循同一套规则：阅读栏 `860px` 居中、4px 网格、无阴影/渐变；标题为 `foreground` 600 无彩色，标题下与表格用 `--border` 发丝线；行内代码 `card` 底、代码块 `sidebar` 底 + `editorFont`；引用/GFM Alerts 用 `2px` 左侧条（note→`syntax.property`、tip→`syntax.string`、important→`syntax.type`、warning→`syntax.number`、caution→`ui.accent`）；链接下划线用 `border`，悬停才升 `accent`；TOC（视口 ≥1120px 且 ≥2 个 H1–H3 才显示）唯一强调用法是当前小节 `foreground` + `2px accent` 左条 | `src/markdownPage.ts` `buildPreviewThemeCss` |
 | 只有图标的按钮有名字 | 每个只画图标的按钮都设 `accessibilityLabel`（读屏与测试的 `label:` 选择器用它）：Tab 关闭「Close <文件名>」、标题栏「Toggle sidebar」/「Toggle terminal」、侧栏「Show all files」/「Show changed files」、偏好设置「Close preferences」、图片 / PDF / Mermaid 缩放「Zoom out」/「Zoom in」、终端「New terminal tab」。新加图标按钮时同时补上并加进 `App.test.tsx` › every icon-only button has an accessible name。悬停提示（`tooltip`）尚未加，待视觉方向确定后统一做 | `App.tsx`、`src/Sidebar.tsx`、`src/PreviewPane.tsx`、`src/mermaid.tsx`、`src/TerminalPane.tsx` |
 
-**为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.3.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
+**为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.4.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
 
 ---
 
 ## 关键决定与踩坑记录（Verified Facts & Traps）
 
-1. **`nsh 0.3.0` 桌面无头测试平台参数**：
+1. **`nsh 0.4.0` 桌面无头测试平台参数**：
    - `nsh/test` 的 `open("./App.tsx")` 默认使用 `{ platform: "ios", width: 390, height: 844 }`，会禁用 `fs/promises` 与 `process`。在 `App.test.tsx` 中必须显式传入 `{ platform: "macos", width: 1280, height: 800 }`。
-2. **`process.run` / `process.spawn` 必须显式传 `{ cwd }`（`nsh 0.3.0`）**：
+2. **`process.run` / `process.spawn` 必须显式传 `{ cwd }`（`nsh 0.4.0`）**：
    - 未配置宿主 `dataDir` 时省略 `cwd` 会直接抛错；且 `cwd` 必须落在 `nsh.json` 的 `capabilities.fs.write` 授权目录内（`${homeDir}` 或 `/tmp`）。`nsh.json` 中绝不能写 `~` 或 `$HOME`，必须写 `${homeDir}`。
-3. **JSX 标签与内置控制流（`nsh 0.3.0`）**：
+3. **JSX 标签与内置控制流（`nsh 0.4.0`）**：
    - 所有组件标签必须大写开头（`<View>`、`<Text>`）；小写 HTML 标签编译失败。`<If when={...}>` 与 `<Each of={...}>` 是编译器注入的全局宏，**严禁从 `"nsh"` 导入**。
 4. **冷启动默认展示 `WelcomePanel` 开屏页，绝不自动进入旧工作区或扫描 `$HOME` / `/`，且支持随时关闭工作区返回开屏页**：
    - 早期版本在未传工作区时回退 `os.homedir()` 或自动恢复 `aed.recentWorkspaces[0]`（如历史遗留的 `data` 目录），导致每次打开 Aed 或等待 LaunchServices `odoc` 事件时总是强制跳进上次的目录页面（`EmptyEditorPanel` + 左侧文件树），无法停留在开屏页。现 `getInitialWorkspaceRoot()` 在无显式工作区（`AED_ROOT`）时返回 `""`：冷启动默认隐藏左侧文件树并渲染瑞士网格开屏页 `WelcomePanel`（`id:welcome-panel`），`Storage` 中的 `aed.recentWorkspaces` 仅在开屏页右侧 `Recent` 列表中展示供用户主动点击打开，绝不自动加载为当前工作区。
@@ -259,7 +265,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 7. **LaunchServices `_LSOpenURLsWithCompletionHandler() failed with error -10825` 兼容性坑**：
    - 在高版本 macOS SDK（如 macOS 27.0）机器上运行 `clang` 编译 `launcher.c`、`finder_bridge.m`、`set_default_handlers.m` 时，若未显式指定 `-mmacosx-version-min=11.0`，生成的 `Contents/MacOS/Aed` 主可执行文件 `LC_BUILD_VERSION` 会写入 `minos = 27.0.0`。低版本 macOS 的 LaunchServices 在执行 `open /Applications/Aed.app` 时检查主二进制 `minos` 与 `Info.plist` `LSMinimumSystemVersion`，直接报错 `-10825`（`kLSIncompatibleSystemVersionErr`）。必须在编译、打包及 `install.sh` 中将 `LSMinimumSystemVersion` 与 `LC_BUILD_VERSION.minos` 统一锁定为 `11.0`。
 
-8. **在 `effect` 的一次运行里 `process.spawn` 的子进程，会在该 `effect` 下次运行时被结束（`nsh 0.3.0` 实测）**：
+8. **在 `effect` 的一次运行里 `process.spawn` 的子进程，会在该 `effect` 下次运行时被结束（`nsh 0.4.0` 实测）**：
    - 实测：`TerminalPane` 曾在 `effect(() => { void props.cwd(); ...restart... })` 里直接重启 Shell；先拖入目录（effect 运行，Shell B 在这次运行里启动），再 `⌘⇧W` 关目录（effect 再次运行，B 已被用过，本不该重启），B 却立即退出并打印 `session ended`。`untracked` 不能解除这种归属。
    - 做法：需要在 `effect` 里启动的长寿命进程，用 `setTimeout(..., 0)` 移出这次运行再 `spawn`（`TerminalPane` `followFolder`）。事件回调（按钮、键盘、`onSubmit`）里 `spawn` 不受影响。`App.test.tsx` › a terminal the user has not typed into moves to the folder that opens 锁住此行为。
 
@@ -321,7 +327,9 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | 检查项 | 命令 | 基准指标（macOS arm64） |
 |---|---|---|
 | 类型检查 | `nsh check` | 编译 `native/` crate 加 TS 类型检查：首次约 68s，增量约 1s（`nsh 0.4.0`），0 errors |
-| 单测与桌面无头 E2E | `nsh test --trace` | 114 项（93 项 TSX + 21 项 Rust）约 2 分钟（`nsh 0.4.0`，2026-11-13 实测；多数时间花在真实 Shell 与磁盘轮询的 E2E 上；测试里的 Shell 不读用户的启动文件，见「测试 Shell 的私有目录」），覆盖 10 类文件预览、Mermaid 渲染、主题切换、Ghostty 解析、终端会话与真实 Shell |
+| 纯状态机单测 | `nsh test src/session.test.ts` | 8 项纯逻辑单测（`session.ts` + `saving.ts`），热缓存约 2.2s（JS 执行 <100ms） |
+| 原生桥接与脚本契约 | `sh scripts/test-native-bridge.sh` | `shellcheck` + `launcher.c` / `finder_bridge.m` 编译与隔离缓存目录实测（`file://#L` 编码、`foo:10:20` 无歧义剥离、符号链接安全、`home`/`loose` 窗口复用），约 2s |
+| 单测与桌面无头 E2E | `nsh test --trace` | `App.test.tsx` 86 项热缓存 38.4s（由 105.1s 提速 2.7×：共享 `TerminalSession` `/bin/sh` 替代 24 次额外窗口冷启动，手动 `clock` 替代真实磁盘轮询 sleep），加 `src/*.test.ts` 与 Rust `cargo test` |
 | libghostty-vt 固定版本 | `sh scripts/fetch-ghostty-vt.sh` | 1.0.1 zip 与 `libghostty-vt.a`（macos-arm64_x86_64）SHA-256 都对上才拷入；已有且哈希对时不下载 |
 | 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
-| 打包体积与速度 | `nsh package --target macos` | 增量打包 ~64ms，`.app` 体积 ~37 MB |
+| 仅构建与签名校验 | `sh scripts/package-macos.sh --build-only --skip-tests` | 产出 `.nsh/out/Aed.app`、注入原生桥接、归一化 `minos=11.0` 并通过 `codesign --verify --deep --strict`，不写 `/Applications` |

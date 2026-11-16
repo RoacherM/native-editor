@@ -1,6 +1,21 @@
 #!/bin/sh
 set -eu
 
+BUILD_ONLY=0
+SKIP_TESTS=0
+SET_DEFAULT=0
+for arg in "$@"; do
+  case "$arg" in
+    --build-only) BUILD_ONLY=1 ;;
+    --skip-tests) SKIP_TESTS=1 ;;
+    --set-default) SET_DEFAULT=1 ;;
+    *)
+      echo "usage: $0 [--build-only] [--skip-tests] [--set-default]" >&2
+      exit 2
+      ;;
+  esac
+done
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -15,11 +30,13 @@ if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
   SIGN_ID="-"
 fi
 
-echo "==> 1. Running nsh check, nsh test & nsh package..."
+echo "==> 1. Running nsh check, tests & nsh package..."
 rm -rf .nsh/out
 sh scripts/fetch-ghostty-vt.sh
 nsh check
-nsh test
+if [ "$SKIP_TESTS" -eq 0 ]; then
+  nsh test
+fi
 nsh package --target macos
 
 echo "==> 2. Building Finder open-file bridge, CLI launcher & UTI handler..."
@@ -162,13 +179,19 @@ for name in os.listdir(macos_dir):
             f.write(data)
 PYEOF
 
-echo "==> 4. Signing Aed.app (identity: $SIGN_ID)..."
+echo "==> 4. Signing & verifying Aed.app (identity: $SIGN_ID)..."
+xattr -cr "$APP_BUNDLE"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/libFinderBridge.dylib"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/AedCore"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/set_default_handlers"
 codesign --force --sign "$SIGN_ID" "$MACOS_DIR/Aed"
 codesign --force --deep --sign "$SIGN_ID" "$APP_BUNDLE"
-xattr -cr "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
+
+if [ "$BUILD_ONLY" -eq 1 ]; then
+  echo "==> Built and verified $APP_BUNDLE (--build-only)"
+  exit 0
+fi
 
 echo "==> 5. Installing to /Applications & registering LaunchServices..."
 rm -rf "/Applications/Native Editor.app" "/Applications/Aed.app"
@@ -182,7 +205,7 @@ if [ -x "$LSREGISTER" ]; then
 fi
 
 # Default apps change only when asked for: sh scripts/package-macos.sh --set-default
-if [ "${1:-}" = "--set-default" ]; then
+if [ "$SET_DEFAULT" -eq 1 ]; then
   "/Applications/Aed.app/Contents/MacOS/set_default_handlers"
 fi
 

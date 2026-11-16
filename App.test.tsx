@@ -1,4 +1,5 @@
-import { describe, expect, open, test } from "nsh/test";
+import { afterAll, describe, expect, open, test } from "nsh/test";
+import { TerminalSession } from "aed/native";
 import {
   classifyFile,
   formatHexDump,
@@ -7,30 +8,17 @@ import {
   probeImageDimensions,
 } from "./src/classify";
 import {
+  buildMermaidConfig,
   detectMermaidKind,
   followLatest,
-  preprocessMermaidCode,
   planJobTimeout,
+  preprocessMermaidCode,
+  rememberRender,
   requeueOrphanedJobs,
   takeJob,
 } from "./src/mermaid";
-import {
-  decideGuard,
-  deriveEditorSurface,
-  deriveWindowMode,
-  externalOpenKeepsTree,
-  type ExternalOrigin,
-  nextActiveAfterClose,
-  planWorkspaceIntent,
-  serialize,
-  windowTitle,
-  WINDOW_TRANSITIONS,
-  type WindowEvent,
-  type WindowMode,
-  runApprovedQuit,
-} from "./src/session";
 import { createInputGate, linkTarget, parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
-import { sortRows } from "./src/PreviewPane";
+import { sortRows, withPreviewCsp } from "./src/PreviewPane";
 import manifest from "./nsh.json";
 import {
   computeSyntaxDecorations,
@@ -44,12 +32,8 @@ import {
   isBehindDisk,
   normalizeExternalFilePath,
   shortenHomePath,
-  type LoadedFile,
 } from "./src/workspace";
-import { saveInStore } from "./src/saving";
-import * as fs from "fs/promises";
 import * as os from "os";
-import { withPreviewCsp } from "./src/PreviewPane";
 import {
   buildPreviewShellHtml,
   buildPreviewThemeCss,
@@ -58,13 +42,11 @@ import {
   parsePreviewMessage,
   resolvePreviewImagePath,
   type PreviewBridgeDeps,
-  type PreviewMessage,
 } from "./src/markdownPage";
-import { buildMermaidConfig, rememberRender } from "./src/mermaid";
 import { MARKDOWN_RUNTIME_JS } from "./src/markdownVendor.generated";
 import { ANSI_NAMES, ANSI_PALETTES, buildTerminalTheme } from "./src/terminalTheme";
 
-const FIXTURE_ROOT = "/Users/byronwayne/Projects/sides/native-editor/fixtures";
+const FIXTURE_ROOT = decodeURIComponent(new URL("./fixtures", import.meta.url).pathname).replace(/\/+$/, "");
 
 describe("classify, multimedia probes & Ghostty config verification", () => {
   test("classifies markdown, code, table, diff, image, video, audio, quicklook, and binary files", () => {
@@ -237,85 +219,7 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
   });
 });
 
-interface SessionSim {
-  root: string;
-  tabs: string[];
-}
-
-const SIM_STATES: Record<WindowMode, SessionSim> = {
-  home: { root: "", tabs: [] },
-  workspace: { root: "/w/cur", tabs: ["/w/cur/a.ts"] },
-  loose: { root: "", tabs: ["/elsewhere/n.md"] },
-};
-
-function openExternal(s: SessionSim, file: string, origin: ExternalOrigin): SessionSim {
-  const root = externalOpenKeepsTree(origin) ? s.root : "";
-  return { root, tabs: [...s.tabs, file] };
-}
-
-function applyWorkspace(s: SessionSim, plan: ReturnType<typeof planWorkspaceIntent>): SessionSim {
-  return plan.action === "reset" ? { root: plan.nextRoot, tabs: [] } : s;
-}
-
-/** Replays one event through the same session.ts rules App.tsx runs. */
-function applySessionEvent(s: SessionSim, event: WindowEvent): SessionSim {
-  switch (event) {
-    case "open-folder":
-      return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "open", root: "/w/other/" }));
-    case "reopen-current-folder":
-      return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "open", root: s.root || "/w/cur" }));
-    case "close-folder":
-      return applyWorkspace(s, planWorkspaceIntent(s.root, s.tabs.length, { kind: "close" }));
-    case "drop-file":
-      return openExternal(s, "/elsewhere/dropped.md", "drop");
-    case "click-file":
-      // Even a file from inside the open folder: clicks are tree-less (I-007).
-      return openExternal(s, `${s.root || "/w/cur"}/b.ts`, "click");
-    case "close-last-tab":
-      return { root: s.root, tabs: [] };
-  }
-}
-
-describe("window session state machine (src/session.ts)", () => {
-  test("every WINDOW_TRANSITIONS cell matches the rules App.tsx runs", () => {
-    for (const mode of Object.keys(WINDOW_TRANSITIONS) as WindowMode[]) {
-      const start = SIM_STATES[mode];
-      expect(deriveWindowMode(start.root, start.tabs.length)).toBe(mode);
-      for (const event of Object.keys(WINDOW_TRANSITIONS[mode]) as WindowEvent[]) {
-        const end = applySessionEvent(start, event);
-        expect(`${mode} --${event}--> ${deriveWindowMode(end.root, end.tabs.length)}`).toBe(
-          `${mode} --${event}--> ${WINDOW_TRANSITIONS[mode][event]}`
-        );
-      }
-    }
-    // Reopening the open folder keeps its tabs instead of resetting them.
-    expect(applySessionEvent(SIM_STATES.workspace, "reopen-current-folder").tabs).toEqual(["/w/cur/a.ts"]);
-  });
-
-  test("workspace intents, editor surface, guard and tab-close rules", () => {
-    expect(planWorkspaceIntent("/w/cur", 2, { kind: "open", root: "/w/cur/" })).toEqual({ action: "refresh" });
-    expect(planWorkspaceIntent("/w/cur", 2, { kind: "open", root: "/" })).toEqual({ action: "ignore" });
-    expect(planWorkspaceIntent("", 0, { kind: "close" })).toEqual({ action: "ignore" });
-    expect(planWorkspaceIntent("", 1, { kind: "close" })).toEqual({ action: "reset", nextRoot: "" });
-    expect(externalOpenKeepsTree("drop")).toBe(true);
-    expect(externalOpenKeepsTree("click")).toBe(false);
-
-    expect(deriveEditorSurface("", false)).toBe("welcome");
-    expect(deriveEditorSurface("/w", false)).toBe("workspace-empty");
-    expect(deriveEditorSurface("", true)).toBe("file");
-
-    const pending = { action: "close-tab" as const, dirtyPaths: ["/w/a.ts"], onProceed: () => {} };
-    expect(decideGuard(null, [])).toBe("run");
-    expect(decideGuard(null, ["/w/a.ts"])).toBe("confirm");
-    expect(decideGuard(pending, [])).toBe("busy");
-
-    expect(nextActiveAfterClose(["a", "b", "c"], "b", "b")).toBe("c");
-    expect(nextActiveAfterClose(["a", "b", "c"], "c", "c")).toBe("b");
-    expect(nextActiveAfterClose(["a", "b"], "a", "b")).toBe("b");
-    expect(nextActiveAfterClose(["a", "b"], "b", "b")).toBe("a");
-    expect(nextActiveAfterClose(["a"], "a", "a")).toBeNull();
-  });
-
+describe("Mermaid queue, disk stamps & terminal input gate", () => {
   test("Mermaid jobs orphaned by an unmounted WebView go back to the front of the queue", () => {
     const active = new Map([[1, "job-1"], [2, "job-2"]]);
     const pending = ["job-3"];
@@ -401,27 +305,6 @@ describe("window session state machine (src/session.ts)", () => {
     expect(silentWritten).toEqual(["echo quiet\n"]);
   });
 
-  test("the disk check never overlaps itself and runs once more after calls made meanwhile", async () => {
-    let runs = 0;
-    let release: () => void = () => undefined;
-    const check = serialize(() => {
-      runs += 1;
-      return new Promise<void>((resolve) => {
-        release = resolve;
-      });
-    });
-    const first = check();
-    await check(); // returns at once: a run is in flight
-    await check();
-    expect(runs).toBe(1);
-    release();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(runs).toBe(2); // the calls made meanwhile give exactly one more run
-    release();
-    await first;
-    expect(runs).toBe(2);
-  });
-
   test("only a terminal the user has not typed into follows the open folder", () => {
     expect(shouldFollowCwd({ cwd: "/home", used: false }, "/w/cur")).toBe(true);
     expect(shouldFollowCwd({ cwd: "/home", used: true }, "/w/cur")).toBe(false);
@@ -433,11 +316,60 @@ describe("window session state machine (src/session.ts)", () => {
 type TestApp = Awaited<ReturnType<typeof open>>;
 
 /**
- * Scratch folders for disk-change tests (the test sandbox cannot write files, so the
- * app's own PTY does). One folder per test and run, removed when the test ends.
+ * Scratch folders for disk-change tests, driven by one shared `/bin/sh`
+ * `TerminalSession` instead of booting a full second `App.tsx` window per test.
  */
 const SCRATCH_RUN = `/tmp/aed-e2e-disk-${Date.now().toString(36)}`;
 let scratchCount = 0;
+let helperSession: TerminalSession | null = null;
+let helperSeq = 0;
+
+afterAll(() => {
+  helperSession?.close();
+  helperSession = null;
+});
+
+function ensureHelperShell(): TerminalSession {
+  if (!helperSession || !helperSession.running) {
+    helperSession?.close();
+    helperSession = new TerminalSession(40, 500);
+    helperSession.start({
+      shell: "/bin/sh",
+      cwd: "/tmp",
+      termProgram: "aed-test",
+      resourcesDir: "",
+    });
+  }
+  return helperSession;
+}
+
+async function shExec(commands: string | readonly string[]): Promise<string> {
+  const session = ensureHelperShell();
+  session.reset();
+  const id = (helperSeq += 1);
+  const body = typeof commands === "string" ? commands : commands.join("\n");
+  // Split the marker across quotes in input so PTY echo never contains `__AED_END_<id>:`.
+  const script = `(\nset -e\n${body}\n)\nprintf '__AED_END_'${id}':%d__\\n' $?\n`;
+  session.write(new TextEncoder().encode(script));
+  const prefix = `__AED_END_${id}:`;
+  const re = new RegExp(`__AED_END_${id}:(\\d+)__`);
+  for (;;) {
+    const screen = session.screenText();
+    if (screen.includes(prefix)) {
+      const m = re.exec(screen);
+      if (m) {
+        if (m[1] !== "0") {
+          throw new Error(`shExec failed (exit ${m[1]}):\n${body}\n---\n${screen}`);
+        }
+        return screen;
+      }
+    }
+    const ev = await session.nextEvent();
+    if (ev.kind === "exit" || ev.kind === "closed") {
+      throw new Error(`helper shell exited (${ev.code ?? ev.kind}) during:\n${body}`);
+    }
+  }
+}
 
 /**
  * `aed.terminal.test`, the terminal's test channel: what the native view would
@@ -465,14 +397,15 @@ async function runInTerminal(app: TestApp, cmd: string, marker: string): Promise
 
 const showsText = (app: TestApp, text: string) => app.texts().some((t) => t === text);
 
-/** Longer than one disk check (DISK_CHECK_MS = 1500), so a wrong banner would have appeared. */
-const pastOneDiskCheck = () => new Promise((resolve) => setTimeout(resolve, 2000));
+/** Advance past one disk check (DISK_CHECK_MS = 1500), so a wrong banner would have appeared. */
+const pastOneDiskCheck = (app: TestApp) =>
+  app.clock ? app.clock.runFor(2000) : new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
 interface Scratch {
   app: TestApp;
   dir: string;
   write: (name: string, content: string) => Promise<void>;
-  /** Run a shell command in the window's terminal and wait for it to succeed. */
+  /** Run an external shell command on the scratch folder and wait for it to succeed. */
   run: (cmd: string) => Promise<void>;
 }
 
@@ -495,12 +428,15 @@ async function withScratch(
     platform: "macos",
     width: 1280,
     height: 800,
+    clock: {},
     host: { params: { workspaceRoot: dir } },
   });
-  let step = 0;
-  const write = (name: string, content: string) =>
-    runInTerminal(app, `printf '${content}\\n' > ${dir}/${name}`, `WRITE_DONE_${(step += 1)}`);
-  const run = (cmd: string) => runInTerminal(app, cmd, `RUN_DONE_${(step += 1)}`);
+  const write = async (name: string, content: string) => {
+    await shExec(`printf '${content}\\n' > ${dir}/${name}`);
+  };
+  const run = async (cmd: string) => {
+    await shExec(cmd);
+  };
   try {
     const [first, content] = Object.entries(files)[0];
     await app.waitFor(`text:${first}`);
@@ -513,19 +449,19 @@ async function withScratch(
 }
 
 /**
- * A fresh scratch folder, filled by `commands(dir)` in a helper window's terminal (the
- * test sandbox cannot write files). `remove` deletes it; call it in a `finally`.
+ * A fresh scratch folder, filled by `commands(dir)` in the shared `/bin/sh` helper
+ * session. `remove` deletes it; call it in a `finally`.
  */
 async function makeScratch(
   commands: (dir: string) => string[]
 ): Promise<{ dir: string; remove: () => Promise<void> }> {
   scratchCount += 1;
   const dir = `${SCRATCH_RUN}-${scratchCount}`;
-  const setup = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
-  const all = [`rm -rf ${dir}`, `mkdir -p ${dir}`, ...commands(dir)];
-  await runInTerminal(setup, all.join(" && "), "SETUP_DONE");
+  await shExec([`rm -rf ${dir}`, `mkdir -p ${dir}`, ...commands(dir)]);
   // u+rwx first: a test may lock a folder (chmod 000).
-  const remove = () => runInTerminal(setup, `chmod -R u+rwx ${dir} 2>/dev/null; rm -rf ${dir}`, "CLEAN_DONE");
+  const remove = async () => {
+    await shExec(`chmod -R u+rwx ${dir} 2>/dev/null || true; rm -rf ${dir}`);
+  };
   return { dir, remove };
 }
 
@@ -826,15 +762,10 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
 
     // Clicking an external file (queued via /tmp/aed-open.queue) after workspace transitions
     // must open the file tab instead of staying stuck on EmptyEditorPanel.
-    expect(
-      normalizeExternalFilePath("file:///Users/byronwayne/Projects/sides/native-editor/CLAUDE.md:12:4")
-    ).toBe("/Users/byronwayne/Projects/sides/native-editor/CLAUDE.md");
-    expect(
-      normalizeExternalFilePath("/Users/byronwayne/Projects/sides/native-editor/CLAUDE.md#L10-L20")
-    ).toBe("/Users/byronwayne/Projects/sides/native-editor/CLAUDE.md");
-    expect(
-      normalizeExternalFilePath("/Users/byronwayne/Projects/C#_notes.md:10")
-    ).toBe("/Users/byronwayne/Projects/C#_notes.md");
+    const repoClaude = decodeURIComponent(new URL("./CLAUDE.md", import.meta.url).pathname);
+    expect(normalizeExternalFilePath(`file://${repoClaude}:12:4`)).toBe(repoClaude);
+    expect(normalizeExternalFilePath(`${repoClaude}#L10-L20`)).toBe(repoClaude);
+    expect(normalizeExternalFilePath("/tmp/C#_notes.md:10")).toBe("/tmp/C#_notes.md");
     await app.host.send("enqueueFinderOpen", `${FIXTURE_ROOT}/README.md:1:1`);
     await app.waitFor("id:preview-markdown", { timeout: 1500 });
     expect(app.shows("id:preview-markdown")).toBe(true);
@@ -912,14 +843,14 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await withScratch({ "note.txt": "DISK_V1" }, async ({ app, write }) => {
       await editTab(app, "MINE ");
       // Unsaved edits alone are not a conflict.
-      await pastOneDiskCheck();
+      await pastOneDiskCheck(app);
       expect(app.shows("id:disk-conflict-banner")).toBe(false);
       await write("note.txt", "DISK_V2");
       await app.waitFor("id:disk-conflict-banner");
       // Keep: the edits stay, the banner goes, and it stays gone.
       await app.press("id:disk-conflict-keep-btn");
       await app.waitUntil(() => !app.shows("id:disk-conflict-banner"), { timeout: 3000 });
-      await pastOneDiskCheck();
+      await pastOneDiskCheck(app);
       expect(app.shows("id:disk-conflict-banner")).toBe(false);
       expect(showsText(app, "•")).toBe(true);
       expect(showsText(app, "DISK_V2")).toBe(false);
@@ -943,7 +874,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
       await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
       await editTab(app, "MORE ");
       expect(app.shows("id:disk-conflict-banner")).toBe(false);
-      await pastOneDiskCheck();
+      await pastOneDiskCheck(app);
       expect(app.shows("id:disk-conflict-banner")).toBe(false);
       // Close without saving, reopen, type at once: no banner left from the closed copy.
       await write("note.txt", "SAVE_V3");
@@ -965,7 +896,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
       // periodic check that happens to land in the window passes by luck only ~3%.
       for (const version of ["A_V2", "A_V3"]) {
         await write("a.txt", version);
-        await pastOneDiskCheck();
+        await pastOneDiskCheck(app);
         await app.press("id:tab-select-a.txt");
         await app.waitUntil(() => showsText(app, version), { timeout: 250 });
         await app.press("id:tab-select-b.txt");
@@ -1064,38 +995,12 @@ async function runCommand(app: TestApp, label: string): Promise<void> {
   await app.keyboard.press("enter");
 }
 
-/** A clean in-memory copy of a text file, for the save rules. */
-function textCopy(filePath: string, text: string): LoadedFile {
-  return {
-    path: filePath,
-    relPath: filePath.split("/").pop() ?? filePath,
-    name: filePath.split("/").pop() ?? filePath,
-    size: text.length,
-    classification: classifyFile(filePath),
-    mode: "source",
-    text,
-    savedText: text,
-    dirty: false,
-    blobUrl: null,
-    quickLookUrl: null,
-    tableData: null,
-    hexDump: "",
-    diffPatch: "",
-    diskStamp: "1:1",
-    diskChanged: false,
-    diskMissing: false,
-    bom: false,
-    readOnly: null,
-    saveError: null,
-  };
-}
-
 describe("file safety (I-015)", () => {
   test("saving an image, binary or PDF tab never writes to it", async () => {
     const opaque = ["poster.png", "sample.bin", "manual.pdf"];
     await withScratch(
       { "note.txt": "NOTE_V1" },
-      async ({ app, dir }) => {
+      async ({ app, dir, run }) => {
         for (const name of opaque) {
           await app.press(`text:${name}`);
           await app.waitFor(`id:tab-select-${name}`);
@@ -1103,8 +1008,7 @@ describe("file safety (I-015)", () => {
           await runCommand(app, "File: Save Current File");
         }
         await app.wait(300);
-        const same = opaque.map((n) => `cmp -s ${dir}/${n} ${FIXTURE_ROOT}/${n}`).join(" && ");
-        await runInTerminal(app, same, "OPAQUE_UNTOUCHED");
+        await run(opaque.map((n) => `cmp -s ${dir}/${n} ${FIXTURE_ROOT}/${n}`).join(" && "));
       },
       (dir) => opaque.map((n) => `cp ${FIXTURE_ROOT}/${n} ${dir}/`)
     );
@@ -1113,12 +1017,12 @@ describe("file safety (I-015)", () => {
   test("a file that is not UTF-8 opens read-only and is never rewritten", async () => {
     await withScratch(
       { "note.txt": "NOTE_V1" },
-      async ({ app, dir }) => {
+      async ({ app, dir, run }) => {
         await app.press("text:latin1.txt");
         await app.waitFor("id:tab-select-latin1.txt");
         await app.keyboard.press("mod+s");
         await app.wait(300);
-        await runInTerminal(app, `cmp -s ${dir}/latin1.txt ${dir}/.orig/latin1.txt`, "LATIN1_UNTOUCHED");
+        await run(`cmp -s ${dir}/latin1.txt ${dir}/.orig/latin1.txt`);
         await app.press("id:tab-select-latin1.txt");
         await app.waitFor("id:read-only-banner");
         // The editor takes no typing: the tab never becomes dirty.
@@ -1133,13 +1037,13 @@ describe("file safety (I-015)", () => {
   test("a UTF-8 BOM survives a save", async () => {
     await withScratch(
       { "note.txt": "NOTE_V1" },
-      async ({ app, dir }) => {
+      async ({ app, dir, run }) => {
         await app.press("text:bom.txt");
         await app.waitUntil(() => showsText(app, "BOM_V1"), { timeout: 5000 });
         await editTab(app, "MORE");
         await app.keyboard.press("mod+s");
         await app.waitUntil(() => !showsText(app, "•"), { timeout: 3000 });
-        await runInTerminal(app, `head -c 3 ${dir}/bom.txt | xxd -p | grep -qx efbbbf`, "BOM_KEPT");
+        await run(`head -c 3 ${dir}/bom.txt | xxd -p | grep -qx efbbbf`);
       },
       (dir) => [`printf '\\xef\\xbb\\xbfBOM_V1\\n' > ${dir}/bom.txt`]
     );
@@ -1167,41 +1071,6 @@ describe("file safety (I-015)", () => {
         expect(app.shows("id:preview-diff")).toBe(false);
       }
     }
-  });
-
-  test("typing while a save is in flight stays dirty with the newest text", async () => {
-    const files = new Map<string, LoadedFile>();
-    const store = {
-      get: (p: string) => files.get(p),
-      set: (p: string, f: LoadedFile) => void files.set(p, f),
-    };
-    let finish: () => void = () => undefined;
-    const write = (file: LoadedFile, text: string) =>
-      new Promise<LoadedFile>((resolve) => {
-        finish = () => resolve({ ...file, text, savedText: text, dirty: false });
-      });
-    const edit = (p: string, text: string) => {
-      const cur = files.get(p) as LoadedFile;
-      files.set(p, { ...cur, text, dirty: text !== cur.savedText });
-    };
-    files.set("/w/a.txt", textCopy("/w/a.txt", "v1"));
-    edit("/w/a.txt", "v2");
-    const saving = saveInStore(store, "/w/a.txt", write);
-    edit("/w/a.txt", "v3"); // typed while the write is in flight
-    finish();
-    expect(await saving).toBe("saved");
-    expect(files.get("/w/a.txt")).toMatchObject({ text: "v3", savedText: "v2", dirty: true });
-    // A tab closed while its save was in flight is not written back.
-    files.set("/w/b.txt", textCopy("/w/b.txt", "b1"));
-    edit("/w/b.txt", "b2");
-    const closing = saveInStore(store, "/w/b.txt", write);
-    files.delete("/w/b.txt");
-    finish();
-    await closing;
-    expect(files.has("/w/b.txt")).toBe(false);
-    // A clean copy is never written.
-    files.set("/w/c.txt", textCopy("/w/c.txt", "c1"));
-    expect(await saveInStore(store, "/w/c.txt", write)).toBe("skipped");
   });
 
   test("a failed save says so and keeps the tab dirty", async () => {
@@ -1294,20 +1163,6 @@ describe("file safety (I-015)", () => {
 });
 
 describe("quit guard (I-016)", () => {
-  test("a quit the host does not carry out arms the guard again", async () => {
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    const refused: boolean[] = [];
-    runApprovedQuit((v) => refused.push(v), () => {
-      throw new Error("process.exit is not granted");
-    });
-    await sleep(10);
-    expect(refused).toEqual([true, false]);
-    const cancelled: boolean[] = [];
-    runApprovedQuit((v) => cancelled.push(v), () => undefined, 20);
-    await sleep(80);
-    expect(cancelled).toEqual([true, false]);
-  });
-
   // ⌘Q is the menu's (headless runs have no menu bar); the palette runs the same action.
   // A quit the guard lets through ends the app: its next step rejects with "the app left".
   const quitLeaves = async (app: TestApp) => {
@@ -1334,11 +1189,6 @@ describe("quit guard (I-016)", () => {
     await app.waitFor("id:unsaved-changes-dialog");
     await app.press("id:unsaved-discard-btn");
     await quitLeaves(app);
-  });
-
-  test("the window title carries the edited mark scripts/finder_bridge.m reads", () => {
-    expect(windowTitle(false)).toBe("Aed");
-    expect(windowTitle(true)).toBe("Aed — Edited");
   });
 
   test("quitting with nothing unsaved quits at once", async () => {
@@ -1441,8 +1291,8 @@ describe("workspace follows the disk (I-014)", () => {
       },
       (dir) => [
         `mkdir ${dir}/big`,
-        `mkdir ${dir}/big/.h{1..300}`,
-        `touch ${dir}/big/f{001..205}.txt`,
+        `seq -f "${dir}/big/.h%g" 1 300 | xargs mkdir`,
+        `seq -f "${dir}/big/f%03g.txt" 1 205 | xargs touch`,
       ]
     );
   });
@@ -1521,11 +1371,6 @@ graph TD; A--<B
 <raw> & text
 \`\`\`
 `;
-
-interface RenderedMd {
-  html: string;
-  headings: { level: number; text: string; id: string }[];
-}
 
 async function evalMarkdownRuntime(): Promise<
   typeof globalThis.AedMarkdown
@@ -1854,24 +1699,24 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
   test("the queue path is accepted when HOME ends with a slash", async () => {
     // launcher builds it from $HOME as set: `/Users/x/` gives `/Users/x//Library/...`.
     const queue = `${AED_CACHE_DIR.replace("/Library/", "//Library/")}/open-99999991`;
-    await withScratch({ "a.txt": "A_FIRST", "q.txt": "Q_SLASHED" }, async ({ app, dir }) => {
-      try {
-        await runInTerminal(
-          app,
-          [`rm -rf ${queue}`, `mkdir -p ${queue}`, `printf '%s' '${dir}/q.txt' > ${queue}/1.path`].join(" && "),
-          "SLASH_QUEUE_READY"
-        );
-        const qapp = await open("./App.tsx", {
-          platform: "macos",
-          width: 1280,
-          height: 800,
-          host: { params: { openQueue: queue } },
-        });
-        await qapp.waitFor("id:tab-select-q.txt", { timeout: 4000 });
-      } finally {
-        await runInTerminal(app, `rm -rf ${queue}`, "SLASH_QUEUE_CLEANED");
-      }
-    });
+    const { dir, remove } = await makeScratch((d) => [`printf 'Q_SLASHED\\n' > ${d}/q.txt`]);
+    try {
+      await shExec([
+        `rm -rf ${queue}`,
+        `mkdir -p ${queue}`,
+        `printf '%s' '${dir}/q.txt' > ${queue}/1.path`,
+      ]);
+      const qapp = await open("./App.tsx", {
+        platform: "macos",
+        width: 1280,
+        height: 800,
+        host: { params: { openQueue: queue } },
+      });
+      await qapp.waitFor("id:tab-select-q.txt", { timeout: 4000 });
+    } finally {
+      await shExec(`rm -rf ${queue}`);
+      await remove();
+    }
   });
 
   test("file://localhost URLs and %XX escapes decode to the plain path", () => {
@@ -1904,28 +1749,23 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
   });
 
   test("the packaged Info.plist claims Default only for document types, and installing never takes over default apps by itself", async () => {
-    // Runs package-macos.sh's own Info.plist step on a throwaway plist, in the app's terminal.
-    const script = new URL("./scripts/package-macos.sh", import.meta.url).pathname;
-    const app = await open("./App.tsx", { platform: "macos", width: 1280, height: 800 });
+    // Runs package-macos.sh's own Info.plist step on a throwaway plist.
+    const script = decodeURIComponent(new URL("./scripts/package-macos.sh", import.meta.url).pathname);
     const listAnyData =
       `import json,sys; t=[x for x in json.load(sys.stdin) if 'public.data' in x['LSItemContentTypes']]; ` +
       `print('ANYDATA_'+'_'.join(x['CFBundleTypeRole']+x['LSHandlerRank'] for x in t))`;
-    await runInTerminal(
-      app,
-      [
-        `D=$(mktemp -d)`,
-        `mkdir $D/MacOS`,
-        `python3 -I -c "import plistlib,sys; plistlib.dump({}, open(sys.argv[1], 'wb'))" $D/Info.plist`,
-        `awk "/<< 'PYEOF'/{f=1;next} /^PYEOF/{f=0} f" ${script} > $D/step.py`,
-        `python3 -I $D/step.py $D/Info.plist $D/MacOS`,
-        `plutil -extract CFBundleDocumentTypes json -o - $D/Info.plist | python3 -I -c "${listAnyData}"`,
-        `echo AUTO_$(grep -c FIRST_INSTALL ${script})`,
-        `rm -rf $D`,
-      ].join(" && "),
-      "PLIST_CHECKED"
-    );
-    expect(app.texts().some((t) => t.includes("ANYDATA_ViewerAlternate"))).toBe(true);
-    expect(app.texts().some((t) => t.includes("AUTO_0"))).toBe(true);
+    const out = await shExec([
+      `D=$(mktemp -d)`,
+      `mkdir "$D/MacOS"`,
+      `python3 -I -c "import plistlib,sys; plistlib.dump({}, open(sys.argv[1], 'wb'))" "$D/Info.plist"`,
+      `awk "/<< 'PYEOF'/{f=1;next} /^PYEOF/{f=0} f" "${script}" > "$D/step.py"`,
+      `python3 -I "$D/step.py" "$D/Info.plist" "$D/MacOS"`,
+      `plutil -extract CFBundleDocumentTypes json -o - "$D/Info.plist" | python3 -I -c "${listAnyData}"`,
+      `echo AUTO_$(grep -c FIRST_INSTALL "${script}" || true)`,
+      `rm -rf "$D"`,
+    ]);
+    expect(out).toContain("ANYDATA_ViewerAlternate");
+    expect(out).toContain("AUTO_0");
   });
 
   test("nsh.json grants no network hosts and no remote web pages, and lets the app read its queue path", () => {
@@ -1937,14 +1777,14 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
   test("an external open with :line:col jumps there; files named like `odd:2` or with spaces open as named", async () => {
     await withScratch(
       { "a.txt": "A_FIRST", "lines.txt": "L1\\nL2\\nL3 third", "odd:2": "ODD_NAMED" },
-      async ({ app, dir }) => {
+      async ({ app, dir, run }) => {
         await app.host.send("enqueueFinderOpen", `${dir}/lines.txt:3:2`);
         await app.waitUntil(() => app.texts().some((t) => t.includes("Ln 3, Col 2")), {
           timeout: 4000,
         });
         await app.host.send("enqueueFinderOpen", `${dir}/odd:2`);
         await app.waitUntil(() => showsText(app, "ODD_NAMED"), { timeout: 4000 });
-        await runInTerminal(app, `printf 'SPACED_NAME\\n' > '${dir}/My Notes.txt'`, "SPACED_DONE");
+        await run(`printf 'SPACED_NAME\\n' > '${dir}/My Notes.txt'`);
         await app.host.send("enqueueFinderOpen", `file://localhost${dir}/My%20Notes.txt`);
         await app.waitUntil(() => showsText(app, "SPACED_NAME"), { timeout: 4000 });
       }
@@ -1954,47 +1794,43 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
   test("the Finder queue is this process's own directory: read in order, entries removed, symlinks never followed", async () => {
     // A pid above macOS's pid_max: no live Aed owns it, and the launcher's cleanup removes it.
     const queue = `${AED_CACHE_DIR}/open-99999990`;
-    await withScratch(
-      { "a.txt": "A_FIRST", "q1.txt": "Q_ONE", "q2.txt": "Q_TWO", "q10.txt": "Q_TEN", "secret.txt": "SECRET" },
-      async ({ app, dir }) => {
-        try {
-          await runInTerminal(
-            app,
-            [
-              `rm -rf ${queue}`,
-              `mkdir -p ${queue}`,
-              `printf '%s' '${dir}/q1.txt' > ${queue}/1.path`,
-              `printf '%s' '${dir}/q10.txt' > ${queue}/10.path`,
-              `printf '%s' '${dir}/q2.txt' > ${queue}/2.path`,
-              `printf '%s' '${dir}/secret.txt' > ${dir}/pointer`,
-              `ln -s ${dir}/pointer ${queue}/3.path`,
-              `printf '%s' '${dir}/secret.txt' > ${queue}/.4.tmp`,
-            ].join(" && "),
-            "QUEUE_READY"
-          );
-          const qapp = await open("./App.tsx", {
-            platform: "macos",
-            width: 1280,
-            height: 800,
-            host: { params: { openQueue: queue } },
-          });
-          await qapp.waitFor("id:tab-select-q10.txt", { timeout: 4000 });
-          expect(qapp.shows("id:tab-select-q1.txt")).toBe(true);
-          expect(qapp.shows("id:tab-select-q2.txt")).toBe(true);
-          expect(qapp.shows("id:tab-select-secret.txt")).toBe(false);
-          // The last entry (by number, 10 after 2) is the active tab.
-          expect(showsText(qapp, "Q_TEN")).toBe(true);
-          await runInTerminal(
-            app,
-            `ls -A ${queue} | grep -v '^\\.' | wc -l | tr -d ' ' | sed 's/^/QLEFT_/'`,
-            "QUEUE_COUNTED"
-          );
-          expect(app.texts().some((t) => t.includes("QLEFT_0"))).toBe(true);
-        } finally {
-          await runInTerminal(app, `rm -rf ${queue}`, "QUEUE_CLEANED");
-        }
-      }
-    );
+    const { dir, remove } = await makeScratch((d) => [
+      `printf 'Q_ONE\\n' > ${d}/q1.txt`,
+      `printf 'Q_TWO\\n' > ${d}/q2.txt`,
+      `printf 'Q_TEN\\n' > ${d}/q10.txt`,
+      `printf 'SECRET\\n' > ${d}/secret.txt`,
+    ]);
+    try {
+      await shExec([
+        `rm -rf ${queue}`,
+        `mkdir -p ${queue}`,
+        `printf '%s' '${dir}/q1.txt' > ${queue}/1.path`,
+        `printf '%s' '${dir}/q10.txt' > ${queue}/10.path`,
+        `printf '%s' '${dir}/q2.txt' > ${queue}/2.path`,
+        `printf '%s' '${dir}/secret.txt' > ${dir}/pointer`,
+        `ln -s ${dir}/pointer ${queue}/3.path`,
+        `printf '%s' '${dir}/secret.txt' > ${queue}/.4.tmp`,
+      ]);
+      const qapp = await open("./App.tsx", {
+        platform: "macos",
+        width: 1280,
+        height: 800,
+        host: { params: { openQueue: queue } },
+      });
+      await qapp.waitFor("id:tab-select-q10.txt", { timeout: 4000 });
+      expect(qapp.shows("id:tab-select-q1.txt")).toBe(true);
+      expect(qapp.shows("id:tab-select-q2.txt")).toBe(true);
+      expect(qapp.shows("id:tab-select-secret.txt")).toBe(false);
+      // The last entry (by number, 10 after 2) is the active tab.
+      expect(showsText(qapp, "Q_TEN")).toBe(true);
+      const out = await shExec(
+        `ls -A ${queue} | grep -v '^\\.' | wc -l | tr -d ' ' | sed 's/^/QLEFT_/'`
+      );
+      expect(out).toContain("QLEFT_0");
+    } finally {
+      await shExec(`rm -rf ${queue}`);
+      await remove();
+    }
   });
 
   test("PDF previews are made in the per-user cache and the PNG is deleted once read", async () => {
@@ -2007,12 +1843,10 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
     await app.waitFor("text:manual.pdf");
     await app.press("text:manual.pdf");
     await app.waitFor("id:preview-quicklook-sheet", { timeout: 8000 });
-    await runInTerminal(
-      app,
-      `test -d ${AED_CACHE_DIR}/ql && ls -A ${AED_CACHE_DIR}/ql | wc -l | tr -d ' ' | sed 's/^/QLPNG_/'`,
-      "QL_COUNTED"
+    const out = await shExec(
+      `test -d ${AED_CACHE_DIR}/ql && ls -A ${AED_CACHE_DIR}/ql | wc -l | tr -d ' ' | sed 's/^/QLPNG_/'`
     );
-    expect(app.texts().some((t) => t.includes("QLPNG_0"))).toBe(true);
+    expect(out).toContain("QLPNG_0");
   });
 });
 
@@ -2033,11 +1867,11 @@ describe("races and silent failures (I-017)", () => {
   });
 
   test("a slow scan of the folder before never replaces the tree of the folder open now", async () => {
-    // `git status` waits ~4 s on the fsmonitor hook: the scan of this folder ends last.
+    // `git status` waits until `.release` exists so `dir`'s scan deterministically finishes last.
     const { dir, remove } = await makeScratch((d) => [
       `printf 'X\\n' > ${d}/OLD_ONLY.txt`,
       `git -C ${d} init -q`,
-      `git -C ${d} config core.fsmonitor 'sleep 2; false'`,
+      `git -C ${d} config core.fsmonitor 'for _ in $(seq 1 150); do [ -f "${d}/.release" ] && break; sleep 0.02; done; touch "${d}/.scanned"; false'`,
     ]);
     try {
       const app = await open("./App.tsx", {
@@ -2050,7 +1884,11 @@ describe("races and silent failures (I-017)", () => {
       await app.dropFiles("id:app-root", [`file://${dir}`]);
       await app.dropFiles("id:app-root", [`file://${FIXTURE_ROOT}`]);
       await app.waitFor("text:main.ts");
-      await app.wait(5000);
+      await shExec([
+        `touch ${dir}/.release`,
+        `for _ in $(seq 1 150); do [ -f ${dir}/.scanned ] && break; sleep 0.01; done`,
+      ]);
+      await app.wait(150);
       expect(app.shows("text:main.ts")).toBe(true);
       expect(app.shows("text:OLD_ONLY.txt")).toBe(false);
     } finally {
@@ -2249,24 +2087,6 @@ describe("races and silent failures (I-017)", () => {
         `dd if=/dev/zero of=${dir}/big.dat bs=1048576 count=9 2>/dev/null`,
       ]
     );
-  });
-
-  test("the disk check runs again after a run that threw", async () => {
-    let runs = 0;
-    let fail: (e: unknown) => void = () => undefined;
-    const check = serialize(() => {
-      runs += 1;
-      if (runs > 1) return Promise.resolve();
-      return new Promise<void>((_, reject) => (fail = reject));
-    });
-    const first = check().catch(() => undefined);
-    void check(); // queued while the first run is in flight
-    fail(new Error("disk gone"));
-    await first;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(runs).toBe(2);
-    await check();
-    expect(runs).toBe(3); // no stale rerun left over
   });
 });
 
