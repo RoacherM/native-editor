@@ -19,6 +19,26 @@ export type FileKind =
 
 export type PreviewMode = "preview" | "source" | "diff";
 
+export type ViewerIoStrategy = "text" | "bytes" | "stat";
+
+export interface ViewerModeContext {
+  mimeType: string;
+  editable: boolean;
+  hasDiff: boolean;
+  currentMode?: PreviewMode;
+}
+
+export interface ViewerSpec {
+  io: ViewerIoStrategy;
+  editable: boolean;
+  canPrewarm: boolean;
+  hasRichPreview: boolean;
+  rawModeLabel: "Markdown" | "Code";
+  defaultMode: PreviewMode;
+  badge: string;
+  modes(ctx: ViewerModeContext): PreviewMode[];
+}
+
 export interface ImageDimensions {
   width: number;
   height: number;
@@ -35,9 +55,237 @@ export interface FileClassification {
   kind: FileKind;
   language: string;
   defaultMode: PreviewMode;
-  supportsPreview: boolean;
   mimeType: string;
 }
+
+export interface LruCache<K, V> {
+  get(key: K): V | undefined;
+  set(key: K, value: V): void;
+  has(key: K): boolean;
+  delete(key: K): boolean;
+  clear(): void;
+  readonly size: number;
+}
+
+function lruGet<K, V>(map: Map<K, V>, key: K): V | undefined {
+  if (!map.has(key)) return undefined;
+  const val = map.get(key)!;
+  map.delete(key);
+  map.set(key, val);
+  return val;
+}
+
+function lruTrim<K, V>(
+  map: Map<K, V>,
+  max: number,
+  onEvict?: (key: K, value: V) => void,
+): void {
+  while (map.size > max) {
+    const oldest = map.entries().next();
+    if (oldest.done) break;
+    const [oldKey, oldVal] = oldest.value;
+    map.delete(oldKey);
+    onEvict?.(oldKey, oldVal);
+  }
+}
+
+function lruSet<K, V>(
+  map: Map<K, V>,
+  max: number,
+  key: K,
+  value: V,
+  onEvict?: (key: K, value: V) => void,
+): void {
+  if (max <= 0) {
+    if (map.has(key)) lruDelete(map, key, onEvict);
+    onEvict?.(key, value);
+    return;
+  }
+  if (map.has(key)) {
+    const prev = map.get(key)!;
+    map.delete(key);
+    map.set(key, value);
+    if (!Object.is(prev, value)) onEvict?.(key, prev);
+    return;
+  }
+  map.set(key, value);
+  lruTrim(map, max, onEvict);
+}
+
+function lruDelete<K, V>(
+  map: Map<K, V>,
+  key: K,
+  onEvict?: (key: K, value: V) => void,
+): boolean {
+  if (!map.has(key)) return false;
+  const val = map.get(key)!;
+  map.delete(key);
+  onEvict?.(key, val);
+  return true;
+}
+
+function lruClear<K, V>(
+  map: Map<K, V>,
+  onEvict?: (key: K, value: V) => void,
+): void {
+  const entries = onEvict ? [...map.entries()] : [];
+  map.clear();
+  for (const [k, v] of entries) onEvict!(k, v);
+}
+
+/** Minimal Map-backed bounded LRU cache with deterministic eviction disposal. */
+export function createLruCache<K, V>(
+  max: number,
+  onEvict?: (key: K, value: V) => void,
+): LruCache<K, V> {
+  const map = new Map<K, V>();
+  return {
+    get: (key) => lruGet(map, key),
+    set: (key, value) => lruSet(map, max, key, value, onEvict),
+    has: (key) => map.has(key),
+    delete: (key) => lruDelete(map, key, onEvict),
+    clear: () => lruClear(map, onEvict),
+    get size(): number {
+      return map.size;
+    },
+  };
+}
+
+function codeModes(ctx: ViewerModeContext): PreviewMode[] {
+  return ctx.hasDiff || ctx.currentMode === "diff" ? ["source", "diff"] : ["source"];
+}
+
+function richModes(ctx: ViewerModeContext): PreviewMode[] {
+  return ctx.hasDiff || ctx.currentMode === "diff"
+    ? ["preview", "source", "diff"]
+    : ["preview", "source"];
+}
+
+function imageModes(ctx: ViewerModeContext): PreviewMode[] {
+  return ctx.mimeType === "image/svg+xml" ? richModes(ctx) : ["preview"];
+}
+
+function diffModes(): PreviewMode[] {
+  return ["diff", "source"];
+}
+
+function opaqueModes(): PreviewMode[] {
+  return ["preview"];
+}
+
+/** Single source of truth for per-FileKind I/O, prewarm, mode pills, and default badges. */
+export const VIEWER_SPECS: Readonly<Record<FileKind, ViewerSpec>> = {
+  code: {
+    io: "text",
+    editable: true,
+    canPrewarm: true,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "source",
+    badge: "≡",
+    modes: codeModes,
+  },
+  markdown: {
+    io: "text",
+    editable: true,
+    canPrewarm: true,
+    hasRichPreview: true,
+    rawModeLabel: "Markdown",
+    defaultMode: "preview",
+    badge: "M↓",
+    modes: richModes,
+  },
+  mermaid: {
+    io: "text",
+    editable: true,
+    canPrewarm: false,
+    hasRichPreview: true,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "M◇",
+    modes: richModes,
+  },
+  html: {
+    io: "text",
+    editable: true,
+    canPrewarm: false,
+    hasRichPreview: true,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "<>",
+    modes: richModes,
+  },
+  table: {
+    io: "text",
+    editable: true,
+    canPrewarm: false,
+    hasRichPreview: true,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "⊞",
+    modes: richModes,
+  },
+  diff: {
+    io: "text",
+    editable: true,
+    canPrewarm: false,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "diff",
+    badge: "±",
+    modes: diffModes,
+  },
+  image: {
+    io: "bytes",
+    editable: false,
+    canPrewarm: false,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "IMG",
+    modes: imageModes,
+  },
+  video: {
+    io: "stat",
+    editable: false,
+    canPrewarm: false,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "VID",
+    modes: opaqueModes,
+  },
+  audio: {
+    io: "stat",
+    editable: false,
+    canPrewarm: false,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "AUD",
+    modes: opaqueModes,
+  },
+  quicklook: {
+    io: "stat",
+    editable: false,
+    canPrewarm: false,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "PDF",
+    modes: opaqueModes,
+  },
+  binary: {
+    io: "bytes",
+    editable: false,
+    canPrewarm: false,
+    hasRichPreview: false,
+    rawModeLabel: "Code",
+    defaultMode: "preview",
+    badge: "≡",
+    modes: opaqueModes,
+  },
+};
 
 /**
  * A cell that reads as a number (spaces around it allowed) becomes one, so a table
@@ -158,117 +406,132 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   log: "plaintext",
 };
 
-/** Build a classification record from its parts. */
-function rule(
-  kind: FileKind,
-  language: string,
-  defaultMode: PreviewMode,
-  supportsPreview: boolean,
-  mimeType: string,
-): FileClassification {
-  return { kind, language, defaultMode, supportsPreview, mimeType };
+const CODE_BADGE_BY_LANGUAGE: Record<string, string> = {
+  typescript: "TS",
+  tsx: "TS",
+  javascript: "JS",
+  jsx: "JS",
+  json: "{}",
+};
+
+/** Build a classification record from its kind, language, and MIME type. */
+function rule(kind: FileKind, language: string, mimeType: string): FileClassification {
+  return { kind, language, defaultMode: VIEWER_SPECS[kind].defaultMode, mimeType };
 }
 
 /** Extensions whose preview is decided before the NUL-byte binary check. */
 const EXTENSION_RULES: Record<string, FileClassification> = {
   // Markdown documents.
-  md: rule("markdown", "markdown", "preview", true, "text/markdown"),
-  markdown: rule("markdown", "markdown", "preview", true, "text/markdown"),
-  mdx: rule("markdown", "markdown", "preview", true, "text/markdown"),
+  md: rule("markdown", "markdown", "text/markdown"),
+  markdown: rule("markdown", "markdown", "text/markdown"),
+  mdx: rule("markdown", "markdown", "text/markdown"),
   // Standalone Mermaid diagram files.
-  mmd: rule("mermaid", "mermaid", "preview", true, "text/vnd.mermaid"),
-  mermaid: rule("mermaid", "mermaid", "preview", true, "text/vnd.mermaid"),
+  mmd: rule("mermaid", "mermaid", "text/vnd.mermaid"),
+  mermaid: rule("mermaid", "mermaid", "text/vnd.mermaid"),
   // HTML pages.
-  html: rule("html", "html", "preview", true, "text/html"),
-  htm: rule("html", "html", "preview", true, "text/html"),
+  html: rule("html", "html", "text/html"),
+  htm: rule("html", "html", "text/html"),
   // Table data.
-  csv: rule("table", "csv", "preview", true, "text/csv"),
-  tsv: rule("table", "tsv", "preview", true, "text/tab-separated-values"),
-  jsonl: rule("table", "jsonl", "preview", true, "application/x-ndjson"),
+  csv: rule("table", "csv", "text/csv"),
+  tsv: rule("table", "tsv", "text/tab-separated-values"),
+  jsonl: rule("table", "jsonl", "application/x-ndjson"),
+  ndjson: rule("table", "jsonl", "application/x-ndjson"),
   // Diffs and patches.
-  diff: rule("diff", "diff", "diff", true, "text/x-diff"),
-  patch: rule("diff", "diff", "diff", true, "text/x-diff"),
+  diff: rule("diff", "diff", "text/x-diff"),
+  patch: rule("diff", "diff", "text/x-diff"),
   // Images and vector graphics.
-  png: rule("image", "", "preview", true, "image/png"),
-  jpg: rule("image", "", "preview", true, "image/jpeg"),
-  jpeg: rule("image", "", "preview", true, "image/jpeg"),
-  gif: rule("image", "", "preview", true, "image/gif"),
-  webp: rule("image", "", "preview", true, "image/webp"),
-  avif: rule("image", "", "preview", true, "image/avif"),
-  heic: rule("image", "", "preview", true, "image/heic"),
-  heif: rule("image", "", "preview", true, "image/heif"),
-  tiff: rule("image", "", "preview", true, "image/tiff"),
-  tif: rule("image", "", "preview", true, "image/tiff"),
-  icns: rule("image", "", "preview", true, "image/icns"),
-  bmp: rule("image", "", "preview", true, "image/bmp"),
-  ico: rule("image", "", "preview", true, "image/x-icon"),
-  svg: rule("image", "xml", "preview", true, "image/svg+xml"),
+  png: rule("image", "", "image/png"),
+  jpg: rule("image", "", "image/jpeg"),
+  jpeg: rule("image", "", "image/jpeg"),
+  gif: rule("image", "", "image/gif"),
+  webp: rule("image", "", "image/webp"),
+  avif: rule("image", "", "image/avif"),
+  heic: rule("image", "", "image/heic"),
+  heif: rule("image", "", "image/heif"),
+  tiff: rule("image", "", "image/tiff"),
+  tif: rule("image", "", "image/tiff"),
+  icns: rule("image", "", "image/icns"),
+  bmp: rule("image", "", "image/bmp"),
+  ico: rule("image", "", "image/x-icon"),
+  svg: rule("image", "xml", "image/svg+xml"),
   // Video streams rendered natively via macOS AVPlayerView.
-  mp4: rule("video", "", "preview", true, "video/mp4"),
-  mov: rule("video", "", "preview", true, "video/quicktime"),
-  webm: rule("video", "", "preview", true, "video/webm"),
-  m4v: rule("video", "", "preview", true, "video/x-m4v"),
-  mkv: rule("video", "", "preview", true, "video/x-matroska"),
-  avi: rule("video", "", "preview", true, "video/x-msvideo"),
-  mpg: rule("video", "", "preview", true, "video/mpeg"),
-  mpeg: rule("video", "", "preview", true, "video/mpeg"),
-  ogv: rule("video", "", "preview", true, "video/ogg"),
-  "3gp": rule("video", "", "preview", true, "video/3gpp"),
+  mp4: rule("video", "", "video/mp4"),
+  mov: rule("video", "", "video/quicktime"),
+  webm: rule("video", "", "video/webm"),
+  m4v: rule("video", "", "video/x-m4v"),
+  mkv: rule("video", "", "video/x-matroska"),
+  avi: rule("video", "", "video/x-msvideo"),
+  mpg: rule("video", "", "video/mpeg"),
+  mpeg: rule("video", "", "video/mpeg"),
+  ogv: rule("video", "", "video/ogg"),
+  "3gp": rule("video", "", "video/3gpp"),
   // Audio streams rendered natively via macOS AVPlayerView.
-  mp3: rule("audio", "", "preview", true, "audio/mpeg"),
-  wav: rule("audio", "", "preview", true, "audio/wav"),
-  m4a: rule("audio", "", "preview", true, "audio/mp4"),
-  aac: rule("audio", "", "preview", true, "audio/aac"),
-  flac: rule("audio", "", "preview", true, "audio/flac"),
-  ogg: rule("audio", "", "preview", true, "audio/ogg"),
-  oga: rule("audio", "", "preview", true, "audio/ogg"),
-  opus: rule("audio", "", "preview", true, "audio/opus"),
-  caf: rule("audio", "", "preview", true, "audio/x-caf"),
-  aiff: rule("audio", "", "preview", true, "audio/aiff"),
-  aif: rule("audio", "", "preview", true, "audio/aiff"),
-  // System documents rendered through Quick Look.
-  pdf: rule("quicklook", "", "preview", true, "application/pdf"),
-  doc: rule("quicklook", "", "preview", true, "application/msword"),
+  mp3: rule("audio", "", "audio/mpeg"),
+  wav: rule("audio", "", "audio/wav"),
+  m4a: rule("audio", "", "audio/mp4"),
+  aac: rule("audio", "", "audio/aac"),
+  flac: rule("audio", "", "audio/flac"),
+  ogg: rule("audio", "", "audio/ogg"),
+  oga: rule("audio", "", "audio/ogg"),
+  opus: rule("audio", "", "audio/opus"),
+  caf: rule("audio", "", "audio/x-caf"),
+  aiff: rule("audio", "", "audio/aiff"),
+  aif: rule("audio", "", "audio/aiff"),
+  // PDF rendered via `sips`; Office/iWork/RTF stay opaque binary so `sips` is never spawned on them.
+  pdf: rule("quicklook", "", "application/pdf"),
+  doc: rule("binary", "plaintext", "application/msword"),
   docx: rule(
-    "quicklook",
-    "",
-    "preview",
-    true,
+    "binary",
+    "plaintext",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ),
-  xls: rule("quicklook", "", "preview", true, "application/vnd.ms-excel"),
+  xls: rule("binary", "plaintext", "application/vnd.ms-excel"),
   xlsx: rule(
-    "quicklook",
-    "",
-    "preview",
-    true,
+    "binary",
+    "plaintext",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ),
-  ppt: rule("quicklook", "", "preview", true, "application/vnd.ms-powerpoint"),
+  ppt: rule("binary", "plaintext", "application/vnd.ms-powerpoint"),
   pptx: rule(
-    "quicklook",
-    "",
-    "preview",
-    true,
+    "binary",
+    "plaintext",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ),
-  pages: rule("quicklook", "", "preview", true, "application/vnd.apple.pages"),
-  numbers: rule("quicklook", "", "preview", true, "application/vnd.apple.numbers"),
-  key: rule("quicklook", "", "preview", true, "application/vnd.apple.keynote"),
-  rtf: rule("quicklook", "", "preview", true, "application/rtf"),
+  pages: rule("binary", "plaintext", "application/vnd.apple.pages"),
+  numbers: rule("binary", "plaintext", "application/vnd.apple.numbers"),
+  key: rule("binary", "plaintext", "application/vnd.apple.keynote"),
+  rtf: rule("binary", "plaintext", "application/rtf"),
 };
 
-/** The lower-case extension of a file name, without the dot; "" when it has none. */
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "";
-  return name.slice(dot + 1);
+/** The lower-case extension of a path or file name, without the dot; "" when it has none. */
+export function extensionOf(filePath: string): string {
+  const base = path.basename(filePath);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  return base.slice(dot + 1).toLowerCase();
 }
 
 /** The lower-case base name of a path. */
 function baseName(filePath: string): string {
   const name = path.basename(filePath);
   return name.length > 0 ? name.toLowerCase() : filePath.toLowerCase();
+}
+
+/** Concise monochrome badge glyph for a path; extensionless names like `ts` or `pdf` get `≡`. */
+export function badgeForPath(filePath: string): string {
+  const ext = extensionOf(filePath);
+  if (!ext) return "≡";
+  if (ext === "svg") return "SVG";
+  const known = EXTENSION_RULES[ext];
+  if (known) return known.language === "jsonl" ? "{}" : VIEWER_SPECS[known.kind].badge;
+  const lang = LANGUAGE_BY_EXTENSION[ext];
+  return (lang && CODE_BADGE_BY_LANGUAGE[lang]) || "≡";
+}
+
+/** MIME type when `filePath` classifies as an image, or null otherwise. */
+export function imageMimeForPath(filePath: string): string | null {
+  const c = classifyFile(filePath);
+  return c.kind === "image" ? c.mimeType : null;
 }
 
 /** Whether the leading bytes hold a NUL, the mark of a binary file. */
@@ -297,9 +560,9 @@ export function classifyFile(filePath: string, sampleBytes?: Uint8Array): FileCl
   const known = EXTENSION_RULES[ext];
   if (known) return { ...known };
   if (containsNullByte(sampleBytes)) {
-    return rule("binary", "plaintext", "preview", false, "application/octet-stream");
+    return rule("binary", "plaintext", "application/octet-stream");
   }
-  return rule("code", languageFor(name, ext), "source", false, "text/plain");
+  return rule("code", languageFor(name, ext), "text/plain");
 }
 
 /** Split text into lines, dropping the single trailing newline. */
@@ -310,6 +573,13 @@ function splitLines(text: string): string[] {
     lines.pop();
   }
   return lines;
+}
+
+/** Drop a trailing line that was cut mid-stream (no terminating `\n` or `\r`). */
+function dropUnterminatedLine(text: string): string {
+  if (!text || text.endsWith("\n") || text.endsWith("\r")) return text;
+  const cut = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r"));
+  return cut >= 0 ? text.slice(0, cut + 1) : "";
 }
 
 /** One column, keyed by its index so an array row lines up with it. */
@@ -334,80 +604,92 @@ function toCellValue(value: unknown): string | number {
   return NUMERIC_PATTERN.test(trimmed) ? Number(trimmed) : text;
 }
 
-/** A quoted cell's text from just after its opening quote ("" is one "), and the index after its closing quote. */
+/** A quoted cell's text from just after its opening quote (`""` is one `"`), scanned in plain slices. */
 function readQuotedCell(text: string, start: number): { value: string; end: number } {
   let value = "";
   let i = start;
   while (i < text.length) {
-    if (text[i] !== '"') {
-      value += text[i];
-      i += 1;
-    } else if (text[i + 1] === '"') {
-      value += '"';
-      i += 2;
-    } else {
-      return { value, end: i + 1 };
-    }
+    const q = text.indexOf('"', i);
+    if (q < 0) return { value: value + text.slice(i), end: text.length };
+    value += text.slice(i, q);
+    if (text[q + 1] !== '"') return { value, end: q + 1 };
+    value += '"';
+    i = q + 2;
   }
   return { value, end: i };
 }
 
+interface DelimitedCursor {
+  nextDelim: number;
+  nextNl: number;
+  nextQuote: number;
+}
+
+function advancePos(body: string, needle: string, pos: number, cached: number): number {
+  return cached >= 0 && cached < pos ? body.indexOf(needle, pos) : cached;
+}
+
+function nextPlainStop(body: string, pos: number, delimiter: string, cur: DelimitedCursor): number {
+  cur.nextDelim = advancePos(body, delimiter, pos, cur.nextDelim);
+  cur.nextNl = advancePos(body, "\n", pos, cur.nextNl);
+  cur.nextQuote = advancePos(body, '"', pos, cur.nextQuote);
+  let stop = cur.nextNl;
+  if (cur.nextDelim >= 0 && cur.nextDelim < stop) stop = cur.nextDelim;
+  if (cur.nextQuote >= 0 && cur.nextQuote < stop) stop = cur.nextQuote;
+  return stop;
+}
+
 /**
  * Split CSV or TSV text into records of cells. A double-quoted cell may hold the
- * delimiter, line breaks and "" escapes; text without quotes splits by line.
+ * delimiter, line breaks and `""` escapes; plain runs scan via `indexOf` slices.
  */
-function parseDelimitedRecords(text: string, delimiter: string): string[][] {
+export function parseDelimitedRecords(text: string, delimiter: string): string[][] {
+  if (!text) return [];
   if (!text.includes('"')) return splitLines(text).map((line) => line.split(delimiter));
-  const lf = text.replace(/\r\n?/g, "\n");
+  const lf = text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
   const body = lf.endsWith("\n") ? lf : `${lf}\n`;
+  const cur: DelimitedCursor = {
+    nextDelim: body.indexOf(delimiter, 0),
+    nextNl: body.indexOf("\n", 0),
+    nextQuote: body.indexOf('"', 0),
+  };
   const records: string[][] = [];
   let record: string[] = [];
   let cell = "";
   let i = 0;
   while (i < body.length) {
     const ch = body[i];
-    i += 1;
     if (ch === '"') {
-      const quoted = readQuotedCell(body, i);
+      const quoted = readQuotedCell(body, i + 1);
       cell += quoted.value;
       i = quoted.end;
     } else if (ch === delimiter) {
       record.push(cell);
       cell = "";
+      i += 1;
     } else if (ch === "\n") {
       record.push(cell);
       records.push(record);
       record = [];
       cell = "";
+      i += 1;
     } else {
-      cell += ch;
+      const stop = nextPlainStop(body, i, delimiter, cur);
+      cell += body.slice(i, stop);
+      i = stop;
     }
   }
   return records;
 }
 
 /** Parse CSV or TSV text: the first record is the header, the rest are rows. */
-function parseDelimited(text: string, delimiter: string): TableData {
-  const records = parseDelimitedRecords(text, delimiter);
+function parseDelimited(text: string, delimiter: string, partial = false): TableData {
+  const src = partial ? dropUnterminatedLine(text) : text;
+  const records = parseDelimitedRecords(src, delimiter);
   if (records.length === 0) return { columns: [], rows: [], invalidLines: [] };
   const columns = records[0].map((title, index) => makeColumn(index, title.trim()));
   const rows = records.slice(1).map((record) => record.map(toCellValue));
   return { columns, rows, invalidLines: [] };
-}
-
-/** The field names of the parsed JSONL objects, in first-seen order. */
-function collectKeys(objects: Record<string, unknown>[]): string[] {
-  const keys: string[] = [];
-  const seen = new Set<string>();
-  for (const object of objects) {
-    for (const key of Object.keys(object)) {
-      if (!seen.has(key)) {
-        seen.add(key);
-        keys.push(key);
-      }
-    }
-  }
-  return keys;
 }
 
 /** One JSON object per line, or null when the line is not one. */
@@ -422,28 +704,63 @@ function parseJsonObject(line: string): Record<string, unknown> | null {
   }
 }
 
-/** Parse one JSON object per line; the other non-blank lines are listed in `invalidLines`. */
-function parseJsonl(text: string): TableData {
-  const objects: Record<string, unknown>[] = [];
+function appendJsonlRow(
+  obj: Record<string, unknown>,
+  keys: string[],
+  keyIndex: Map<string, number>,
+  rows: (string | number)[][],
+): void {
+  const row = Array.from({ length: keys.length }, (): string | number => "");
+  for (const key of Object.keys(obj)) {
+    let col = keyIndex.get(key);
+    if (col === undefined) {
+      col = keys.length;
+      keyIndex.set(key, col);
+      keys.push(key);
+    }
+    row[col] = toCellValue(obj[key]);
+  }
+  rows.push(row);
+}
+
+function padRowsToWidth(rows: (string | number)[][], width: number): void {
+  for (const row of rows) {
+    while (row.length < width) row.push("");
+  }
+}
+
+/** Stream JSONL/NDJSON lines directly into `rows` without keeping a second `objects[]` array. */
+export function parseJsonl(text: string, partial = false): TableData {
+  const src = partial ? dropUnterminatedLine(text) : text;
+  if (!src) return { columns: [], rows: [], invalidLines: [] };
+  const keys: string[] = [];
+  const keyIndex = new Map<string, number>();
+  const rows: (string | number)[][] = [];
   const invalidLines: number[] = [];
-  splitLines(text).forEach((line, index) => {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) return;
-    const parsed = parseJsonObject(trimmed);
-    if (parsed) objects.push(parsed);
-    else invalidLines.push(index + 1);
-  });
-  const keys = collectKeys(objects);
+  let pos = 0;
+  let lineNo = 1;
+  while (pos < src.length) {
+    const nl = src.indexOf("\n", pos);
+    const rawLine = nl >= 0 ? src.slice(pos, nl) : src.slice(pos);
+    pos = nl >= 0 ? nl + 1 : src.length;
+    const trimmed = rawLine.trim();
+    if (trimmed.length > 0) {
+      const parsed = parseJsonObject(trimmed);
+      if (parsed) appendJsonlRow(parsed, keys, keyIndex, rows);
+      else invalidLines.push(lineNo);
+    }
+    lineNo += 1;
+  }
+  padRowsToWidth(rows, keys.length);
   const columns = keys.map((key, index) => makeColumn(index, key));
-  const rows = objects.map((object) => keys.map((key) => toCellValue(object[key])));
   return { columns, rows, invalidLines };
 }
 
-/** Parse CSV, TSV, or JSONL text into DataTable columns and rows. */
-export function parseTableData(text: string, filePath: string): TableData {
-  const ext = extensionOf(baseName(filePath));
-  if (ext === "jsonl") return parseJsonl(text);
-  return parseDelimited(text, ext === "tsv" ? "\t" : ",");
+/** Parse CSV, TSV, JSONL, or NDJSON text into DataTable columns and rows. */
+export function parseTableData(text: string, filePath: string, partial = false): TableData {
+  const ext = extensionOf(filePath);
+  if (ext === "jsonl" || ext === "ndjson") return parseJsonl(text, partial);
+  return parseDelimited(text, ext === "tsv" ? "\t" : ",", partial);
 }
 
 /** One hex group, padded so the ASCII column always starts at the same place. */
@@ -540,7 +857,7 @@ function writeU32LE(b: Uint8Array, offset: number, value: number): void {
 export function normalizeMachOBuildVersion(
   bytes: Uint8Array,
   targetMinos = 0x000b0000,
-  targetSdk = 0x000e0000
+  targetSdk = 0x000e0000,
 ): { minos: number; sdk: number; patched: boolean } | null {
   if (bytes.length < 32 || readU32LE(bytes, 0) !== 0xfeedfacf) return null;
   const ncmds = readU32LE(bytes, 16);
@@ -570,7 +887,7 @@ export function normalizeMachOBuildVersion(
 /** Extract pixel dimensions from PNG, GIF, or SVG headers when available. */
 export function probeImageDimensions(
   bytes: Uint8Array,
-  text?: string
+  text?: string,
 ): ImageDimensions | null {
   const png = probePngDimensions(bytes);
   if (png) return png;
@@ -579,43 +896,123 @@ export function probeImageDimensions(
   return text ? probeSvgDimensions(text) : null;
 }
 
-/** filePath → the preview of the version last shown; a newer version's replaces it and revokes its URL. */
-const quickLookCache = new Map<string, { version: string; url: string }>();
+export interface QuickLookLoaderDeps {
+  maxEntries?: number;
+  statVersion: (filePath: string) => Promise<string | null>;
+  renderPdfUrl: (filePath: string, cwd: string, outDir: string) => Promise<string | null>;
+  revokeUrl?: (url: string) => void;
+}
+
+interface QuickLookState {
+  deps: QuickLookLoaderDeps;
+  latestKeyByPath: Map<string, string>;
+  cache: LruCache<string, string>;
+  inflight: Map<string, Promise<string | null>>;
+}
+
+function evictQuickLookKey(
+  evictedKey: string,
+  url: string,
+  latestKeyByPath: Map<string, string>,
+  revoke: (url: string) => void,
+): void {
+  const sep = evictedKey.indexOf("\0");
+  const evictedPath = sep >= 0 ? evictedKey.slice(0, sep) : evictedKey;
+  if (latestKeyByPath.get(evictedPath) === evictedKey) {
+    latestKeyByPath.delete(evictedPath);
+  }
+  revoke(url);
+}
+
+async function loadQuickLookEntry(
+  st: QuickLookState,
+  filePath: string,
+  cwd: string,
+  outDir: string,
+): Promise<string | null> {
+  const version = await st.deps.statVersion(filePath);
+  if (!version) return null;
+  const cacheKey = `${filePath}\0${version}`;
+  const cached = st.cache.get(cacheKey);
+  if (cached) return cached;
+  const url = await st.deps.renderPdfUrl(filePath, cwd, outDir);
+  if (!url) return null;
+  const prevKey = st.latestKeyByPath.get(filePath);
+  if (prevKey && prevKey !== cacheKey) st.cache.delete(prevKey);
+  st.latestKeyByPath.set(filePath, cacheKey);
+  st.cache.set(cacheKey, url);
+  return url;
+}
+
+function runCoalescedQuickLook(
+  st: QuickLookState,
+  filePath: string,
+  cwd: string,
+  outDir: string,
+): Promise<string | null> {
+  const existing = st.inflight.get(filePath);
+  if (existing) return existing;
+  const task = loadQuickLookEntry(st, filePath, cwd, outDir)
+    .catch(() => null)
+    .finally(() => {
+      st.inflight.delete(filePath);
+    });
+  st.inflight.set(filePath, task);
+  return task;
+}
+
+/** Build a bounded LRU QuickLook loader with inflight Promise deduplication and URL revocation. */
+export function createQuickLookLoader(
+  deps: QuickLookLoaderDeps,
+): (filePath: string, cwd?: string, outDir?: string) => Promise<string | null> {
+  const revoke = deps.revokeUrl ?? ((url: string) => URL.revokeObjectURL(url));
+  const latestKeyByPath = new Map<string, string>();
+  const cache = createLruCache<string, string>(deps.maxEntries ?? 16, (key, url) => {
+    evictQuickLookKey(key, url, latestKeyByPath, revoke);
+  });
+  const st: QuickLookState = { deps, latestKeyByPath, cache, inflight: new Map() };
+  return (filePath: string, cwd = "", outDir = "") =>
+    runCoalescedQuickLook(st, filePath, cwd, outDir);
+}
+
+async function renderSipsPdfUrl(
+  filePath: string,
+  cwd: string,
+  outDir: string,
+): Promise<string | null> {
+  await fs.mkdir(outDir, { recursive: true });
+  const pngPath = path.join(outDir, `${crypto.randomUUID()}.png`);
+  try {
+    await process.run(
+      "sips",
+      ["-Z", "1800", "-s", "format", "png", filePath, "--out", pngPath],
+      { cwd },
+    );
+    const bytes = await fs.readFile(pngPath);
+    return createBlobUrl(bytes, "image/png");
+  } finally {
+    await fs.unlink(pngPath).catch(() => undefined);
+  }
+}
+
+const defaultQuickLookLoader = createQuickLookLoader({
+  maxEntries: 16,
+  statVersion: async (filePath) => {
+    const stat = await fs.stat(filePath);
+    return `${stat.mtimeMs}:${stat.size}`;
+  },
+  renderPdfUrl: renderSipsPdfUrl,
+});
 
 /**
  * Make a macOS 2x Retina preview PNG of a PDF's first page with `sips`, in
  * `outDir` (Aed's per-user cache, DESIGN.md「术语与边界」), and return it as a
  * blob: URL, or null on failure. The PNG is deleted as soon as it is read.
  */
-export async function generateQuickLookUrl(
+export function generateQuickLookUrl(
   filePath: string,
   cwd: string,
-  outDir: string
+  outDir: string,
 ): Promise<string | null> {
-  try {
-    const stat = await fs.stat(filePath);
-    const version = `${stat.mtimeMs}:${stat.size}`;
-    const cached = quickLookCache.get(filePath);
-    if (cached?.version === version) return cached.url;
-
-    await fs.mkdir(outDir, { recursive: true });
-    const pngPath = path.join(outDir, `${crypto.randomUUID()}.png`);
-    let bytes: Uint8Array;
-    try {
-      await process.run(
-        "sips",
-        ["-Z", "1800", "-s", "format", "png", filePath, "--out", pngPath],
-        { cwd }
-      );
-      bytes = await fs.readFile(pngPath);
-    } finally {
-      await fs.unlink(pngPath).catch(() => undefined);
-    }
-    const url = createBlobUrl(bytes, "image/png");
-    if (cached) URL.revokeObjectURL(cached.url);
-    quickLookCache.set(filePath, { version, url });
-    return url;
-  } catch {
-    return null;
-  }
+  return defaultQuickLookLoader(filePath, cwd, outDir);
 }

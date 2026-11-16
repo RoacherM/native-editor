@@ -1,15 +1,17 @@
 import path from "path";
-import { classifyFile } from "./classify";
-import { normalizeExternalFilePath } from "./workspace";
+import { imageMimeForPath } from "./classify";
+import { parseTarget } from "./target";
 import type { EditorTheme } from "./themes";
 import {
   GITHUB_MARKDOWN_CSS,
   KATEX_CSS,
 } from "./markdownVendor.generated";
 
+export { imageMimeForPath };
+
 // DESIGN.md「文件预览与 Mermaid 渲染契约」documents this module's contract:
-// the markdown WebView preview runs entirely on the page side (JSC); the host
-// only ships payloads, answers page requests and owns files/URLs.
+// the markdown & diagram WebView preview runs entirely on the page side (JSC);
+// the host only ships payloads, answers page requests and owns files/URLs.
 
 /** The Content-Security-Policy the preview shell page runs under. */
 export const PREVIEW_CSP =
@@ -35,131 +37,99 @@ export function buildPreviewShellHtml(): string {
 </html>`;
 }
 
-/** Whether `url` should leave markdown inline navigation entirely alone. */
-export function isExternalOrHashUrl(url: string): boolean {
-  return (
-    url.startsWith("http://") ||
-    url.startsWith("https://") ||
-    url.startsWith("#")
-  );
-}
-
-/** Resolve a relative markdown link to an absolute path, or null. */
-export function resolveRelativeLink(
-  relUrl: string,
-  baseFilePath: string,
-): string | null {
-  if (isExternalOrHashUrl(relUrl)) return null;
-  const withoutAnchor = relUrl.split("#")[0] || "";
-  const cleaned = normalizeExternalFilePath(withoutAnchor);
-  if (!cleaned) return null;
-  if (cleaned.startsWith("/")) return path.normalize(cleaned);
-  return path.resolve(path.dirname(baseFilePath), cleaned);
-}
-
 export type PreviewLinkTarget =
   | { kind: "external"; url: string }
-  | { kind: "file"; path: string }
+  | { kind: "file"; path: string; line?: number; column?: number }
   | { kind: "none" };
 
-const FORBIDDEN_SCHEMES = /^(javascript|data|vbscript|about|blob):/i;
-const EXTERNAL_SCHEMES = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
-const ALLOWED_EXTERNAL = /^https?:|^mailto:/i;
-
-function stripAnchorAndQuery(p: string): string {
-  return p.split("#")[0].split("?")[0];
-}
-
-function decodePath(p: string): string {
-  try {
-    return decodeURIComponent(p);
-  } catch {
-    return p;
-  }
-}
-
 /**
- * Route a clicked markdown link: http(s)/mailto/tel/ftp/other registered
- * schemes leave the app via `openUrl`; `javascript:`/`data:`/`vbscript:` and
- * in-page `#` anchors are ignored; everything else is a file path resolved
- * against the markdown file's directory.
+ * Route a clicked markdown link through `parseTarget`: `http(s):`/`mailto:`
+ * leave the app via `openUrl`; dangerous/unknown schemes, remote `file://`
+ * hosts and in-page `#` anchors are ignored; local paths resolve against the
+ * markdown file's directory and preserve optional `line`/`column` targets.
  */
 export function classifyPreviewLink(
   href: string,
   baseFilePath: string,
 ): PreviewLinkTarget {
-  const trimmed = href.trim();
-  if (!trimmed || trimmed.startsWith("#")) return { kind: "none" };
-  if (FORBIDDEN_SCHEMES.test(trimmed)) return { kind: "none" };
-  let candidate = trimmed;
-  if (candidate.startsWith("file://")) {
-    candidate = candidate.slice("file://".length);
-  } else if (EXTERNAL_SCHEMES.test(candidate)) {
-    return ALLOWED_EXTERNAL.test(trimmed)
-      ? { kind: "external", url: trimmed }
-      : { kind: "none" };
-  }
-  const withoutMeta = decodePath(stripAnchorAndQuery(candidate));
-  const cleaned = normalizeExternalFilePath(withoutMeta);
-  if (!cleaned) return { kind: "none" };
-  const resolved = cleaned.startsWith("/")
-    ? path.normalize(cleaned)
-    : path.resolve(path.dirname(baseFilePath), cleaned);
-  return { kind: "file", path: resolved };
+  const parsed = parseTarget(href, { baseDir: path.dirname(baseFilePath) });
+  if (parsed.kind === "external") return parsed;
+  if (parsed.kind !== "candidates") return { kind: "none" };
+  const best = parsed.items.at(-1);
+  if (!best) return { kind: "none" };
+  return {
+    kind: "file",
+    path: best.path,
+    ...(best.line > 0 ? { line: best.line } : {}),
+    ...(best.line > 0 && best.column > 0 ? { column: best.column } : {}),
+  };
 }
 
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "avif",
-  "svg",
-  "bmp",
-  "ico",
-]);
-
 /**
- * Resolve a markdown `<img>` src to an absolute file path. Only local paths
- * with an image extension resolve; `https:`/`data:`/everything else -> null.
+ * Resolve a markdown `<img>` src to an absolute local image path using
+ * `parseTarget` + `imageMimeForPath`; external, `data:` or non-image paths
+ * return `null`.
  */
 export function resolvePreviewImagePath(
   src: string,
   baseFilePath: string,
 ): string | null {
-  const trimmed = src.trim();
-  if (!trimmed) return null;
-  if (FORBIDDEN_SCHEMES.test(trimmed)) return null;
-  let candidate = trimmed;
-  if (candidate.startsWith("file://")) {
-    candidate = candidate.slice("file://".length);
-  } else if (EXTERNAL_SCHEMES.test(candidate)) {
-    return null;
-  }
-  const decoded = decodePath(stripAnchorAndQuery(candidate));
-  const ext = path.extname(decoded).slice(1).toLowerCase();
-  if (!IMAGE_EXTENSIONS.has(ext)) return null;
-  const cleaned = normalizeExternalFilePath(decoded);
-  if (!cleaned) return null;
-  return cleaned.startsWith("/")
-    ? path.normalize(cleaned)
-    : path.resolve(path.dirname(baseFilePath), cleaned);
-}
-
-/** MIME type for an image path, reusing classify.ts's extension table. */
-export function imageMimeForPath(p: string): string | null {
-  const c = classifyFile(p);
-  return c.kind === "image" ? c.mimeType : null;
+  const parsed = parseTarget(src, { baseDir: path.dirname(baseFilePath) });
+  if (parsed.kind !== "candidates") return null;
+  const resolved = parsed.items.at(-1)?.path;
+  if (!resolved || !imageMimeForPath(resolved)) return null;
+  return resolved;
 }
 
 export type PreviewMessage =
   | { type: "link"; href: string }
   | { type: "images"; renderId: number; srcs: string[] }
   | { type: "scroll"; path: string; y: number }
-  | { type: "needMermaid" };
+  | { type: "needMermaid" }
+  | { type: "diagramRendered"; ok: boolean; error?: string }
+  | { type: "copySource" };
 
 const MAX_IMAGE_SRCS = 200;
+
+function parseImagesPayload(m: Record<string, unknown>): PreviewMessage | null {
+  if (
+    typeof m.renderId !== "number" ||
+    !Array.isArray(m.srcs) ||
+    !m.srcs.every((s) => typeof s === "string")
+  ) {
+    return null;
+  }
+  return {
+    type: "images",
+    renderId: m.renderId,
+    srcs: (m.srcs as string[]).slice(0, MAX_IMAGE_SRCS),
+  };
+}
+
+function parseDiagramRenderedPayload(m: Record<string, unknown>): PreviewMessage | null {
+  if (typeof m.ok !== "boolean") return null;
+  if (m.error !== undefined && typeof m.error !== "string") return null;
+  return {
+    type: "diagramRendered",
+    ok: m.ok,
+    ...(typeof m.error === "string" ? { error: m.error } : {}),
+  };
+}
+
+const MESSAGE_PARSERS: Record<
+  string,
+  (m: Record<string, unknown>) => PreviewMessage | null
+> = {
+  link: (m) => (typeof m.href === "string" ? { type: "link", href: m.href } : null),
+  images: parseImagesPayload,
+  scroll: (m) =>
+    typeof m.path === "string" && typeof m.y === "number"
+      ? { type: "scroll", path: m.path, y: m.y }
+      : null,
+  needMermaid: () => ({ type: "needMermaid" }),
+  diagramRendered: parseDiagramRenderedPayload,
+  copySource: () => ({ type: "copySource" }),
+};
 
 /** Strictly validate a `window.nsh.postMessage` payload from the page. */
 export function parsePreviewMessage(raw: string): PreviewMessage | null {
@@ -171,38 +141,15 @@ export function parsePreviewMessage(raw: string): PreviewMessage | null {
   }
   if (!msg || typeof msg !== "object") return null;
   const m = msg as Record<string, unknown>;
-  switch (m.type) {
-    case "link":
-      return typeof m.href === "string" ? { type: "link", href: m.href } : null;
-    case "images":
-      if (
-        typeof m.renderId !== "number" ||
-        !Array.isArray(m.srcs) ||
-        !m.srcs.every((s) => typeof s === "string")
-      ) {
-        return null;
-      }
-      return {
-        type: "images",
-        renderId: m.renderId,
-        srcs: (m.srcs as string[]).slice(0, MAX_IMAGE_SRCS),
-      };
-    case "scroll":
-      return typeof m.path === "string" && typeof m.y === "number"
-        ? { type: "scroll", path: m.path, y: m.y }
-        : null;
-    case "needMermaid":
-      return { type: "needMermaid" };
-    default:
-      return null;
-  }
+  const parser = typeof m.type === "string" ? MESSAGE_PARSERS[m.type] : undefined;
+  return parser ? parser(m) : null;
 }
 
 export interface PreviewBridgeDeps {
   /** Absolute path of the markdown file being shown. */
   basePath(): string;
   openUrl(url: string): void;
-  openFile(path: string): void;
+  openFile(path: string, loc?: { line?: number; column?: number }): void;
   /** Absolute image path -> `data:` URL (null on any failure). */
   readImageDataUrl(path: string): Promise<string | null>;
   inject(js: string): void;
@@ -210,53 +157,95 @@ export interface PreviewBridgeDeps {
   rememberScroll(path: string, y: number): void;
   currentRenderId(): number;
   mermaidConfig(): unknown;
+  onDiagramRendered?(result: { ok: boolean; error?: string }): void;
+  onCopySource?(): void;
 }
+
+function routeLinkMessage(href: string, deps: PreviewBridgeDeps): void {
+  const target = classifyPreviewLink(href, deps.basePath());
+  if (target.kind === "external") {
+    deps.openUrl(target.url);
+    return;
+  }
+  if (target.kind === "file") {
+    const loc =
+      target.line !== undefined
+        ? {
+            line: target.line,
+            ...(target.column !== undefined ? { column: target.column } : {}),
+          }
+        : undefined;
+    if (loc) deps.openFile(target.path, loc);
+    else deps.openFile(target.path);
+  }
+}
+
+async function routeImagesMessage(
+  renderId: number,
+  srcs: string[],
+  deps: PreviewBridgeDeps,
+): Promise<void> {
+  if (renderId !== deps.currentRenderId()) return;
+  const base = deps.basePath();
+  const entries = await Promise.all(
+    srcs.map(async (src) => {
+      const p = resolvePreviewImagePath(src, base);
+      const dataUrl = p ? await deps.readImageDataUrl(p) : null;
+      return [src, dataUrl] as const;
+    }),
+  );
+  const images = Object.fromEntries(entries);
+  deps.inject(
+    `window.__aed.setImages(${JSON.stringify({
+      renderId,
+      images,
+    })});`,
+  );
+}
+
+async function routeNeedMermaidMessage(deps: PreviewBridgeDeps): Promise<void> {
+  const bundle = await deps.loadMermaidJs();
+  if (bundle) {
+    deps.inject(bundle);
+    deps.inject("window.__aed.mermaidReady();");
+  } else {
+    deps.inject("window.__aed.mermaidUnavailable();");
+  }
+}
+
+function routeDiagramRendered(
+  msg: Extract<PreviewMessage, { type: "diagramRendered" }>,
+  deps: PreviewBridgeDeps,
+): void {
+  const payload =
+    msg.error !== undefined ? { ok: msg.ok, error: msg.error } : { ok: msg.ok };
+  deps.onDiagramRendered?.(payload);
+}
+
+const MESSAGE_HANDLERS: {
+  [K in PreviewMessage["type"]]: (
+    msg: Extract<PreviewMessage, { type: K }>,
+    deps: PreviewBridgeDeps,
+  ) => Promise<void> | void;
+} = {
+  link: (msg, deps) => routeLinkMessage(msg.href, deps),
+  images: (msg, deps) => routeImagesMessage(msg.renderId, msg.srcs, deps),
+  scroll: (msg, deps) => deps.rememberScroll(msg.path, msg.y),
+  needMermaid: (_msg, deps) => routeNeedMermaidMessage(deps),
+  diagramRendered: routeDiagramRendered,
+  copySource: (_msg, deps) => deps.onCopySource?.(),
+};
 
 /** Route a validated page message to its host-side effect. */
 export async function handlePreviewMessage(
   msg: PreviewMessage,
   deps: PreviewBridgeDeps,
 ): Promise<void> {
-  switch (msg.type) {
-    case "link": {
-      const target = classifyPreviewLink(msg.href, deps.basePath());
-      if (target.kind === "external") deps.openUrl(target.url);
-      else if (target.kind === "file") deps.openFile(target.path);
-      return;
-    }
-    case "images": {
-      if (msg.renderId !== deps.currentRenderId()) return;
-      const base = deps.basePath();
-      const entries = await Promise.all(
-        msg.srcs.map(async (src) => {
-          const p = resolvePreviewImagePath(src, base);
-          const dataUrl = p ? await deps.readImageDataUrl(p) : null;
-          return [src, dataUrl] as const;
-        }),
-      );
-      const images = Object.fromEntries(entries);
-      deps.inject(
-        `window.__aed.setImages(${JSON.stringify({
-          renderId: msg.renderId,
-          images,
-        })});`,
-      );
-      return;
-    }
-    case "scroll":
-      deps.rememberScroll(msg.path, msg.y);
-      return;
-    case "needMermaid": {
-      const bundle = await deps.loadMermaidJs();
-      if (bundle) {
-        deps.inject(bundle);
-        deps.inject("window.__aed.mermaidReady();");
-      } else {
-        deps.inject("window.__aed.mermaidUnavailable();");
-      }
-      return;
-    }
-  }
+  const handler = MESSAGE_HANDLERS[msg.type] as (
+    m: PreviewMessage,
+    d: PreviewBridgeDeps,
+  ) => Promise<void> | void;
+  await handler(msg, deps);
 }
 
 export interface PreviewFontStyle {
@@ -324,9 +313,17 @@ body {
   margin: 0 auto;
   padding: 40px 48px 96px;
 }
-/* When the 220px TOC shows (right: 24px + 32px gap), shrink the centering
-   space so the column never runs under it. */
-body.aed-has-toc { padding-right: 276px; }
+/* When the TOC shows (196px + 16px trailing pad = 212px at right: 0 + 24px gap),
+   shrink the centering space so the column never runs under it. */
+body.aed-has-toc { padding-right: 236px; }
+@media (max-width: 1120px) {
+  .markdown-body { padding: 32px 32px 80px; }
+  body.aed-has-toc { padding-right: 220px; }
+  body.aed-has-toc .markdown-body { padding: 32px 24px 80px; }
+}
+body.aed-diagram-only { display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+body.aed-diagram-only .markdown-body { max-width: none; width: 100%; margin: 0; padding: 24px; display: flex; align-items: center; justify-content: center; }
+body.aed-diagram-only .aed-mermaid-svg { margin: 0; width: 100%; }
 ::selection { background: ${ui.selection}; }
 
 /* — Type rhythm — */
@@ -452,11 +449,12 @@ body.aed-has-toc { padding-right: 276px; }
 #aed-toc {
   position: fixed;
   top: 40px;
-  right: 24px;
-  width: 220px;
+  right: 0;
+  width: 196px;
+  padding: 0;
+  padding-right: 16px;
   max-height: calc(100vh - 80px);
   overflow-y: auto;
-  padding: 0;
 }
 #aed-toc.aed-toc-hidden { display: none; }
 .aed-toc-label { font-size: 12px; font-weight: 500; color: ${ui.mutedForeground}; margin-bottom: 8px; }
