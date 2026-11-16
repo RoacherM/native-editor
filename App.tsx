@@ -863,18 +863,35 @@ function FontSettingsDialog(props: {
   );
 }
 
-// DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a Bauhaus poster.
-// Text sits top left; bottom right, a square split 2×2 holds one form per cell:
-// a blue circle, a yellow and an ink quarter disc turning on the square's
-// centre, and a red square. Every curve's radius is a cell or half a cell.
+// DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a Bauhaus poster
+// of what Aed edits. Text sits top left; right of the split, a few lines of code
+// become flat bars on a character grid, coloured by syntax in the primaries,
+// with a selection field behind three lines and the red caret at its head.
 const POSTER_FONT = "Helvetica Neue";
 
-// The primaries stay red, yellow and blue whatever the theme's accent is;
+// Keywords red, types blue, strings yellow, whatever the theme's accent is;
 // only the light or dark mix changes.
 const POSTER_PRIMARIES = {
   light: { red: "#d7381e", yellow: "#e8a90c", blue: "#1f4e8c" },
   dark: { red: "#e8462b", yellow: "#e9ae1a", blue: "#3b6fb6" },
 } as const;
+
+// An abstract `open(path)`: per line, its indent and its tokens, in character cells.
+type PosterToken = readonly [chars: number, role: "keyword" | "type" | "string" | "name"];
+const POSTER_CODE: readonly (readonly [indent: number, tokens: readonly PosterToken[]])[] = [
+  [0, [[2, "keyword"], [4, "name"], [6, "type"]]],
+  [2, [[3, "keyword"], [4, "name"], [1, "name"], [8, "name"]]],
+  [2, [[5, "keyword"], [4, "name"]]],
+  [4, [[4, "type"], [2, "name"], [6, "string"]]],
+  [4, [[5, "type"], [2, "name"], [6, "string"]]],
+  [4, [[5, "type"], [2, "name"], [4, "string"]]],
+  [2, [[1, "name"]]],
+  [0, [[1, "name"]]],
+];
+/** Character cells across the right field; longer lines run off the edge. */
+const POSTER_COLUMNS = 17;
+/** First and last selected line. */
+const POSTER_SELECTION = [3, 5] as const;
 
 interface PosterBox {
   w: number;
@@ -916,24 +933,30 @@ function PosterFields(props: {
         if (raw.w <= 0 || raw.h <= 0) return;
         const theme = props.theme();
         const hue = POSTER_PRIMARIES[theme.appearance];
+        const fill = { keyword: hue.red, type: hue.blue, string: hue.yellow, name: theme.ui.foreground };
         const { w, h, pad, split } = posterGrid(raw);
-        // The square stands in the bottom-right corner, right of the split.
-        const cell = Math.min(w - split, h - pad) / 2;
-        const mx = w - cell;
-        const my = h - cell;
-        const disc = (x: number, y: number, r: number, from: number, to: number, fill: string) => {
-          cx.fillStyle = fill;
-          cx.beginPath();
-          cx.moveTo(x, y);
-          cx.arc(x, y, r, from, to);
-          cx.closePath();
-          cx.fill();
-        };
-        disc(mx - cell / 2, my - cell / 2, cell / 2, 0, Math.PI * 2, hue.blue);
-        disc(mx, my, cell, -Math.PI / 2, 0, hue.yellow);
-        disc(mx, my, cell, Math.PI / 2, Math.PI, theme.ui.foreground);
+        // One cell is a character wide; a line is a cell tall with a cell of
+        // leading, and the last line rests on the bottom margin.
+        const lines = POSTER_CODE.length * 2 - 1;
+        const u = Math.min((w - split) / POSTER_COLUMNS, (h - pad * 2) / lines);
+        const lineTop = (i: number) => h - pad - lines * u + i * 2 * u;
+        // Selection: half a cell around the selected lines, from the first
+        // one's indent to the right edge; the caret is its left edge there.
+        const [first, last] = POSTER_SELECTION;
+        const selX = split + (POSTER_CODE[first][0] - 0.5) * u;
+        const selY = lineTop(first) - u / 2;
+        cx.fillStyle = theme.ui.border;
+        cx.fillRect(selX, selY, w - selX, (last - first + 1) * 2 * u);
+        POSTER_CODE.forEach(([indent, tokens], i) => {
+          let x = split + indent * u;
+          for (const [chars, role] of tokens) {
+            cx.fillStyle = fill[role];
+            cx.fillRect(x, lineTop(i), chars * u, u);
+            x += (chars + 1) * u;
+          }
+        });
         cx.fillStyle = hue.red;
-        cx.fillRect(mx, my, cell, cell);
+        cx.fillRect(selX, selY, u / 3, 2 * u);
       }}
     />
   );
