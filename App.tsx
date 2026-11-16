@@ -864,8 +864,8 @@ function FontSettingsDialog(props: {
 }
 
 // DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a poster.
-// Three flat fields carry the composition: a signal-red arch (right), an ink
-// block (bottom left), and a stone quarter disc where they meet.
+// Three flat fields carry the composition: an ink block (bottom left) and two
+// concentric quarter discs, stone around signal red, on the bottom-right corner.
 // Text sits on the paper, top left, on one grid.
 const POSTER_FONT = "Helvetica Neue";
 
@@ -914,31 +914,25 @@ function PosterFields(props: {
         const ui = props.theme().ui;
         const g = posterGrid(raw);
         const { w, h } = g;
-        // Signal sweep: everything right of the split below the stone
-        // crescent's lower curve. Its upper edge is a chord the crescent
-        // covers, so no red fringes the crescent's outer curve.
-        cx.fillStyle = ui.accent;
-        cx.beginPath();
-        cx.moveTo(w, h);
-        cx.lineTo(g.split, h);
-        cx.lineTo(g.split, g.blockTop);
-        cx.lineTo(w, 0);
-        cx.closePath();
-        cx.fill();
         // Ink block: bottom-left geometric field.
         cx.fillStyle = ui.foreground;
         cx.fillRect(0, g.blockTop, g.split, h - g.blockTop);
-        // Stone crescent: from the block's top-right corner one quarter
-        // ellipse curves up to the top-right corner, and a curve from there
-        // runs back down to the block's foot; the red shows below it.
+        // Two concentric quarter discs on the bottom-right corner. The stone
+        // one's foot stands on the split, so its arc rises out of the block's
+        // right edge; the red one sits inside it, leaving a stone ring as
+        // thick as the block is tall.
+        const quarterDisc = (r: number) => {
+          cx.beginPath();
+          cx.moveTo(w, h);
+          cx.arc(w, h, r, Math.PI, Math.PI * 1.5);
+          cx.closePath();
+          cx.fill();
+        };
+        const outer = w - g.split;
         cx.fillStyle = ui.border;
-        cx.beginPath();
-        cx.moveTo(g.split, h);
-        cx.lineTo(g.split, g.blockTop);
-        cx.ellipse(w, g.blockTop, w - g.split, g.blockTop, 0, Math.PI, Math.PI * 1.5);
-        cx.bezierCurveTo(w, h * 0.3, g.split + (w - g.split) * 0.3, h, g.split, h);
-        cx.closePath();
-        cx.fill();
+        quarterDisc(outer);
+        cx.fillStyle = ui.accent;
+        quarterDisc(outer - g.blockH);
       }}
     />
   );
