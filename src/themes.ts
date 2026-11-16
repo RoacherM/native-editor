@@ -1,4 +1,5 @@
 import { setTokens } from "aed/native";
+import type { TextStyle } from "nsh";
 import type { EditorDecoration, EditorStyles, EditorToken } from "nsh/base";
 import { createLruCache } from "./classify";
 
@@ -394,20 +395,39 @@ export async function syncThemeTokens(theme: EditorTheme): Promise<void> {
   }
 }
 
+function withHexAlpha(hex: string, alphaHex: string): string {
+  return `${hex.slice(0, 7)}${alphaHex}`;
+}
+
 export function buildEditorThemeStyles(theme: EditorTheme): EditorStyles {
+  const quietInk = withHexAlpha(theme.ui.mutedForeground, "99");
   return {
+    // nsh-base gutter already offsets its rows by content.paddingTop (rows_top);
+    // omitting gutter.paddingTop keeps line number 1 aligned 1:1 with code line 1.
     gutter: {
-      backgroundColor: theme.ui.gutter,
+      backgroundColor: theme.ui.background,
+      paddingBottom: 16,
+      paddingLeft: 16,
+      paddingRight: 14,
     },
     lineNumber: {
-      color: theme.ui.mutedForeground,
+      color: quietInk,
+      fontVariant: ["tabular-nums"],
     },
     activeLineNumber: {
       color: theme.ui.foreground,
-      fontWeight: "bold",
+      fontVariant: ["tabular-nums"],
+    },
+    foldMarker: {
+      color: quietInk,
+      opacity: 0.72,
     },
     content: {
       backgroundColor: theme.ui.background,
+      paddingTop: 12,
+      paddingBottom: 24,
+      paddingLeft: 6,
+      paddingRight: 28,
     },
     activeLine: {
       backgroundColor: theme.ui.activeLine,
@@ -419,7 +439,12 @@ export function buildEditorThemeStyles(theme: EditorTheme): EditorStyles {
       backgroundColor: theme.ui.accent,
     },
     indentGuide: {
-      backgroundColor: theme.ui.border,
+      backgroundColor: withHexAlpha(theme.ui.border, "66"),
+    },
+    matchingBracket: {
+      backgroundColor: withHexAlpha(theme.ui.accent, "24"),
+      borderColor: withHexAlpha(theme.ui.accent, "66"),
+      borderRadius: 2,
     },
   };
 }
@@ -457,15 +482,39 @@ const CODE_TYPES = new Set([
   "Signal", "Accessor", "JSX", "Element",
 ]);
 
-const MAX_DECORATED_LINES = 600;
-const MAX_DECORATIONS = 4000;
+const MAX_DECORATED_LINES = 2400;
+const MAX_DECORATIONS = 12000;
 const MAX_DECORATION_CACHE_ENTRIES = 48;
 const MAX_CACHEABLE_HEAD_LEN = 262_144;
+const CLASS_HEX_REGEX = /text-\[(#[0-9a-fA-F]{3,8})\]/;
 
 function normalizeColorClass(colorOrClass: string): string {
   if (colorOrClass.startsWith("text-")) return colorOrClass;
   if (colorOrClass.startsWith("#")) return `text-[${colorOrClass}]`;
   return "";
+}
+
+function extractColorHex(colorOrClass: string): string | null {
+  if (colorOrClass.startsWith("#")) return colorOrClass;
+  return CLASS_HEX_REGEX.exec(colorOrClass)?.[1] ?? null;
+}
+
+function buildDecoTextStyle(
+  colorHex: string,
+  colorOrClass: string,
+  extra?: { italic?: boolean; bold?: boolean }
+): EditorDecoration["style"] {
+  const isItalic = Boolean(extra?.italic) || colorOrClass.includes("italic");
+  const isBold =
+    Boolean(extra?.bold) ||
+    colorOrClass.includes("font-semibold") ||
+    colorOrClass.includes("font-bold");
+  const style: TextStyle = {
+    color: colorHex,
+    ...(isItalic ? { fontStyle: "italic" } : {}),
+    ...(isBold ? { fontWeight: "600" } : {}),
+  };
+  return style as EditorDecoration["style"];
 }
 
 function makeDeco(
@@ -489,6 +538,10 @@ function makeDeco(
     if (extra?.italic && !baseClass.includes("italic")) parts.push("italic");
     if (extra?.bold && !baseClass.includes("font-")) parts.push("font-semibold");
     deco.class = parts.join(" ");
+  }
+  const colorHex = extractColorHex(colorOrClass);
+  if (colorHex) {
+    deco.style = buildDecoTextStyle(colorHex, colorOrClass, extra);
   }
   return deco;
 }
@@ -755,7 +808,7 @@ const SPECIAL_LINE_DECORATORS: Record<string, LineDecorator> = {
 };
 
 interface CachedSyntaxEntry {
-  head600: string;
+  headSlice: string;
   decos: EditorDecoration[];
 }
 
@@ -812,16 +865,16 @@ function resolveSyntaxPalette(
 }
 
 function buildSyntaxSlotKey(
-  head600: string,
+  headSlice: string,
   lang: string,
   palette: SyntaxPalette,
   cacheKey?: string
 ): string | null {
-  if (head600.length > MAX_CACHEABLE_HEAD_LEN) return null;
+  if (headSlice.length > MAX_CACHEABLE_HEAD_LEN) return null;
   if (cacheKey) {
     return `k:${cacheKey}\0${lang}\0${palette.keyword}\0${palette.string}`;
   }
-  return `u:${lang}\0${palette.keyword}\0${palette.string}\0${head600}`;
+  return `u:${lang}\0${palette.keyword}\0${palette.string}\0${headSlice}`;
 }
 
 export function computeSyntaxDecorations(
@@ -833,17 +886,17 @@ export function computeSyntaxDecorations(
   if (!text || language === "plaintext") return [];
   const lang = language.toLowerCase();
   const palette = resolveSyntaxPalette(syntaxClassesOrTheme);
-  const head600 = sliceHeadLines(text, MAX_DECORATED_LINES);
-  const slotKey = buildSyntaxSlotKey(head600, lang, palette, cacheKey);
+  const headSlice = sliceHeadLines(text, MAX_DECORATED_LINES);
+  const slotKey = buildSyntaxSlotKey(headSlice, lang, palette, cacheKey);
 
   if (slotKey) {
     const cached = SYNTAX_DECORATION_CACHE.get(slotKey);
-    if (cached && cached.head600 === head600) return cached.decos;
+    if (cached && cached.headSlice === headSlice) return cached.decos;
   }
 
-  const decos = decorateBoundedLines(head600, lang, palette);
+  const decos = decorateBoundedLines(headSlice, lang, palette);
   if (slotKey) {
-    SYNTAX_DECORATION_CACHE.set(slotKey, { head600, decos });
+    SYNTAX_DECORATION_CACHE.set(slotKey, { headSlice, decos });
   }
   return decos;
 }

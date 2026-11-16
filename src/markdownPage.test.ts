@@ -99,6 +99,49 @@ describe("markdownPage target routing, image MIME & CSS spine", () => {
     expect(css).toContain("body.aed-diagram-only");
   });
 
+  test("buildPreviewThemeCss applies editorial 760px measure, dynamic font scaling, h1-only border, framed pre/copy pill, clean tables, alert cards, and TOC rail", () => {
+    const carbon = getThemeById("industrial-carbon")!;
+    const css14 = buildPreviewThemeCss(carbon, { fontFamily: "Menlo", fontSize: 14 });
+
+    // 1. Antialiased body, 760px prose measure, 44/52/96 padding, 15px at fontSize=14, 1.72 leading, -0.006em tracking.
+    expect(css14).toContain("-webkit-font-smoothing: antialiased;");
+    expect(css14).toContain("max-width: 760px;");
+    expect(css14).not.toContain("max-width: 860px;");
+    expect(css14).toContain("padding: 44px 52px 96px;");
+    expect(css14).toContain("font-size: 15px;");
+    expect(css14).toContain("line-height: 1.72;");
+    expect(css14).toContain("letter-spacing: -0.006em;");
+
+    // Smooth scaling with ⌘=/⌘- while clamping minimum prose size at 14px.
+    const css17 = buildPreviewThemeCss(carbon, { fontFamily: "Menlo", fontSize: 17 });
+    expect(css17).toContain("font-size: 18px;");
+    expect(css17).toContain("font-size: 17px;");
+    const css11 = buildPreviewThemeCss(carbon, { fontFamily: "Menlo", fontSize: 11 });
+    expect(css11).toContain("font-size: 14px;");
+
+    // 2. Refined headings: tight optical tracking, border-bottom ONLY on h1, explicitly removed on h2.
+    expect(css14).toContain("letter-spacing: -0.024em;");
+    expect(css14).toContain("letter-spacing: -0.018em;");
+    expect(css14).toContain("letter-spacing: -0.012em;");
+    expect(css14).toMatch(/\.markdown-body h1\s*\{[^}]*border-bottom:\s*1px solid/);
+    expect(css14).toMatch(/\.markdown-body h2\s*\{[^}]*border-bottom:\s*none/);
+
+    // 3. Framed inline code, pre block, and floating .aed-copy pill.
+    expect(css14).toMatch(/\.markdown-body code\s*\{[^}]*border:\s*1px solid #33312d88/);
+    expect(css14).toMatch(/\.markdown-body pre\s*\{[^}]*border:\s*1px solid #33312d/);
+    expect(css14).toMatch(/\.markdown-body pre \.aed-copy\s*\{[^}]*background:\s*#232220;[^}]*border:\s*1px solid #33312d/);
+
+    // 4. Rounded borderless-vertical tables & GFM callout cards.
+    expect(css14).toMatch(/\.markdown-body table\s*\{[^}]*border-collapse:\s*separate/);
+    expect(css14).toContain("border-bottom: 1px solid #33312d80;");
+    expect(css14).toMatch(/\.markdown-body \.markdown-alert\s*\{[^}]*border-left-width:\s*3px/);
+
+    // 5. Continuous 1px TOC vertical rail + 2px accent active indicator.
+    expect(css14).toMatch(/\.aed-toc-list\s*\{[^}]*border-left:\s*1px solid #33312d80/);
+    expect(css14).toMatch(/\.aed-toc-item\s*\{[^}]*font-size:\s*12\.5px/);
+    expect(css14).toMatch(/\.aed-toc-item\.aed-toc-current\s*\{[^}]*font-weight:\s*500;[^}]*border-left:\s*2px solid #e8462b/);
+  });
+
   test("parsePreviewMessage and handlePreviewMessage support diagramRendered, copySource, and file line locations", async () => {
     expect(parsePreviewMessage('{"type":"diagramRendered","ok":true}')).toEqual({
       type: "diagramRendered",

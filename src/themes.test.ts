@@ -1,5 +1,6 @@
 import { describe, expect, test } from "nsh/test";
 import {
+  buildEditorThemeStyles,
   buildThemeTokens,
   computeSyntaxDecorations,
   DEFAULT_THEME_ID,
@@ -103,17 +104,53 @@ describe("L0.4 unified theme tokens & WCAG contrast", () => {
 
     await syncThemeTokens(catppuccin);
   });
+
+  test("buildEditorThemeStyles makes gutter flush with canvas, breathes content, recedes line numbers, and softens guides", () => {
+    for (const theme of EDITOR_THEMES) {
+      const styles = buildEditorThemeStyles(theme);
+      expect(styles.gutter).toEqual({
+        backgroundColor: theme.ui.background,
+        paddingBottom: 16,
+        paddingLeft: 16,
+        paddingRight: 14,
+      });
+      expect(styles.content).toEqual({
+        backgroundColor: theme.ui.background,
+        paddingTop: 12,
+        paddingBottom: 24,
+        paddingLeft: 6,
+        paddingRight: 28,
+      });
+      expect(styles.lineNumber).toEqual({
+        color: `${theme.ui.mutedForeground}99`,
+        fontVariant: ["tabular-nums"],
+      });
+      expect(styles.activeLineNumber).toEqual({
+        color: theme.ui.foreground,
+        fontVariant: ["tabular-nums"],
+      });
+      expect(styles.foldMarker).toMatchObject({
+        color: `${theme.ui.mutedForeground}99`,
+      });
+      expect(styles.indentGuide).toEqual({
+        backgroundColor: `${theme.ui.border}66`,
+      });
+      expect(styles.matchingBracket).toMatchObject({
+        backgroundColor: `${theme.ui.accent}24`,
+      });
+    }
+  });
 });
 
-describe("L0.4 600-line bounded syntax cache & zero-alloc identifier scan", () => {
-  test("slices head 600 lines before caching so edits below line 600 hit O(1) even on multi-MB text", () => {
+describe("L0.4 2400-line bounded syntax cache, inline style emission & zero-alloc identifier scan", () => {
+  test("decorates up to 2400 lines / 12000 tokens with inline style + class and hits O(1) cache below line 2400", () => {
     const tokyo = getThemeById("tokyo-night");
     const headLines = Array.from(
-      { length: 600 },
-      (_, i) => `export const v${i}: number = ${i};`
+      { length: 2400 },
+      (_, i) => `export const v${i}: number = ${i}; // note ${i}`
     ).join("\n");
-    const tailV1 = "\n" + "const tail = 'a';\n".repeat(20_000);
-    const tailV2 = "\n" + "const tail = 'b_edited_below_line_600';\n".repeat(25_000);
+    const tailV1 = "\n" + "const tail = 'a';\n".repeat(10_000);
+    const tailV2 = "\n" + "const tail = 'b_edited_below_line_2400';\n".repeat(12_000);
 
     const first = computeSyntaxDecorations(
       headLines + tailV1,
@@ -121,11 +158,25 @@ describe("L0.4 600-line bounded syntax cache & zero-alloc identifier scan", () =
       tokyo,
       "/repo/big.ts\0tokyo-night"
     );
-    expect(first.length).toBeGreaterThan(600);
-    const kwDeco = first.find((d) => d.token === "keyword");
-    expect(kwDeco?.class).toContain(`text-[${tokyo.syntax.keyword}]`);
+    expect(first.length).toBeGreaterThan(4000);
+    expect(first.length).toBeLessThanOrEqual(12_000);
 
-    // Typing below line 600 hits the exact cached decoration array reference.
+    // Lines well past the old 600-line ceiling keep exact theme syntax highlighting.
+    const lateLineDeco = first.find((d) => d.range.start.line >= 1800 && d.token === "keyword");
+    expect(lateLineDeco).toBeDefined();
+    expect(lateLineDeco?.class).toContain(`text-[${tokyo.syntax.keyword}]`);
+    expect(lateLineDeco?.style).toEqual({
+      color: tokyo.syntax.keyword,
+      fontWeight: "600",
+    });
+
+    const commentDeco = first.find((d) => d.range.start.line >= 1800 && d.token === "comment");
+    expect(commentDeco?.style).toEqual({
+      color: tokyo.syntax.comment,
+      fontStyle: "italic",
+    });
+
+    // Typing below line 2400 hits the exact cached decoration array reference.
     const second = computeSyntaxDecorations(
       headLines + tailV2,
       "typescript",
@@ -134,7 +185,7 @@ describe("L0.4 600-line bounded syntax cache & zero-alloc identifier scan", () =
     );
     expect(second).toBe(first);
 
-    // Editing line 1 invalidates the cached head600 for that key and recomputes.
+    // Editing line 1 invalidates the cached head slice for that key and recomputes.
     const editedHead = headLines.replace("export const v0", "const renamed0");
     const third = computeSyntaxDecorations(
       editedHead + tailV2,
@@ -145,7 +196,7 @@ describe("L0.4 600-line bounded syntax cache & zero-alloc identifier scan", () =
     expect(third).not.toBe(first);
   });
 
-  test("distinguishes object properties (foo : 1) from Rust/C++ paths (foo::bar) and emits hex class for raw SyntaxPalette", () => {
+  test("distinguishes object properties (foo : 1) from Rust/C++ paths (foo::bar) and emits hex style + class for raw SyntaxPalette", () => {
     const kanagawa = getThemeById("kanagawa-dragon");
     const src = "const obj = { alpha   : 42 };\nlet x = std::mem::take(y);";
     const decos = computeSyntaxDecorations(src, "rust", kanagawa.syntax);
@@ -153,6 +204,7 @@ describe("L0.4 600-line bounded syntax cache & zero-alloc identifier scan", () =
     const alphaDeco = decos.find((d) => d.range.start.line === 0 && d.range.start.column === 14);
     expect(alphaDeco?.token).toBe("attr");
     expect(alphaDeco?.class).toBe(`text-[${kanagawa.syntax.property}]`);
+    expect(alphaDeco?.style).toEqual({ color: kanagawa.syntax.property });
 
     const stdDeco = decos.find((d) => d.range.start.line === 1 && d.range.start.column === 8);
     expect(stdDeco).toBeUndefined();

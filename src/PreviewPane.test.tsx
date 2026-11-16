@@ -1,6 +1,7 @@
-import { describe, expect, test } from "nsh/test";
+import { describe, expect, open, test } from "nsh/test";
 import { classifyFile } from "./classify";
 import { buildQuickOpenItems, OPEN_FOLDER_CMD_ID } from "./commands";
+import * as PreviewPaneMod from "./PreviewPane";
 import {
   clampRevealPosition,
   formatSearchCount,
@@ -135,5 +136,87 @@ describe("PreviewPane, mode pills & Quick Open pure contracts", () => {
     expect(coldItems).toHaveLength(1);
     expect(coldItems[0].id).toBe(OPEN_FOLDER_CMD_ID);
     expect(coldItems[0].label).toBe("Open Folder…");
+  });
+
+  test("resolveEditorLayout wraps prose/markdown cleanly with airy 1.68x leading and keeps code unwrapped at 1.54x with 8-row scroll cushion", () => {
+    const resolveEditorLayout = (
+      PreviewPaneMod as unknown as {
+        resolveEditorLayout?: (
+          classification: { kind: string; language: string },
+          fontSize: number,
+        ) => {
+          softWrap: boolean;
+          lineHeight: number;
+          scrollBeyondLastLine: number;
+          classes: { line: string } | undefined;
+        };
+      }
+    ).resolveEditorLayout;
+
+    expect(typeof resolveEditorLayout).toBe("function");
+
+    // Code files stay crisp & unwrapped with 1.54x leading (20pt at 13pt, 22pt at 14pt).
+    expect(resolveEditorLayout!(classifyFile("main.ts"), 13)).toEqual({
+      softWrap: false,
+      lineHeight: 20,
+      scrollBeyondLastLine: 8,
+      classes: { line: "whitespace-nowrap" },
+    });
+    expect(resolveEditorLayout!(classifyFile("main.rs"), 14)).toEqual({
+      softWrap: false,
+      lineHeight: 22,
+      scrollBeyondLastLine: 8,
+      classes: { line: "whitespace-nowrap" },
+    });
+
+    // Plain text and Markdown source wrap cleanly with no whitespace-nowrap override and airy 1.68x leading.
+    expect(resolveEditorLayout!(classifyFile("notes.txt"), 13)).toEqual({
+      softWrap: true,
+      lineHeight: 22,
+      scrollBeyondLastLine: 8,
+      classes: undefined,
+    });
+    expect(resolveEditorLayout!(classifyFile("README.md"), 14)).toEqual({
+      softWrap: true,
+      lineHeight: 24,
+      scrollBeyondLastLine: 8,
+      classes: undefined,
+    });
+  });
+
+  test("headless Editor applies exact theme syntax colors, non-bold active line numbers, and framed FindBar", async () => {
+    const fixtureRoot = decodeURIComponent(
+      new URL("../fixtures", import.meta.url).pathname,
+    ).replace(/\/+$/, "");
+    const app = await open("../App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      storage: { "aed.theme": "tokyo-night" },
+      host: { params: { openFile: `${fixtureRoot}/main.ts` } },
+    });
+    await app.waitFor("id:preview-editor");
+
+    // Active line number 1 is crisp regular weight (no bold 700 width jump), inactive line 2 recedes at ~60% alpha.
+    const activeNum = app.spanStyle("id:preview-editor >> text:1");
+    expect(activeNum.fontWeight).toBe(400);
+    expect(activeNum.color).toBe("#c0caf5ff");
+
+    const mutedNum = app.spanStyle("id:preview-editor >> text:2");
+    expect(mutedNum.color).toBe("#565f8999");
+
+    // Inline style on EditorDecoration paints exact theme syntax colors (updating live across theme switches).
+    await app.waitUntil(
+      () => app.spanStyle("id:preview-editor >> text:export").color === "#bb9af7ff",
+      { timeout: 1500 },
+    );
+    const kwSpan = app.spanStyle("id:preview-editor >> text:export");
+    expect(kwSpan.color).toBe("#bb9af7ff");
+    expect(kwSpan.fontWeight).toBe(600);
+
+    // FindBar opens with framed search input.
+    await app.keyboard.press("mod+f");
+    await app.waitFor("id:editor-find-input");
+    expect(app.shows("id:editor-find-input")).toBe(true);
   });
 });

@@ -265,6 +265,7 @@ export function buildPreviewThemeCss(
 ): string {
   const ui = theme.ui;
   const sy = theme.syntax;
+  const proseFontSize = Math.max(14, font.fontSize + 1);
   const mono = font.fontFamily
     ? `"${font.fontFamily}", ui-monospace, "SF Mono", Menlo, monospace`
     : `ui-monospace, "SF Mono", Menlo, monospace`;
@@ -273,10 +274,13 @@ export function buildPreviewThemeCss(
 :root { color-scheme: ${theme.appearance}; }
 html, body { margin: 0; padding: 0; background: ${ui.background}; }
 body {
-  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
-  font-size: 15px;
-  line-height: 1.7;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: ${proseFontSize}px;
+  line-height: 1.72;
+  letter-spacing: -0.006em;
   color: ${ui.foreground};
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 .markdown-body {
   --fgColor-default: ${ui.foreground};
@@ -305,21 +309,22 @@ body {
   --controlTrack-bg: ${ui.card};
   background: ${ui.background};
   color: ${ui.foreground};
-  font-size: 15px;
-  line-height: 1.7;
-  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: ${proseFontSize}px;
+  line-height: 1.72;
+  letter-spacing: -0.006em;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
   box-sizing: border-box;
-  max-width: 860px;
+  max-width: 760px;
   margin: 0 auto;
-  padding: 40px 48px 96px;
+  padding: 44px 52px 96px;
 }
 /* When the TOC shows (196px + 16px trailing pad = 212px at right: 0 + 24px gap),
    shrink the centering space so the column never runs under it. */
 body.aed-has-toc { padding-right: 236px; }
 @media (max-width: 1120px) {
-  .markdown-body { padding: 32px 32px 80px; }
+  .markdown-body { padding: 36px 32px 80px; }
   body.aed-has-toc { padding-right: 220px; }
-  body.aed-has-toc .markdown-body { padding: 32px 24px 80px; }
+  body.aed-has-toc .markdown-body { padding: 36px 24px 80px; }
 }
 body.aed-diagram-only { display: flex; min-height: 100vh; align-items: center; justify-content: center; }
 body.aed-diagram-only .markdown-body { max-width: none; width: 100%; margin: 0; padding: 24px; display: flex; align-items: center; justify-content: center; }
@@ -333,17 +338,17 @@ body.aed-diagram-only .aed-mermaid-svg { margin: 0; width: 100%; }
   font-weight: 600;
   color: ${ui.foreground};
 }
-.markdown-body h1 { font-size: 28px; line-height: 1.3; margin: 0 0 24px; padding-bottom: 12px; border-bottom: 1px solid ${ui.border}; }
-.markdown-body h2 { font-size: 22px; line-height: 1.35; margin: 40px 0 16px; padding-bottom: 8px; border-bottom: 1px solid ${ui.border}; }
-.markdown-body h3 { font-size: 18px; margin: 32px 0 12px; }
-.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 15px; margin: 24px 0 8px; }
+.markdown-body h1 { font-size: 1.85em; line-height: 1.25; letter-spacing: -0.024em; margin: 0 0 1.1em; padding-bottom: 0.4em; border-bottom: 1px solid ${ui.border}; }
+.markdown-body h2 { font-size: 1.38em; line-height: 1.32; letter-spacing: -0.018em; margin: 1.9em 0 0.65em; padding-bottom: 0; border-bottom: none; }
+.markdown-body h3 { font-size: 1.15em; line-height: 1.4; letter-spacing: -0.012em; margin: 1.55em 0 0.5em; border-bottom: none; }
+.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 1em; line-height: 1.45; margin: 1.3em 0 0.4em; border-bottom: none; }
 .markdown-body h6 { color: ${ui.mutedForeground}; }
 .markdown-body h1:first-child, .markdown-body h2:first-child, .markdown-body h3:first-child { margin-top: 0; }
 .markdown-body strong { font-weight: 600; }
 .markdown-body a { color: ${ui.foreground}; text-decoration: underline; text-decoration-color: ${ui.border}; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .markdown-body a:hover { text-decoration-color: ${ui.accent}; }
 .markdown-body hr { height: 1px; background: ${ui.border}; border: none; margin: 32px 0; }
-.markdown-body img { max-width: 100%; border-radius: 4px; }
+.markdown-body img { max-width: 100%; border-radius: 6px; }
 .markdown-body img.aed-img-missing { display: inline-block; padding: 2px 8px; border: 1px dashed ${ui.border}; border-radius: 4px; }
 
 /* — Code — */
@@ -351,37 +356,45 @@ body.aed-diagram-only .aed-mermaid-svg { margin: 0; width: 100%; }
   font-family: ${mono};
   font-size: 0.86em;
   background: ${ui.card};
-  border: none;
-  border-radius: 4px;
-  padding: 0.15em 0.4em;
+  border: 1px solid ${ui.border}88;
+  border-radius: 5px;
+  padding: 0.14em 0.42em;
 }
 .markdown-body pre {
   background: ${ui.sidebar};
-  border: none;
+  border: 1px solid ${ui.border};
   border-radius: 8px;
-  padding: 16px 20px;
+  padding: 14px 18px;
+  margin: 0 0 18px;
   overflow-x: auto;
   position: relative;
 }
 .markdown-body pre code {
   background: transparent;
+  border: none;
+  border-radius: 0;
   padding: 0;
   font-family: ${mono};
   font-size: ${font.fontSize}px;
   line-height: 1.6;
+  letter-spacing: 0;
 }
 .markdown-body pre .aed-copy {
   position: absolute;
   top: 8px;
-  right: 10px;
+  right: 8px;
   font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
   color: ${ui.mutedForeground};
-  background: transparent;
-  border: none;
-  padding: 2px 4px;
+  background: ${ui.card};
+  border: 1px solid ${ui.border};
+  border-radius: 5px;
+  padding: 2px 8px;
   cursor: pointer;
   opacity: 0;
+  transition: opacity 120ms ease;
 }
 .markdown-body pre:hover .aed-copy { opacity: 1; }
 .markdown-body pre .aed-copy:hover { color: ${ui.foreground}; }
@@ -413,12 +426,21 @@ body.aed-diagram-only .aed-mermaid-svg { margin: 0; width: 100%; }
 
 /* — Quotes & alerts — */
 .markdown-body blockquote {
-  margin: 0 0 16px;
-  padding: 0 0 0 16px;
+  margin: 0 0 18px;
+  padding: 2px 0 2px 16px;
   border-left: 2px solid ${ui.border};
   color: ${ui.mutedForeground};
 }
-.markdown-body .markdown-alert { border-left: 2px solid ${ui.border}; padding-left: 16px; margin: 0 0 16px; color: ${ui.foreground}; }
+.markdown-body .markdown-alert {
+  background: ${ui.sidebar};
+  border: 1px solid ${ui.border};
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 0 0 18px;
+  color: ${ui.foreground};
+}
+.markdown-body .markdown-alert > :last-child { margin-bottom: 0; }
 .markdown-body .markdown-alert-title { font-size: 13px; font-weight: 600; text-transform: capitalize; margin: 0 0 4px; }
 .markdown-body .markdown-alert.markdown-alert-note { border-left-color: ${sy.property}; }
 .markdown-body .markdown-alert.markdown-alert-note .markdown-alert-title { color: ${sy.property}; }
@@ -432,15 +454,42 @@ body.aed-diagram-only .aed-mermaid-svg { margin: 0; width: 100%; }
 .markdown-body .markdown-alert.markdown-alert-caution .markdown-alert-title { color: ${ui.accent}; }
 
 /* — Tables — */
-.markdown-body table { border-collapse: collapse; margin: 0 0 16px; display: block; overflow-x: auto; font-variant-numeric: tabular-nums; }
+.markdown-body table {
+  width: 100%;
+  max-width: 100%;
+  display: table;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid ${ui.border};
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 0 0 20px;
+  font-size: 0.93em;
+  font-variant-numeric: tabular-nums;
+}
+.markdown-body table tr,
+.markdown-body table tr:nth-child(2n) { background: transparent; border-top: none; }
 .markdown-body table thead tr { background: ${ui.sidebar}; }
-.markdown-body table th, .markdown-body table td { border: 1px solid ${ui.border}; padding: 6px 12px; }
+.markdown-body table th {
+  background: ${ui.sidebar};
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 14px;
+  border: none;
+  border-bottom: 1px solid ${ui.border};
+}
+.markdown-body table td {
+  padding: 8px 14px;
+  border: none;
+  border-bottom: 1px solid ${ui.border}80;
+}
+.markdown-body table tbody tr:last-child td { border-bottom: none; }
 
 /* — Footnotes, details, mermaid — */
 .markdown-body .footnotes { font-size: 0.9em; color: ${ui.mutedForeground}; }
 .markdown-body hr.footnotes-sep { display: none; }
 .markdown-body details { margin: 0 0 16px; }
-.aed-mermaid-svg { text-align: center; margin: 0 0 16px; }
+.aed-mermaid-svg { text-align: center; margin: 0 0 18px; }
 .aed-mermaid-svg svg { max-width: 100%; height: auto; background: transparent; }
 .aed-mermaid-unavailable { font-size: 12px; color: ${ui.mutedForeground}; margin: -8px 0 16px; }
 .markdown-body pre.mermaid { color: ${sy.comment}; }
@@ -448,31 +497,34 @@ body.aed-diagram-only .aed-mermaid-svg { margin: 0; width: 100%; }
 /* — Table of contents — */
 #aed-toc {
   position: fixed;
-  top: 40px;
+  top: 44px;
   right: 0;
   width: 196px;
   padding: 0;
+  padding-left: 1px;
   padding-right: 16px;
-  max-height: calc(100vh - 80px);
+  max-height: calc(100vh - 88px);
   overflow-y: auto;
 }
 #aed-toc.aed-toc-hidden { display: none; }
-.aed-toc-label { font-size: 12px; font-weight: 500; color: ${ui.mutedForeground}; margin-bottom: 8px; }
+.aed-toc-label { font-size: 11.5px; font-weight: 500; color: ${ui.mutedForeground}; margin-bottom: 8px; }
+.aed-toc-list { border-left: 1px solid ${ui.border}80; }
 .aed-toc-item {
   display: block;
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.5;
   color: ${ui.mutedForeground};
   text-decoration: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 2px 0 2px 8px;
-  margin: 4px 0;
+  margin: 0 0 0 -1px;
+  padding: 3px 0 3px 12px;
   border-left: 2px solid transparent;
+  transition: color 100ms;
 }
-.aed-toc-level-3 { padding-left: 20px; }
+.aed-toc-level-3 { padding-left: 22px; }
 .aed-toc-item:hover { color: ${ui.foreground}; text-decoration: none; }
-.aed-toc-item.aed-toc-current { color: ${ui.foreground}; border-left-color: ${ui.accent}; }
+.aed-toc-item.aed-toc-current { font-weight: 500; color: ${ui.foreground}; border-left: 2px solid ${ui.accent}; }
 `;
 }

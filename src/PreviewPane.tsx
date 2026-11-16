@@ -123,8 +123,12 @@ function FindBar(props: {
   );
   return (
     <View
-      style={{ backgroundColor: props.theme().ui.sidebar }}
-      class="h-8 flex-row items-center px-3 gap-1.5 shrink-0 select-none"
+      style={{
+        backgroundColor: props.theme().ui.sidebar,
+        borderBottomWidth: 1,
+        borderBottomColor: props.theme().ui.border,
+      }}
+      class="h-8 flex-row items-center px-3 gap-1.5 shrink-0 select-none border-b border-border"
     >
       <Input
         testID="editor-find-input"
@@ -137,8 +141,10 @@ function FindBar(props: {
           height: 24,
           backgroundColor: props.theme().ui.background,
           color: props.theme().ui.foreground,
+          borderWidth: 1,
+          borderColor: props.theme().ui.border,
         }}
-        class="flex-1 h-6 px-2 text-xs text-foreground placeholder:text-muted-foreground rounded border-none"
+        class="flex-1 h-6 px-2 text-xs text-foreground placeholder:text-muted-foreground rounded border border-border"
       />
       <Text
         testID="find-match-count"
@@ -288,10 +294,13 @@ function DiffBody(props: {
         softWrap
         fontFamily={props.fontStyle().fontFamily}
         fontSize={props.fontStyle().fontSize}
-        lineHeight={Math.round(props.fontStyle().fontSize * 1.65)}
+        lineHeight={Math.round(props.fontStyle().fontSize * 1.54)}
         styles={{
-          gutter: { backgroundColor: props.theme().ui.gutter },
-          lineNumber: { color: props.theme().ui.mutedForeground },
+          gutter: { backgroundColor: props.theme().ui.background },
+          lineNumber: {
+            color: `${props.theme().ui.mutedForeground.slice(0, 7)}99`,
+            fontVariant: ["tabular-nums"],
+          },
           content: {
             backgroundColor: props.theme().ui.background,
             color: props.theme().ui.foreground,
@@ -330,8 +339,14 @@ function bindEditorDecorationEffect(
     if (curTheme.id !== lastTheme) {
       lastTheme = curTheme.id;
       lastText = text;
-      decorations.set(computeSyntaxDecorations(text, lang, curTheme, cacheKey));
-      return;
+      // Flush `[]` for one frame first: `nsh-base` 0.4.0 `RowContent` compares decoration
+      // index vectors (`Vec<usize>`), so replacing same-range decorations in one step
+      // would keep `old == new` and leave stale theme colors on visible spans.
+      decorations.set([]);
+      const flushTimer = setTimeout(() => {
+        decorations.set(computeSyntaxDecorations(text, lang, curTheme, cacheKey));
+      }, 0);
+      return () => clearTimeout(flushTimer);
     }
     if (text === lastText) return;
     const timer = setTimeout(() => {
@@ -399,6 +414,31 @@ function bindEditorFocusEffects(
   });
 }
 
+export interface EditorLayoutConfig {
+  softWrap: boolean;
+  lineHeight: number;
+  scrollBeyondLastLine: number;
+  classes: { line: string } | undefined;
+}
+
+/**
+ * Prose & Markdown source wrap softly at window edge with airy 1.68x leading;
+ * structured code stays unwrapped at crisp 1.54x leading with horizontal scroll.
+ */
+export function resolveEditorLayout(
+  classification: { kind: string; language: string },
+  fontSize: number,
+): EditorLayoutConfig {
+  const wrapProse =
+    classification.kind === "markdown" || classification.language === "plaintext";
+  return {
+    softWrap: wrapProse,
+    lineHeight: Math.round(fontSize * (wrapProse ? 1.68 : 1.54)),
+    scrollBeyondLastLine: 8,
+    classes: wrapProse ? undefined : { line: "whitespace-nowrap" },
+  };
+}
+
 function EditorBody(props: {
   file: Accessor<LoadedFile>;
   search: Accessor<{ query: string; caseSensitive: boolean } | undefined>;
@@ -428,6 +468,9 @@ function EditorBody(props: {
   effect(applyReveal);
 
   const editorStyles = computed(() => buildEditorThemeStyles(props.theme()));
+  const layout = computed(() =>
+    resolveEditorLayout(f().classification, props.fontStyle().fontSize),
+  );
   const decorations = signal(
     computeSyntaxDecorations(
       initialSnapshot.text,
@@ -466,15 +509,16 @@ function EditorBody(props: {
       decorations={decorations()}
       styles={editorStyles()}
       lineNumbers
-      softWrap
+      softWrap={layout().softWrap}
+      scrollBeyondLastLine={layout().scrollBeyondLastLine}
       highlighting
       autoClose
       autoIndent
       activeLine
       fontFamily={props.fontStyle().fontFamily}
       fontSize={props.fontStyle().fontSize}
-      lineHeight={Math.round(props.fontStyle().fontSize * 1.65)}
-      classes={{ line: "whitespace-nowrap" }}
+      lineHeight={layout().lineHeight}
+      classes={layout().classes}
       style={{ backgroundColor: props.theme().ui.background }}
       class="flex-1"
     />
@@ -881,9 +925,10 @@ function PreviewBody(props: {
           readOnly
           language="plaintext"
           lineNumbers={false}
+          scrollBeyondLastLine={8}
           fontFamily={fontStyle().fontFamily}
           fontSize={fontStyle().fontSize}
-          lineHeight={Math.round(fontStyle().fontSize * 1.65)}
+          lineHeight={Math.round(fontStyle().fontSize * 1.54)}
           styles={buildEditorThemeStyles(props.theme())}
           classes={{ line: "whitespace-nowrap" }}
           style={{ backgroundColor: props.theme().ui.background }}

@@ -4,6 +4,7 @@ import { badgeForPath } from "./classify";
 import * as iconsMod from "./icons";
 import { FileBadge, Icon, opticalStrokeWidth } from "./icons";
 import { EDITOR_THEMES, getThemeById, syncThemeTokens } from "./themes";
+import * as uiMod from "./ui";
 import {
   createZoom,
   disambiguateTabParents,
@@ -162,6 +163,36 @@ describe("L2 Industrial UI & Icon pure unit contracts", () => {
     expect(formatShortcut("mod+p").length).toBeGreaterThan(0);
     expect(formatShortcut("⌘⇧W")).toBe("⌘⇧W");
     expect(formatShortcut("")).toBe("");
+  });
+
+  test("TabStrip class contracts draw 1px bottom horizon, subtle inter-tab border-r, active seam bridge, and trailing pr-2.5", () => {
+    const helpers = uiMod as unknown as {
+      tabStripRowClass?: (heightClass: string, extra?: string) => string;
+      tabStripChipClass?: (heightClass: string, active: boolean) => string;
+      TAB_STRIP_TRAILING_CLASS?: string;
+    };
+    expect(typeof helpers.tabStripRowClass).toBe("function");
+    expect(typeof helpers.tabStripChipClass).toBe("function");
+
+    const rowCls = helpers.tabStripRowClass!("h-9");
+    expect(rowCls).toContain("bg-sidebar");
+    expect(rowCls).toContain("border-b");
+    expect(rowCls).toContain("border-border");
+
+    const activeCls = helpers.tabStripChipClass!("h-9", true);
+    expect(activeCls).toContain("bg-background");
+    expect(activeCls).toContain("border-r");
+    expect(activeCls).toContain("border-border/60");
+    expect(activeCls).toContain("-mb-px");
+    expect(activeCls).toContain("pb-px");
+
+    const inactiveCls = helpers.tabStripChipClass!("h-9", false);
+    expect(inactiveCls).toContain("bg-transparent");
+    expect(inactiveCls).toContain("border-r");
+    expect(inactiveCls).toContain("border-border/60");
+    expect(inactiveCls).not.toContain("-mb-px");
+
+    expect(helpers.TAB_STRIP_TRAILING_CLASS).toContain("pr-2.5");
   });
 });
 

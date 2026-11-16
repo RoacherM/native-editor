@@ -115,13 +115,26 @@ function resolveTabMeta<T>(item: T, strip: TabStripProps<T>, parents: Record<str
   return { id, label, testKey, parentHint };
 }
 
+export const TAB_STRIP_TRAILING_CLASS = "pr-2.5 flex-row items-center shrink-0";
+
+export function tabStripRowClass(heightClass: string, extra?: string): string {
+  return `flex-row items-center bg-sidebar border-b border-border select-none shrink-0 ${heightClass}${extra ? ` ${extra}` : ""}`;
+}
+
+export function tabStripChipClass(heightClass: string, active: boolean): string {
+  const surface = active
+    ? "bg-background -mb-px pb-px"
+    : "bg-transparent hover:bg-foreground/5";
+  return `relative px-3 flex-row items-center gap-1.5 shrink-0 border-r border-border/60 ${heightClass} ${surface}`;
+}
+
 function TabStripChip<T>(props: { item: Accessor<T>; strip: TabStripProps<T>; height: Accessor<string>; parents: Accessor<Record<string, string>> }): JSX.Element {
   const meta = computed(() => resolveTabMeta(props.item(), props.strip, props.parents()));
   const isActive = () => meta().id === props.strip.activeId;
   const selectPrefix = () => props.strip.selectTestIdPrefix ?? "tab-select";
   const closePrefix = () => props.strip.closeTestIdPrefix ?? "tab-close";
   return (
-    <View class={`relative px-3 flex-row items-center gap-1.5 shrink-0 ${props.height()} ${isActive() ? "bg-background" : "bg-transparent"}`}>
+    <View class={tabStripChipClass(props.height(), isActive())}>
       <If when={isActive()}><View class="absolute inset-x-0 top-0 h-[2px] bg-primary" /></If>
       <Tab selected={isActive()} testID={`${selectPrefix()}-${meta().testKey}`} onPress={() => props.strip.onSelect(meta().id, props.item())} class={`h-full flex-row items-center gap-1.5 min-w-0 ${FOCUS_RING}`}>
         {props.strip.leading?.(props.item())}
@@ -141,7 +154,7 @@ export function TabStrip<T>(props: TabStripProps<T>): JSX.Element {
   const height = () => props.heightClass ?? "h-9";
   const parents = computed(() => (props.getPath ? disambiguateTabParents(props.items.map((it) => props.getPath!(it))) : {}));
   return (
-    <View testID={props.testID} class={`flex-row items-center bg-sidebar select-none shrink-0 ${height()} ${props.class ?? ""}`}>
+    <View testID={props.testID} class={tabStripRowClass(height(), props.class)}>
       <Scroll horizontal class="flex-1 shrink min-w-0">
         <Tabs class={`flex-row items-stretch ${height()}`}>
           <Each of={props.items} key={(item) => String(props.getId(item))}>
@@ -149,7 +162,9 @@ export function TabStrip<T>(props: TabStripProps<T>): JSX.Element {
           </Each>
         </Tabs>
       </Scroll>
-      {props.trailing}
+      <If when={props.trailing !== undefined}>
+        <View class={TAB_STRIP_TRAILING_CLASS}>{props.trailing}</View>
+      </If>
     </View>
   );
 }
