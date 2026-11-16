@@ -148,6 +148,8 @@ pub struct Shared {
     events: Mutex<Events>,
     event_ready: Condvar,
     wake_pending: AtomicBool,
+    /// Whether `read_shell` wakes `nextEvent` on `output` (`true` by default).
+    notify_output: AtomicBool,
     /// Whether the user typed into the running shell.
     used: AtomicBool,
 }
@@ -220,6 +222,7 @@ impl Shared {
             events: Mutex::new(Events::default()),
             event_ready: Condvar::new(),
             wake_pending: AtomicBool::new(false),
+            notify_output: AtomicBool::new(true),
             used: AtomicBool::new(false),
         });
         let term = shared.core.lock().unwrap().term;
@@ -293,6 +296,13 @@ impl Shared {
         self.wake_pending.store(false, Ordering::Release);
     }
 
+    pub fn set_notify_output(&self, on: bool) {
+        self.notify_output.store(on, Ordering::Release);
+        if !on {
+            self.events.lock().unwrap().output = false;
+        }
+    }
+
     /// Writes to the terminal's screen (not to the shell).
     pub fn vt_write(&self, bytes: &[u8]) {
         let core = self.core.lock().unwrap();
@@ -315,6 +325,7 @@ impl Shared {
             pty::set_size(run.child.fd, rows, cols);
         }
         drop(core);
+        log::line(|| format!("#{} resize {rows}x{cols} cell {cell_w}x{cell_h}px", self.id));
         self.changed();
     }
 
@@ -360,7 +371,9 @@ impl Shared {
             unsafe { g::ghostty_terminal_vt_write(core.term, buf.as_ptr(), n) };
             drop(core);
             log::line(|| format!("#{} output {n} {}", self.id, log::escape(&buf[..n.min(240)])));
-            self.notify(|e| e.output = true);
+            if self.notify_output.load(Ordering::Acquire) {
+                self.notify(|e| e.output = true);
+            }
             self.changed();
         }
         let mut core = self.core.lock().unwrap();
@@ -595,6 +608,12 @@ impl TerminalSession {
     /// Hangs up the shell and ends `nextEvent`; the tab is gone.
     pub fn close(&self) {
         self.shared.close();
+    }
+
+    /// Whether shell output wakes `nextEvent` with `output` (`true` by default;
+    /// `title`, `exit`, `input` and `closed` always wake).
+    pub fn set_notify_output(&self, on: bool) {
+        self.shared.set_notify_output(on);
     }
 }
 

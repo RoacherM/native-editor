@@ -228,3 +228,42 @@ fn a_shell_outside_the_app_keeps_its_history_out_of_home() {
     let private = private.to_string_lossy();
     assert_eq!(line, format!("H={private}/.history Z={private}"));
 }
+
+#[test]
+fn disabling_output_notifications_skips_output_wakeups_while_keeping_title_exit_and_screen() {
+    let session = TerminalSession::new(24, 80);
+    session.set_notify_output(false);
+    sh(&session);
+    type_line(&session, "printf '\\033]2;quiet-tab\\007'; echo SILENT_STREAM; exit 5");
+    let (tx, rx) = mpsc::channel();
+    let shared = session.shared.clone();
+    std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        loop {
+            let ev = shared.wait_event();
+            let done = ev.kind == "exit" || ev.kind == "closed";
+            seen.push(ev);
+            if done {
+                let _ = tx.send(seen);
+                return;
+            }
+        }
+    });
+    let events = rx.recv_timeout(Duration::from_secs(5)).expect("title and exit events");
+    assert!(events.iter().all(|e| e.kind != "output"), "unexpected output wakeups: {events:?}");
+    assert!(events.iter().any(|e| e.kind == "title" && e.title.as_deref() == Some("quiet-tab")), "missing title: {events:?}");
+    assert!(events.iter().any(|e| e.kind == "exit" && e.code == Some(5)), "missing exit: {events:?}");
+    assert!(session.screen_text().lines().any(|l| l == "SILENT_STREAM"));
+
+    // Re-enabling output notifications restores `output` wakeups.
+    session.set_notify_output(true);
+    sh(&session);
+    type_line(&session, "echo LOUD_AGAIN");
+    let (tx2, rx2) = mpsc::channel();
+    let shared2 = session.shared.clone();
+    std::thread::spawn(move || {
+        let _ = tx2.send(shared2.wait_event());
+    });
+    let ev = rx2.recv_timeout(Duration::from_secs(5)).expect("output event");
+    assert_eq!(ev.kind, "output");
+}

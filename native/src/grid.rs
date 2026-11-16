@@ -1,5 +1,6 @@
 //! What the view draws: a copy of libghostty's render state (cells,
-//! colours, cursor), the font's metrics, and the CoreText drawing.
+//! colours, cursor), the font's metrics and system cascade glyph cache,
+//! and the CoreText drawing.
 
 use std::{collections::HashMap, ptr::NonNull};
 
@@ -8,15 +9,17 @@ use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSColor, NSFont, NSFontAttributeName, NSFontDescriptorSymbolicTraits,
     NSFontManager, NSFontTraitMask, NSForegroundColorAttributeName,
 };
-use objc2_core_foundation::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFRange, CFRetained, CFString, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_core_text::{CTFont, CTFontOrientation};
 use objc2_foundation::{NSAttributedString, NSDictionary, NSString};
 
 use crate::{ffi as g, keys};
 
-/// Points between the view's edges and the grid.
-pub const PAD: f64 = 6.0;
+/// Horizontal and vertical padding in points (`PAD_X = 12pt` aligns terminal
+/// text with the 12pt tab & statusbar spine; `PAD_Y = 6pt` top and bottom).
+pub const PAD_X: f64 = 12.0;
+pub const PAD_Y: f64 = 6.0;
 
 const BOLD: u16 = 1 << 0;
 const FAINT: u16 = 1 << 2;
@@ -56,6 +59,16 @@ pub struct Cell {
     selected: bool,
 }
 
+impl Cell {
+    fn clear(&mut self) {
+        self.text.clear();
+        self.fg = None;
+        self.bg = None;
+        self.flags = 0;
+        self.selected = false;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Cursor {
     pub x: u16,
@@ -71,6 +84,21 @@ pub struct Grid {
     fg: Rgb,
     cursor_color: Option<Rgb>,
     pub cursor: Option<Cursor>,
+}
+
+impl Grid {
+    /// Resizes rows and columns in place so surviving `Cell`s retain their
+    /// `String` capacities across split-drag resizes.
+    pub fn resize(&mut self, rows: usize, cols: usize) -> bool {
+        let resized = self.rows.len() != rows || self.rows.iter().any(|r| r.len() != cols);
+        if resized {
+            self.rows.resize_with(rows, Vec::new);
+            for row in &mut self.rows {
+                row.resize_with(cols, Cell::default);
+            }
+        }
+        resized
+    }
 }
 
 /// Which rows a sync changed.
@@ -113,10 +141,7 @@ impl Render {
             let (mut cols, mut rows) = (0u16, 0u16);
             g::ghostty_render_state_get(self.state, g::GHOSTTY_RENDER_STATE_DATA_COLS, (&raw mut cols).cast());
             g::ghostty_render_state_get(self.state, g::GHOSTTY_RENDER_STATE_DATA_ROWS, (&raw mut rows).cast());
-            let resized = grid.rows.len() != rows as usize || grid.rows.first().is_some_and(|r| r.len() != cols as usize);
-            if resized {
-                grid.rows = vec![vec![Cell::default(); cols as usize]; rows as usize];
-            }
+            let resized = grid.resize(rows as usize, cols as usize);
             if dirty == g::GHOSTTY_RENDER_STATE_DIRTY_FALSE && !resized {
                 return Changed::None;
             }
@@ -205,7 +230,7 @@ impl Render {
                 get(g::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, (&raw mut cell.selected).cast());
             }
             for cell in row.iter_mut().skip(x) {
-                *cell = Cell::default();
+                cell.clear();
             }
         }
     }
@@ -222,16 +247,19 @@ impl Drop for Render {
     }
 }
 
-/// The terminal font: regular and bold, cell size, glyph cache.
+/// The terminal font: regular, bold, system cascade fonts, cell size, and
+/// `(char, bold) -> Option<(font_idx, CGGlyph)>` cache (`0` = regular,
+/// `1` = bold, `2 + i` = `cascade[i]`).
 pub struct Fonts {
     regular: Retained<NSFont>,
     bold: Retained<NSFont>,
+    cascade: Vec<CFRetained<CTFont>>,
     /// A cell, in points; a whole number of device pixels.
     pub cell_w: f64,
     pub cell_h: f64,
     pub scale: f64,
     descent: f64,
-    glyphs: HashMap<(char, bool), u16>,
+    glyphs: HashMap<(char, bool), Option<(u16, u16)>>,
 }
 
 fn ct_font(font: &NSFont) -> &CTFont {
@@ -242,11 +270,10 @@ fn ct_font(font: &NSFont) -> &CTFont {
 /// A font by full or PostScript name, else by family.
 fn named_font(family: &str, size: f64) -> Option<Retained<NSFont>> {
     let name = NSString::from_str(family);
-    NSFont::fontWithName_size(&name, size)
-        .or_else(|| {
-            let manager = NSFontManager::sharedFontManager(MainThreadMarker::new()?);
-            manager.fontWithFamily_traits_weight_size(&name, NSFontTraitMask(0), 5, size)
-        })
+    NSFont::fontWithName_size(&name, size).or_else(|| {
+        let manager = NSFontManager::sharedFontManager(MainThreadMarker::new()?);
+        manager.fontWithFamily_traits_weight_size(&name, NSFontTraitMask(0), 5, size)
+    })
 }
 
 impl Fonts {
@@ -271,17 +298,13 @@ impl Fonts {
         Fonts {
             regular,
             bold,
+            cascade: Vec::new(),
             cell_w: pixels(advance.width),
             cell_h: pixels((ascent + descent + leading).ceil()),
             scale,
             descent: descent + leading / 2.0,
             glyphs: HashMap::new(),
         }
-    }
-
-    /// The regular font's PostScript name (for the log).
-    pub fn name(&self) -> String {
-        self.regular.fontName().to_string()
     }
 
     /// The cell in device pixels (libghostty's sizes).
@@ -293,19 +316,54 @@ impl Fonts {
         if bold { &self.bold } else { &self.regular }
     }
 
-    /// The font's own glyph for `c`; `None` needs font fallback.
-    fn glyph(&mut self, c: char, bold: bool) -> Option<u16> {
-        if let Some(&g) = self.glyphs.get(&(c, bold)) {
-            return (g != 0).then_some(g);
+    fn ct_at(&self, idx: u16) -> &CTFont {
+        match idx {
+            0 => ct_font(&self.regular),
+            1 => ct_font(&self.bold),
+            i => &self.cascade[(i - 2) as usize],
+        }
+    }
+
+    /// Cached `(font_idx, CGGlyph)` for BMP and non-BMP (`> U+FFFF`) characters,
+    /// resolving system cascade fonts once via `CTFontCreateForString` when the
+    /// primary monospace font lacks `c`.
+    fn glyph(&mut self, c: char, bold: bool) -> Option<(u16, u16)> {
+        if let Some(&cached) = self.glyphs.get(&(c, bold)) {
+            return cached;
         }
         let mut units = [0u16; 2];
-        let mut glyph = 0u16;
-        if c.encode_utf16(&mut units).len() == 1 {
-            // SAFETY: one UTF-16 unit, one glyph.
-            unsafe { ct_font(self.font(bold)).glyphs_for_characters(NonNull::from(&mut units[0]), NonNull::from(&mut glyph), 1) };
+        let len = c.encode_utf16(&mut units).len();
+        let mut out = [0u16; 2];
+        let base_idx = u16::from(bold);
+        let base = self.ct_at(base_idx);
+        // SAFETY: `units` and `out` both hold `len` (1 or 2) UTF-16 slots.
+        unsafe { base.glyphs_for_characters(NonNull::from(&mut units[0]), NonNull::from(&mut out[0]), len as isize) };
+        if out[0] != 0 {
+            let hit = Some((base_idx, out[0]));
+            self.glyphs.insert((c, bold), hit);
+            return hit;
         }
-        self.glyphs.insert((c, bold), glyph);
-        (glyph != 0).then_some(glyph)
+        let mut utf8 = [0u8; 4];
+        let cf_str = CFString::from_str(c.encode_utf8(&mut utf8));
+        // SAFETY: CoreText selects the cascade font covering the UTF-16 range.
+        let sub = unsafe { base.for_string(&cf_str, CFRange { location: 0, length: len as isize }) };
+        out = [0u16; 2];
+        unsafe { sub.glyphs_for_characters(NonNull::from(&mut units[0]), NonNull::from(&mut out[0]), len as isize) };
+        let resolved = if out[0] != 0 {
+            let idx = match self.cascade.iter().position(|f| **f == *sub) {
+                Some(i) => (i + 2) as u16,
+                None => {
+                    let idx = (self.cascade.len() + 2) as u16;
+                    self.cascade.push(sub);
+                    idx
+                }
+            };
+            Some((idx, out[0]))
+        } else {
+            None
+        };
+        self.glyphs.insert((c, bold), resolved);
+        resolved
     }
 }
 
@@ -318,7 +376,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn row_top(&self, y: u16) -> f64 {
-        self.height - PAD - (y as f64 + 1.0) * self.cell_h
+        self.height - PAD_Y - (y as f64 + 1.0) * self.cell_h
     }
 
     /// Whether row `y` reaches into `rect`.
@@ -328,7 +386,7 @@ impl Frame {
     }
 
     pub fn x(&self, col: usize) -> f64 {
-        PAD + col as f64 * self.cell_w
+        PAD_X + col as f64 * self.cell_w
     }
 
     pub fn cell(&self, col: usize, y: u16, cols: usize) -> CGRect {
@@ -411,12 +469,12 @@ impl Grid {
         }
     }
 
-    /// A row's text, in runs of one colour and weight; under the block cursor
-    /// in the cell's background colour.
+    /// A row's text, in runs of `(font_idx, fg)`; under the block cursor in
+    /// the cell's background colour.
     fn draw_glyphs(&self, ctx: &CGContext, fonts: &mut Fonts, frame: &Frame, row: &[Cell], y: u16, block_x: Option<usize>) {
         let baseline = frame.row_top(y) + fonts.descent;
         let (mut glyphs, mut points): (Vec<u16>, Vec<CGPoint>) = (Vec::new(), Vec::new());
-        let mut style: Option<(Rgb, bool)> = None;
+        let mut style: Option<(u16, Rgb)> = None;
         for (x, cell) in row.iter().enumerate() {
             if cell.text.is_empty() || cell.text == " " || cell.flags & INVISIBLE != 0 {
                 continue;
@@ -424,16 +482,19 @@ impl Grid {
             let (fg, bg) = self.colors(cell);
             let fg = if block_x == Some(x) { bg.unwrap_or(self.bg) } else { fg };
             let bold = cell.flags & BOLD != 0;
-            if style != Some((fg, bold)) {
-                flush(ctx, fonts, style, &mut glyphs, &mut points);
-                style = Some((fg, bold));
-            }
             match single_char(&cell.text).and_then(|c| fonts.glyph(c, bold)) {
-                Some(glyph) => {
+                Some((font_idx, glyph)) => {
+                    if style != Some((font_idx, fg)) {
+                        flush(ctx, fonts, style, &mut glyphs, &mut points);
+                        style = Some((font_idx, fg));
+                    }
                     glyphs.push(glyph);
                     points.push(CGPoint::new(frame.x(x), baseline));
                 }
-                None => fallback(fonts.font(bold), &cell.text, fg, frame.x(x), baseline),
+                None => {
+                    flush(ctx, fonts, style, &mut glyphs, &mut points);
+                    fallback(fonts.font(bold), &cell.text, fg, frame.x(x), baseline);
+                }
             }
         }
         flush(ctx, fonts, style, &mut glyphs, &mut points);
@@ -477,7 +538,7 @@ fn draw_selection(ctx: &CGContext, frame: &Frame, row: &[Cell], y: u16, sel: Rgb
     }
 }
 
-/// The character of a one-character cell (not a cluster).
+/// The character of a one-character cell (not a multi-codepoint cluster).
 fn single_char(text: &str) -> Option<char> {
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
@@ -486,19 +547,19 @@ fn single_char(text: &str) -> Option<char> {
     }
 }
 
-fn flush(ctx: &CGContext, fonts: &Fonts, style: Option<(Rgb, bool)>, glyphs: &mut Vec<u16>, points: &mut Vec<CGPoint>) {
-    let Some((fg, bold)) = style else { return };
+fn flush(ctx: &CGContext, fonts: &Fonts, style: Option<(u16, Rgb)>, glyphs: &mut Vec<u16>, points: &mut Vec<CGPoint>) {
+    let Some((font_idx, fg)) = style else { return };
     if glyphs.is_empty() {
         return;
     }
     set_fill(ctx, fg, 1.0);
     // CTFontDrawGlyphs applies the text matrix, which is not part of the
-    // graphics state: text drawn before (AppKit's, our fallback) leaves it
-    // moved, and the row would land that far right.
+    // graphics state: text drawn before (AppKit's, our cluster fallback)
+    // leaves it moved, and the row would land that far right.
     CGContext::set_text_matrix(Some(ctx), CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.0, ty: 0.0 });
     // SAFETY: as many positions as glyphs.
     unsafe {
-        ct_font(fonts.font(bold)).draw_glyphs(
+        fonts.ct_at(font_idx).draw_glyphs(
             NonNull::new_unchecked(glyphs.as_mut_ptr()),
             NonNull::new_unchecked(points.as_mut_ptr()),
             glyphs.len(),
@@ -509,8 +570,7 @@ fn flush(ctx: &CGContext, fonts: &Fonts, style: Option<(Rgb, bool)>, glyphs: &mu
     points.clear();
 }
 
-/// Text the font has no glyph for (CJK, emoji, clusters): AppKit picks a
-/// fallback font.
+/// Multi-codepoint grapheme clusters: AppKit shapes and picks a fallback font.
 fn fallback(font: &NSFont, text: &str, fg: Rgb, x: f64, baseline: f64) {
     let color = NSColor::colorWithSRGBRed_green_blue_alpha(fg[0] as f64 / 255.0, fg[1] as f64 / 255.0, fg[2] as f64 / 255.0, 1.0);
     // SAFETY: AppKit's attribute name constants.
@@ -539,7 +599,7 @@ pub fn word_at(row: &[Cell], col: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Fonts, Frame, Grid, Look, Rgba, word_at};
+    use super::{Cell, Fonts, Frame, Grid, Look, PAD_X, PAD_Y, Rgba, word_at};
     use objc2_core_foundation::{CGAffineTransform, CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext, CGImageAlphaInfo};
 
@@ -568,10 +628,8 @@ mod tests {
         assert_eq!(Rgba::parse("#zzzzzz"), None);
     }
 
-    /// The leftmost column with ink, drawing "zsh" at column 0 into a
-    /// context whose text matrix earlier text drawing left at `left_over`.
-    fn first_ink(left_over: f64) -> usize {
-        let (w, h) = (200usize, 40usize);
+    fn render_cells(cells: Vec<Cell>, left_over: f64) -> (Vec<u8>, usize, usize, Frame, Fonts) {
+        let (w, h) = (220usize, 44usize);
         let space = CGColorSpace::new_device_rgb().unwrap();
         // SAFETY: a context of our own size that owns its pixels.
         let ctx = unsafe { CGBitmapContextCreate(std::ptr::null_mut(), w, h, 8, w * 4, Some(&space), CGImageAlphaInfo::PremultipliedLast.0) }.unwrap();
@@ -579,18 +637,83 @@ mod tests {
         let mut fonts = Fonts::new(None, 14.0, 1.0);
         let frame = Frame { height: h as f64, cell_w: fonts.cell_w, cell_h: fonts.cell_h };
         let mut grid = Grid { bg: [0, 0, 0], fg: [255, 255, 255], ..Default::default() };
-        grid.rows = vec![row("zsh")];
+        grid.rows = vec![cells];
         let look = Look { focused: false, selection: None, marked: None };
         grid.draw(&ctx, &mut fonts, &frame, CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64)), &look);
         // SAFETY: the context's own w × h RGBA pixels.
-        let px = unsafe { std::slice::from_raw_parts(CGBitmapContextGetData(Some(&ctx)) as *const u8, w * h * 4) };
+        let px = unsafe { std::slice::from_raw_parts(CGBitmapContextGetData(Some(&ctx)) as *const u8, w * h * 4) }.to_vec();
+        (px, w, h, frame, fonts)
+    }
+
+    /// The leftmost column with ink, drawing "zsh" at column 0 into a
+    /// context whose text matrix earlier text drawing left at `left_over`.
+    fn first_ink(left_over: f64) -> usize {
+        let (px, w, h, _, _) = render_cells(row("zsh"), left_over);
         (0..w).find(|&x| (0..h).any(|y| px[(y * w + x) * 4] > 128)).unwrap()
+    }
+
+    #[test]
+    fn spine_padding_places_first_column_at_12pt_and_keeps_6pt_vertical() {
+        assert_eq!(PAD_X, 12.0);
+        assert_eq!(PAD_Y, 6.0);
+        let frame = Frame { height: 100.0, cell_w: 8.0, cell_h: 16.0 };
+        assert_eq!(frame.x(0), 12.0);
+        assert_eq!(frame.x(2), 28.0);
+        assert_eq!(frame.row_top(0), 100.0 - 6.0 - 16.0);
     }
 
     #[test]
     fn text_starts_in_its_cell_whatever_drew_text_before() {
         let clean = first_ink(0.0);
-        assert!(clean < 12, "ink at {clean}");
+        assert!((12..20).contains(&clean), "expected 12pt horizontal spine padding, got ink at {clean}");
         assert_eq!(first_ink(30.0), clean);
+    }
+
+    #[test]
+    fn cjk_and_non_bmp_glyphs_cache_cascade_fonts_and_render_ink() {
+        // Wide CJK occupies 2 cells per glyph; non-BMP U+1D400 ('𝐀') has UTF-16 len 2.
+        let cells = vec![
+            Cell { text: "中".into(), ..Default::default() },
+            Cell::default(),
+            Cell { text: "文".into(), ..Default::default() },
+            Cell::default(),
+            Cell { text: "𝐀".into(), ..Default::default() },
+        ];
+        let (px, w, h, frame, fonts) = render_cells(cells, 0.0);
+        let c1 = fonts.glyphs.get(&('中', false)).copied().flatten().expect("cached CJK glyph 1");
+        let c2 = fonts.glyphs.get(&('文', false)).copied().flatten().expect("cached CJK glyph 2");
+        let non_bmp = fonts.glyphs.get(&('𝐀', false)).copied().flatten().expect("cached > U+FFFF surrogate glyph");
+        // Both CJK codepoints share one deduplicated cascade CTFont entry.
+        assert_eq!(c1.0, c2.0);
+        assert!(c1.0 >= 2);
+        assert!(fonts.cascade.len() <= 2, "cascade fonts must deduplicate: got {}", fonts.cascade.len());
+        assert_ne!(non_bmp.1, 0);
+
+        let has_ink_in_span = |col_start: usize, col_span: usize| {
+            let x0 = frame.x(col_start).floor() as usize;
+            let x1 = (frame.x(col_start + col_span).ceil() as usize).min(w);
+            (x0..x1).any(|x| (0..h).any(|y| px[(y * w + x) * 4] > 64))
+        };
+        assert!(has_ink_in_span(0, 2), "expected CJK ink in columns 0..2");
+        assert!(has_ink_in_span(2, 2), "expected CJK ink in columns 2..4");
+        assert!(has_ink_in_span(4, 2), "expected non-BMP > U+FFFF ink at column 4");
+    }
+
+    #[test]
+    fn resizing_grid_in_place_preserves_cell_string_capacity() {
+        let mut grid = Grid::default();
+        assert!(grid.resize(2, 4));
+        grid.rows[0][0].text.reserve(64);
+        let cap = grid.rows[0][0].text.capacity();
+        assert!(cap >= 64);
+
+        assert!(grid.resize(5, 8));
+        assert_eq!(grid.rows.len(), 5);
+        assert_eq!(grid.rows[0].len(), 8);
+        assert!(grid.rows[0][0].text.capacity() >= cap);
+
+        assert!(!grid.resize(5, 8));
+        assert!(grid.resize(3, 6));
+        assert!(grid.rows[0][0].text.capacity() >= cap);
     }
 }

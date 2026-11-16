@@ -1,17 +1,18 @@
 //! The terminal's debug log, for checking what reached the shell and the
 //! screen: `~/Library/Caches/dev.byronwayne.aed/terminal.log` (0600, in the
-//! 0700 cache dir), moved to `terminal.log.1` past 2 MB. On only in the app
-//! (`enable` from the view registration), never in tests. Keys are hidden
-//! while a program reads a password (canonical input, no echo). DESIGN.md「持久化标识与
-//! IPC 契约」.
+//! 0700 cache dir), moved to `terminal.log.1` past 2 MB. On only when
+//! `AED_TERMINAL_LOG` is set and non-empty in the app (`enable` from the view
+//! registration), never in tests. Keys are hidden while a program reads a
+//! password (canonical input, no echo). DESIGN.md「持久化标识与 IPC 契约」.
 
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufWriter, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -19,9 +20,15 @@ use std::{
 const MAX_BYTES: u64 = 2 << 20;
 
 static ON: AtomicBool = AtomicBool::new(false);
-static FILE: Mutex<Option<File>> = Mutex::new(None);
+static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static WRITER: Mutex<Option<(BufWriter<File>, u64)>> = Mutex::new(None);
 
-/// Starts logging (the app; headless runs and tests never call it).
+/// Whether `AED_TERMINAL_LOG` enables terminal logging (set and non-empty).
+pub fn env_enabled(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
+/// Starts logging (the app when `AED_TERMINAL_LOG` is set; headless runs and tests never call it).
 pub fn enable() {
     ON.store(true, Ordering::Relaxed);
 }
@@ -30,15 +37,45 @@ pub fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
-fn path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let dir = PathBuf::from(home).join("Library/Caches/dev.byronwayne.aed");
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
-    Some(dir.join("terminal.log"))
+fn resolve_path(home: Option<&OsStr>) -> Option<PathBuf> {
+    let home = home.filter(|h| Path::new(h).is_absolute())?;
+    Some(Path::new(home).join("Library/Caches/dev.byronwayne.aed/terminal.log"))
 }
 
-fn open(path: &PathBuf) -> Option<File> {
-    OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path).ok()
+fn path() -> Option<&'static Path> {
+    PATH.get_or_init(|| resolve_path(std::env::var_os("HOME").as_deref())).as_deref()
+}
+
+fn open(path: &Path) -> Option<(BufWriter<File>, u64)> {
+    let dir = path.parent()?;
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let size = file.metadata().map_or(0, |m| m.len());
+    Some((BufWriter::new(file), size))
+}
+
+fn append(slot: &mut Option<(BufWriter<File>, u64)>, path: &Path, bytes: &[u8], max_bytes: u64) {
+    if slot.is_none() {
+        *slot = open(path);
+    }
+    if slot.as_ref().is_some_and(|(_, written)| *written > max_bytes) {
+        *slot = None;
+        let _ = fs::rename(path, path.with_extension("log.1"));
+        *slot = open(path);
+    }
+    if let Some((writer, written)) = slot.as_mut() {
+        if writer.write_all(bytes).is_ok() && writer.flush().is_ok() {
+            *written += bytes.len() as u64;
+        } else {
+            *slot = None;
+        }
+    }
 }
 
 /// Appends one line (with the local time); `line` runs only when on.
@@ -46,19 +83,10 @@ pub fn line(line: impl FnOnce() -> String) {
     if !on() {
         return;
     }
-    let text = format!("{} {}\n", now(), line());
-    let mut file = FILE.lock().unwrap();
     let Some(path) = path() else { return };
-    if file.as_ref().and_then(|f| f.metadata().ok()).is_some_and(|m| m.len() > MAX_BYTES) {
-        let _ = fs::rename(&path, path.with_extension("log.1"));
-        *file = None;
-    }
-    if file.is_none() {
-        *file = open(&path);
-    }
-    if let Some(f) = file.as_mut() {
-        let _ = f.write_all(text.as_bytes());
-    }
+    let text = format!("{} {}\n", now(), line());
+    let mut slot = WRITER.lock().unwrap();
+    append(&mut slot, path, text.as_bytes(), MAX_BYTES);
 }
 
 fn now() -> String {
@@ -96,7 +124,14 @@ fn push_char(out: &mut String, c: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use std::{
+        ffi::OsStr,
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::PathBuf,
+    };
+
+    use super::{append, env_enabled, escape, resolve_path};
 
     #[test]
     fn escaped_bytes_keep_text_and_show_controls() {
@@ -104,5 +139,55 @@ mod tests {
         assert_eq!(escape("接口".as_bytes()), "接口");
         assert_eq!(escape(b"\x1b[A\x7f\\"), "\\e[A\\x7f\\\\");
         assert_eq!(escape(&[0xe6, 0x8e]), "\\xe6\\x8e");
+    }
+
+    #[test]
+    fn log_enables_only_when_env_var_is_non_empty() {
+        assert!(!env_enabled(None));
+        assert!(!env_enabled(Some(OsStr::new(""))));
+        assert!(env_enabled(Some(OsStr::new("1"))));
+        assert!(env_enabled(Some(OsStr::new("true"))));
+    }
+
+    #[test]
+    fn log_path_requires_an_absolute_home() {
+        assert_eq!(resolve_path(None), None);
+        assert_eq!(resolve_path(Some(OsStr::new(""))), None);
+        assert_eq!(resolve_path(Some(OsStr::new("relative/home"))), None);
+        assert_eq!(
+            resolve_path(Some(OsStr::new("/Users/alice"))),
+            Some(PathBuf::from("/Users/alice/Library/Caches/dev.byronwayne.aed/terminal.log"))
+        );
+    }
+
+    #[test]
+    fn writer_tracks_bytes_in_memory_and_rotates_past_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "aed-log-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let log_path = root.join("Caches/dev.byronwayne.aed/terminal.log");
+        let mut slot = None;
+
+        append(&mut slot, &log_path, b"first line\n", 20);
+        assert_eq!(slot.as_ref().map(|(_, n)| *n), Some(11));
+        let dir_mode = fs::metadata(log_path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+        let file_mode = fs::metadata(&log_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+
+        append(&mut slot, &log_path, b"second line!\n", 20);
+        assert_eq!(slot.as_ref().map(|(_, n)| *n), Some(24));
+        assert!(!log_path.with_extension("log.1").exists());
+
+        // Past max_bytes (24 > 20): next write rotates to terminal.log.1 and resets the counter.
+        append(&mut slot, &log_path, b"fresh\n", 20);
+        assert_eq!(slot.as_ref().map(|(_, n)| *n), Some(6));
+        assert_eq!(fs::read_to_string(log_path.with_extension("log.1")).unwrap(), "first line\nsecond line!\n");
+        assert_eq!(fs::read_to_string(&log_path).unwrap(), "fresh\n");
+
+        drop(slot);
+        let _ = fs::remove_dir_all(&root);
     }
 }

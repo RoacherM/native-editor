@@ -27,30 +27,140 @@ use objc2_foundation::{NSArray, NSAttributedString, NSAttributedStringKey, NSNot
 
 use crate::{
     ffi as g,
-    grid::{self, Changed, Fonts, Frame, Grid, Look, PAD, Render, Rgba},
+    grid::{self, Changed, Fonts, Frame, Grid, Look, PAD_X, PAD_Y, Render, Rgba},
     keys, log,
     session::{self, Colors, Core, Shared},
 };
 
 const DEFAULT_FONT_SIZE: f64 = 12.0;
 const DEFAULT_SELECTION: Rgba = Rgba([0x80, 0x80, 0x80, 0x60]);
+const CURSOR_LOG_WINDOW: Duration = Duration::from_millis(1500);
 
 thread_local! {
     /// The view showing each session, by session id.
     static VIEWS: RefCell<HashMap<u32, Weak<TermView>>> = RefCell::new(HashMap::new());
 }
 
-/// `Shared::changed`'s main-thread half: the session's view redraws.
+/// `Shared::changed`'s main-thread half: coalesces display invalidation for the session's view.
 pub fn wake(id: u32) {
     let view = VIEWS.with(|v| v.borrow().get(&id).and_then(Weak::load));
     match view {
-        Some(view) => view.refresh(),
+        Some(view) => view.on_session_wake(),
         None => {
             if let Some(shared) = session::find(id) {
                 shared.woken();
             }
         }
     }
+}
+
+/// Pure IME composition state (`NSTextInputClient`), isolated per focus & session.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct ImeState {
+    marked: Option<String>,
+    selected: NSRange,
+}
+
+impl ImeState {
+    fn set_marked(&mut self, text: String, selected: NSRange) {
+        if text.is_empty() {
+            self.clear();
+        } else {
+            self.marked = Some(text);
+            self.selected = selected;
+        }
+    }
+
+    /// Clears active preedit; returns whether marked text was active.
+    fn clear(&mut self) -> bool {
+        self.selected = NSRange::new(0, 0);
+        self.marked.take().is_some()
+    }
+
+    fn selected_range(&self) -> NSRange {
+        if self.marked.is_some() { self.selected } else { NSRange::new(0, 0) }
+    }
+
+    fn marked_range(&self) -> NSRange {
+        match &self.marked {
+            Some(text) => NSRange::new(0, utf16_len(text)),
+            None => NSRange::new(NSNotFound as usize, 0),
+        }
+    }
+
+    fn has_marked(&self) -> bool {
+        self.marked.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WakeAction {
+    /// First wake in this display cycle: sync dirty rows now and mark only their rects.
+    SyncDirty,
+    /// Additional wake before `drawRect:` ran: defer sync to `drawRect:` and mark full bounds once.
+    CoalesceFull,
+    /// Already coalescing (or view is hidden/unmounted): hold `wake_pending` with zero work.
+    Hold,
+}
+
+/// Display-cycle coalescer: preserves dirty-row clipping on idle cursor blinks
+/// while collapsing burst PTY chunks within one 60/120Hz frame into a single
+/// `render.sync` right before `drawRect:` paints.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DisplaySync {
+    awaiting_draw: bool,
+    deferred_sync: bool,
+}
+
+impl DisplaySync {
+    fn on_wake(&mut self, drawable: bool) -> WakeAction {
+        if !drawable {
+            self.awaiting_draw = false;
+        } else if !self.awaiting_draw && !self.deferred_sync {
+            return WakeAction::SyncDirty;
+        }
+        if !self.deferred_sync {
+            self.deferred_sync = true;
+            return WakeAction::CoalesceFull;
+        }
+        WakeAction::Hold
+    }
+
+    fn did_invalidate(&mut self) {
+        self.awaiting_draw = true;
+    }
+
+    /// Runs at the start of `drawRect:`; returns whether a deferred sync is due.
+    fn on_draw(&mut self) -> bool {
+        self.awaiting_draw = false;
+        std::mem::take(&mut self.deferred_sync)
+    }
+}
+
+/// Sorts, deduplicates and merges dirty row indices into `(start_row, row_count)` spans.
+fn row_spans(mut rows: Vec<u16>) -> Vec<(u16, u16)> {
+    rows.sort_unstable();
+    rows.dedup();
+    let mut spans: Vec<(u16, u16)> = Vec::new();
+    for y in rows {
+        match spans.last_mut() {
+            Some((start, len)) if *start + *len == y => *len += 1,
+            _ => spans.push((y, 1)),
+        }
+    }
+    spans
+}
+
+/// Rect for a dirty row span when it intersects the view's `0..width × 0..height` bounds.
+fn visible_row_rect(frame: &Frame, width: f64, start: u16, count: u16) -> Option<CGRect> {
+    let bottom_row = start + count - 1;
+    let y = frame.row_top(bottom_row);
+    let h = count as f64 * frame.cell_h;
+    (width > 0.0 && h > 0.0 && y < frame.height && y + h > 0.0).then(|| CGRect::new(CGPoint::new(0.0, y), CGSize::new(width, h)))
+}
+
+fn should_log_cursor_row(log_on: bool, typed_at: Option<Instant>, now: Instant) -> bool {
+    log_on && typed_at.is_some_and(|t| now.saturating_duration_since(t) <= CURSOR_LOG_WINDOW)
 }
 
 /// libghostty's encoders and event objects (not tied to a terminal).
@@ -125,14 +235,13 @@ pub struct State {
     bound: Option<Bound>,
     render: Render,
     grid: Grid,
+    display: DisplaySync,
     fonts: Fonts,
     family: Option<String>,
     size: f64,
     colors: Colors,
     selection: Rgba,
-    /// The IME's composition, and its selected range.
-    marked: Option<String>,
-    marked_range: NSRange,
+    ime: ImeState,
     /// Text `insertText:` gave during the current `keyDown:`.
     typed: Option<Vec<String>>,
     focused: bool,
@@ -203,6 +312,7 @@ unsafe fn encode_key(io: &Io, core: &Core, key: g::GhosttyKey, k: &Key) -> Vec<u
     }
     out[..n.min(out.len())].to_vec()
 }
+
 /// The options a gesture event of `kind` takes: press, where and when
 /// (multi-click); drag, where and the grid (autoscroll); release, the cell.
 ///
@@ -241,7 +351,6 @@ unsafe fn show_selection(term: g::GhosttyTerminal, selection: Option<&g::Ghostty
     let value = selection.map_or(ptr::null(), |s| (s as *const g::GhosttySelection).cast());
     unsafe { g::ghostty_terminal_set(term, g::GHOSTTY_TERMINAL_OPT_SELECTION, value) };
 }
-
 
 /// Scrolls the viewport back to the prompt (typing or pasting).
 ///
@@ -323,6 +432,7 @@ define_class!(
         fn resign_first_responder(&self) -> bool {
             let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
             if ok {
+                self.discard_ime();
                 self.set_focused(false);
             }
             ok
@@ -403,7 +513,7 @@ define_class!(
             let text = ns_text(string);
             self.log_input(|| format!("ime insert {:?} replace {range:?}", text));
             let mut st = self.state();
-            st.marked = None;
+            st.ime.clear();
             match st.typed.as_mut() {
                 Some(typed) => typed.push(text),
                 // Not from a key (the character viewer): straight to the shell.
@@ -425,37 +535,30 @@ define_class!(
         fn set_marked_text(&self, string: &AnyObject, selected: NSRange, replacement: NSRange) {
             let text = ns_text(string);
             self.log_input(|| format!("ime mark {text:?} selected {selected:?} replace {replacement:?}"));
-            let mut st = self.state();
-            st.marked = (!text.is_empty()).then_some(text);
-            st.marked_range = selected;
-            drop(st);
+            self.state().ime.set_marked(text, selected);
             self.setNeedsDisplay(true);
         }
 
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
             log::line(|| "ime unmark".into());
-            self.state().marked = None;
+            self.state().ime.clear();
             self.setNeedsDisplay(true);
         }
 
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
-            let st = self.state();
-            if st.marked.is_some() { st.marked_range } else { NSRange::new(0, 0) }
+            self.state().ime.selected_range()
         }
 
         #[unsafe(method(markedRange))]
         fn marked_range(&self) -> NSRange {
-            match &self.state().marked {
-                Some(text) => NSRange::new(0, utf16_len(text)),
-                None => NSRange::new(NSNotFound as usize, 0),
-            }
+            self.state().ime.marked_range()
         }
 
         #[unsafe(method(hasMarkedText))]
         fn has_marked_text(&self) -> bool {
-            self.state().marked.is_some()
+            self.state().ime.has_marked()
         }
 
         #[unsafe(method(attributedSubstringForProposedRange:actualRange:))]
@@ -487,13 +590,13 @@ impl TermView {
             bound: None,
             render: Render::new(),
             grid: Grid::default(),
+            display: DisplaySync::default(),
             fonts: Fonts::new(None, DEFAULT_FONT_SIZE, 2.0),
             family: None,
             size: DEFAULT_FONT_SIZE,
             colors: Colors::default(),
             selection: DEFAULT_SELECTION,
-            marked: None,
-            marked_range: NSRange::new(0, 0),
+            ime: ImeState::default(),
             typed: None,
             focused: false,
             reporting: false,
@@ -512,6 +615,18 @@ impl TermView {
 
     fn state(&self) -> RefMut<'_, State> {
         self.ivars().state.borrow_mut()
+    }
+
+    /// Clears uncommitted IME composition on focus loss or session switch so
+    /// preedit text never leaks into another tab or panel.
+    fn discard_ime(&self) {
+        let had_marked = self.state().ime.clear();
+        if let Some(ctx) = self.inputContext() {
+            ctx.discardMarkedText();
+        }
+        if had_marked {
+            self.setNeedsDisplay(true);
+        }
     }
 
     /// Runs `f` with the bound terminal locked.
@@ -557,10 +672,7 @@ impl TermView {
 
     /// After typing: the cursor's row as the screen now has it (cell by
     /// cell, so a wrong glyph or a shifted column shows).
-    fn log_cursor_row(&self, st: &State) {
-        if !log::on() || st.typed_at.is_none_or(|t| t.elapsed() > Duration::from_millis(1500)) {
-            return;
-        }
+    fn write_cursor_row_log(st: &State) {
         let Some(c) = st.grid.cursor else { return };
         let Some(row) = st.grid.rows.get(c.y as usize) else { return };
         let text: String = row.iter().map(|cell| if cell.text.is_empty() { "·" } else { cell.text.as_str() }).collect();
@@ -581,17 +693,25 @@ impl TermView {
         Frame { height: self.bounds().size.height, cell_w: fonts.cell_w, cell_h: fonts.cell_h }
     }
 
+    fn is_drawable(&self) -> bool {
+        let size = self.bounds().size;
+        self.window().is_some() && !self.isHiddenOrHasHiddenAncestor() && size.width >= 1.0 && size.height >= 1.0
+    }
+
     // ------------------------------------------------------------ binding
 
     /// Shows session `id` (none: an empty view).
     fn bind(&self, id: Option<u32>) {
-        let mut st = self.state();
-        if st.bound.as_ref().map(|b| b.shared.id) == id {
+        if self.state().bound.as_ref().map(|b| b.shared.id) == id {
             return;
         }
+        self.discard_ime();
+        let mut st = self.state();
         if let Some(old) = st.bound.take() {
+            old.shared.woken();
             VIEWS.with(|v| v.borrow_mut().remove(&old.shared.id));
         }
+        st.display = DisplaySync::default();
         if let Some(shared) = id.and_then(session::find) {
             VIEWS.with(|v| v.borrow_mut().insert(shared.id, Weak::new(self)));
             let mut gesture = ptr::null_mut();
@@ -651,43 +771,74 @@ impl TermView {
         if size.width < 1.0 || size.height < 1.0 {
             return;
         }
-        let fit = |space: f64, cell: f64, max: f64| ((space - 2.0 * PAD) / cell).floor().clamp(1.0, max) as u16;
-        let cols = fit(size.width, st.fonts.cell_w, 1000.0).max(2);
-        let rows = fit(size.height, st.fonts.cell_h, 500.0);
+        let fit = |space: f64, pad: f64, cell: f64, max: f64| ((space - 2.0 * pad) / cell).floor().clamp(1.0, max) as u16;
+        let cols = fit(size.width, PAD_X, st.fonts.cell_w, 1000.0).max(2);
+        let rows = fit(size.height, PAD_Y, st.fonts.cell_h, 500.0);
         let (cw, ch) = st.fonts.cell_px();
-        log::line(|| {
-            format!(
-                "layout view {:.0}x{:.0}pt scale {} font {:?} {}pt cell {:.2}x{:.2}pt ({cw}x{ch}px) grid {rows}x{cols}",
-                size.width, size.height, st.fonts.scale, st.fonts.name(), st.size, st.fonts.cell_w, st.fonts.cell_h
-            )
-        });
         drop(st);
         shared.resize(rows, cols, cw, ch);
     }
 
-    /// Reads what changed in the terminal and marks it for drawing.
-    fn refresh(&self) {
-        let mut st = self.state();
-        let Some(shared) = st.shared() else { return };
+    /// Snapshot what changed in the bound session into `st.grid`, releasing
+    /// `wake_pending` so later PTY writes schedule the next display cycle.
+    fn sync_grid(st: &mut State, shared: &Shared) -> Changed {
+        st.display.deferred_sync = false;
         shared.woken();
-        let st = &mut *st;
         let changed = {
             let core = shared.core.lock().unwrap();
             // SAFETY: the terminal is locked.
             unsafe { st.render.sync(core.term, &mut st.grid) }
         };
-        if !matches!(changed, Changed::None) && !shared.reads_password() {
-            self.log_cursor_row(st);
+        if !matches!(changed, Changed::None)
+            && should_log_cursor_row(log::on(), st.typed_at, Instant::now())
+            && !shared.reads_password()
+        {
+            Self::write_cursor_row_log(st);
         }
+        changed
+    }
+
+    /// Coalesced wakeup from `Shared::changed`: syncs dirty rows once for the
+    /// first chunk in a display cycle (preserving single-row clipping on
+    /// cursor blinks) and defers any further chunks in the same frame to
+    /// `drawRect:` while holding `wake_pending`.
+    fn on_session_wake(&self) {
+        let drawable = self.is_drawable();
+        let action = self.state().display.on_wake(drawable);
+        match action {
+            WakeAction::SyncDirty => self.refresh(),
+            WakeAction::CoalesceFull => self.setNeedsDisplay(true),
+            WakeAction::Hold => {}
+        }
+    }
+
+    /// Reads what changed in the terminal and marks only the dirty row spans
+    /// (or full bounds) for drawing.
+    fn refresh(&self) {
+        let mut st = self.state();
+        let Some(shared) = st.shared() else { return };
+        let st = &mut *st;
+        let changed = Self::sync_grid(st, &shared);
         let frame = self.frame(&st.fonts);
         let width = self.bounds().size.width;
         match changed {
             Changed::None => {}
-            Changed::All => self.setNeedsDisplay(true),
+            Changed::All => {
+                if self.is_drawable() {
+                    st.display.did_invalidate();
+                }
+                self.setNeedsDisplay(true);
+            }
             Changed::Rows(rows) => {
-                for y in rows {
-                    let top = frame.row_top(y);
-                    self.setNeedsDisplayInRect(CGRect::new(CGPoint::new(0.0, top), CGSize::new(width, frame.cell_h)));
+                let mut any_visible = false;
+                for (start, count) in row_spans(rows) {
+                    if let Some(rect) = visible_row_rect(&frame, width, start, count) {
+                        any_visible = true;
+                        self.setNeedsDisplayInRect(rect);
+                    }
+                }
+                if any_visible && self.is_drawable() {
+                    st.display.did_invalidate();
                 }
             }
         }
@@ -698,13 +849,17 @@ impl TermView {
         let Some(ns) = NSGraphicsContext::currentContext() else { return };
         let ctx = ns.CGContext();
         let st = &mut *st;
-        if st.bound.is_none() {
+        let need_sync = st.display.on_draw();
+        let Some(shared) = st.shared() else {
             let bg = st.colors.background.unwrap_or([0, 0, 0]);
             grid::fill(&ctx, bg, dirty);
             return;
+        };
+        if need_sync {
+            Self::sync_grid(st, &shared);
         }
         let frame = self.frame(&st.fonts);
-        let look = Look { focused: st.focused, selection: Some(st.selection), marked: st.marked.clone() };
+        let look = Look { focused: st.focused, selection: Some(st.selection), marked: st.ime.marked.clone() };
         st.grid.draw(&ctx, &mut st.fonts, &frame, dirty, &look);
     }
 
@@ -746,7 +901,7 @@ impl TermView {
         self.log_input(|| {
             let chars = event.characters().map(|s| s.to_string()).unwrap_or_default();
             let raw = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
-            let marked = self.state().marked.clone();
+            let marked = self.state().ime.marked.clone();
             format!("key code {:#04x} chars {chars:?} raw {raw:?} mods {:#x} repeat {} marked {marked:?}", event.keyCode(), event.modifierFlags().0, event.isARepeat())
         });
         let flags = event.modifierFlags();
@@ -754,7 +909,7 @@ impl TermView {
             let _: () = unsafe { msg_send![super(self), keyDown: event] };
             return;
         }
-        let had_marked = self.state().marked.is_some();
+        let had_marked = self.state().ime.has_marked();
         // Ctrl combos go to the encoder (AppKit would make ⌃A a selector).
         if flags.contains(NSEventModifierFlags::Control) && !had_marked {
             let text = event.charactersIgnoringModifiers().map(|s| s.to_string());
@@ -765,7 +920,7 @@ impl TermView {
         self.interpretKeyEvents(&NSArray::from_slice(&[event]));
         let (typed, marked) = {
             let mut st = self.state();
-            (st.typed.take().unwrap_or_default(), st.marked.is_some())
+            (st.typed.take().unwrap_or_default(), st.ime.has_marked())
         };
         if typed.is_empty() {
             // Enter, arrows, Backspace, Esc (not while the IME has them).
@@ -824,8 +979,8 @@ impl TermView {
         Pointer {
             x: p.x * scale,
             y: (height - p.y) * scale,
-            col: cell(p.x - PAD, st.fonts.cell_w, cols),
-            row: cell(height - PAD - p.y, st.fonts.cell_h, rows),
+            col: cell(p.x - PAD_X, st.fonts.cell_w, cols),
+            row: cell(height - PAD_Y - p.y, st.fonts.cell_h, rows),
             mods: keys::mods(event.modifierFlags()),
             time_ns: (event.timestamp() * 1e9) as u64,
         }
@@ -843,17 +998,18 @@ impl TermView {
             }
             let (cw, ch) = st.fonts.cell_px();
             let scale = st.fonts.scale;
-            let pad = (PAD * scale) as u32;
+            let pad_x = (PAD_X * scale) as u32;
+            let pad_y = (PAD_Y * scale) as u32;
             let geometry = g::GhosttyMouseEncoderSize {
                 size: size_of::<g::GhosttyMouseEncoderSize>(),
                 screen_width: (size.width * scale) as u32,
                 screen_height: (size.height * scale) as u32,
                 cell_width: cw,
                 cell_height: ch,
-                padding_top: pad,
-                padding_bottom: pad,
-                padding_right: pad,
-                padding_left: pad,
+                padding_top: pad_y,
+                padding_bottom: pad_y,
+                padding_right: pad_x,
+                padding_left: pad_x,
             };
             let io = &st.io;
             let mut out = [0u8; 64];
@@ -894,7 +1050,7 @@ impl TermView {
             let geometry = g::GhosttySelectionGestureGeometry {
                 columns: core.cols as u32,
                 cell_width: cw,
-                padding_left: (PAD * st.fonts.scale) as u32,
+                padding_left: (PAD_X * st.fonts.scale) as u32,
                 screen_height: (size.height * st.fonts.scale) as u32,
             };
             let position = g::GhosttySurfacePosition { x: p.x, y: p.y };
@@ -1083,6 +1239,7 @@ impl TermView {
 impl Drop for State {
     fn drop(&mut self) {
         if let Some(bound) = &self.bound {
+            bound.shared.woken();
             let id = bound.shared.id;
             let _ = VIEWS.try_with(|v| v.borrow_mut().remove(&id));
         }
@@ -1091,7 +1248,7 @@ impl Drop for State {
 
 /// `aed.terminal`: props `session` (a `TerminalSession` id), `fontFamily`,
 /// `fontSize`, `theme` ({background, foreground, cursor, selection,
-/// palette[16]}); events `focus` ({focused}), `link` ({text}); command
+/// palette[16]}); events `focused` ({focused}), `link` ({text}); command
 /// `focus`.
 pub struct Terminal {
     view: Retained<TermView>,
@@ -1129,5 +1286,82 @@ impl NativeComponent for Terminal {
         if name == "focus" {
             self.view.focus();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ime_state_clears_marked_text_and_selected_range_on_reset() {
+        let mut ime = ImeState::default();
+        assert!(!ime.has_marked());
+        assert_eq!(ime.marked_range(), NSRange::new(NSNotFound as usize, 0));
+        assert_eq!(ime.selected_range(), NSRange::new(0, 0));
+
+        ime.set_marked("你a𐐷".into(), NSRange::new(2, 2));
+        assert!(ime.has_marked());
+        // '你' (1) + 'a' (1) + '𐐷' (2 UTF-16 units) = 4 UTF-16 code units.
+        assert_eq!(ime.marked_range(), NSRange::new(0, 4));
+        assert_eq!(ime.selected_range(), NSRange::new(2, 2));
+
+        assert!(ime.clear());
+        assert!(!ime.has_marked());
+        assert_eq!(ime.marked_range(), NSRange::new(NSNotFound as usize, 0));
+        assert_eq!(ime.selected_range(), NSRange::new(0, 0));
+        assert!(!ime.clear());
+
+        ime.set_marked("zhong".into(), NSRange::new(5, 0));
+        ime.set_marked(String::new(), NSRange::new(0, 0));
+        assert!(!ime.has_marked());
+    }
+
+    #[test]
+    fn display_sync_coalesces_burst_wakes_and_preserves_single_wake_clipping() {
+        let mut sync = DisplaySync::default();
+        // Idle cursor blink: single wake syncs dirty rows, `drawRect:` needs no second sync.
+        assert_eq!(sync.on_wake(true), WakeAction::SyncDirty);
+        sync.did_invalidate();
+        assert!(!sync.on_draw());
+
+        // Multi-chunk burst within one 60/120Hz frame: chunk 1 syncs, chunk 2 marks full once,
+        // chunks 3..N hold `wake_pending`, and `drawRect:` runs one coalesced sync.
+        assert_eq!(sync.on_wake(true), WakeAction::SyncDirty);
+        sync.did_invalidate();
+        assert_eq!(sync.on_wake(true), WakeAction::CoalesceFull);
+        assert_eq!(sync.on_wake(true), WakeAction::Hold);
+        assert_eq!(sync.on_wake(true), WakeAction::Hold);
+        assert!(sync.on_draw());
+        assert!(!sync.on_draw());
+
+        // Hidden / unmounted view: first wake returns `CoalesceFull` so `needsDisplay` is armed
+        // for when the view unhides, and subsequent wakes return `Hold`.
+        assert_eq!(sync.on_wake(false), WakeAction::CoalesceFull);
+        assert_eq!(sync.on_wake(false), WakeAction::Hold);
+        assert!(sync.on_draw());
+    }
+
+    #[test]
+    fn dirty_rows_coalesce_into_contiguous_spans_and_clip_outside_bounds() {
+        assert_eq!(row_spans(vec![]), vec![]);
+        assert_eq!(row_spans(vec![7]), vec![(7, 1)]);
+        assert_eq!(row_spans(vec![5, 3, 4, 5, 9, 10, 12]), vec![(3, 3), (9, 2), (12, 1)]);
+
+        // Frame height 44pt (`PAD_Y = 6`, `cell_h = 16`): rows 0 (`y = 22..38`) and 1 (`y = 6..22`) fit;
+        // row 3 (`y = -26..-10`) lies completely below bounds (`y + h <= 0`) and is skipped.
+        let frame = Frame { height: 44.0, cell_w: 8.0, cell_h: 16.0 };
+        assert!(visible_row_rect(&frame, 200.0, 0, 2).is_some());
+        assert_eq!(visible_row_rect(&frame, 200.0, 3, 1), None);
+        assert_eq!(visible_row_rect(&frame, 0.0, 0, 1), None);
+    }
+
+    #[test]
+    fn cursor_row_log_guard_requires_enabled_log_and_recent_typing() {
+        let t0 = Instant::now();
+        assert!(!should_log_cursor_row(false, Some(t0), t0));
+        assert!(!should_log_cursor_row(true, None, t0));
+        assert!(should_log_cursor_row(true, Some(t0), t0 + Duration::from_millis(1500)));
+        assert!(!should_log_cursor_row(true, Some(t0), t0 + Duration::from_millis(1501)));
     }
 }
