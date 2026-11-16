@@ -3,8 +3,8 @@
     <filter id="dropShadow" x="36" y="56" width="952" height="952" filterUnits="userSpaceOnUse">
       <feDropShadow dx="0" dy="20" stdDeviation="21" flood-color="#000000" flood-opacity="0.50" />
     </filter>
-    <clipPath id="posterClip">
-      <rect x="230" y="230" width="564" height="564" />
+    <clipPath id="editorCardClip">
+      <rect x="198" y="206" width="628" height="612" rx="42" />
     </clipPath>
   </defs>
 
@@ -12,37 +12,39 @@
   <rect x="100" y="100" width="824" height="824" rx="185" fill="#161514" filter="url(#dropShadow)" />
   <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" stroke="#FFFFFF" stroke-opacity="0.09" stroke-width="3" />
 
-  <!-- Centered 564×564 (3 × 188) Bauhaus Square-and-Circle Emblem matching WelcomePanel.tsx -->
-  <g clip-path="url(#posterClip)">
-    <!-- (2,0) Outer surface ground before modular grid & frame hairlines -->
-    <rect x="606" y="230" width="188" height="188" fill="#1e1d1b" />
+  <!-- Bauhaus Architectural Code Sheet & Signal-Red I-Beam Editor Cursor -->
+  <g clip-path="url(#editorCardClip)">
+    <rect x="196" y="204" width="632" height="616" fill="#1e1d1b" />
+    <rect x="196" y="204" width="116" height="616" fill="#1a1917" />
 
-    <!-- 3×3 Modular Construction Grid + Outer Frame Hairlines -->
-    <rect x="232" y="232" width="560" height="560" stroke="#2e2c29" stroke-width="4" />
-    <path d="M 418 230 V 794 M 606 230 V 794 M 230 418 H 794 M 230 606 H 794" stroke="#2e2c29" stroke-width="4" />
+    <!-- Row 3 Active-Line Highlight Band (112px line-box flush with I-Beam cursor) -->
+    <rect x="196" y="506" width="632" height="112" fill="#282623" />
 
-    <!-- (0,0) Inscribed Cobalt Circle + Concentric Aperture Lens -->
-    <circle cx="324" cy="324" r="94" fill="#3568a6" />
-    <circle cx="324" cy="324" r="38" fill="#161514" />
+    <!-- Left Gutter Separator Rule -->
+    <path d="M 312 204 V 820" stroke="#2c2a27" stroke-width="4" />
 
-    <!-- (1,0) + (1,1) Counter-Balanced Bauhaus Rotor (Tangent Quarter-Discs) -->
-    <path d="M 606 418 L 418 418 A 188 188 0 0 1 606 230 Z" fill="#ede8de" />
-    <path d="M 418 418 L 606 418 A 188 188 0 0 1 418 606 Z" fill="#2e2c29" />
+    <!-- Geometric Gutter Markers (Circle / Square / Active Circle / Circle) -->
+    <circle cx="255" cy="362" r="18" fill="#3568a6" />
+    <rect x="237" y="444" width="36" height="36" fill="#3d3a35" />
+    <circle cx="255" cy="562" r="19" fill="#e0482d" />
+    <circle cx="255" cy="662" r="18" fill="#3d3a35" />
 
-    <!-- (2,0) Josef Albers Nested Vermilion Square -->
-    <rect x="647" y="271" width="106" height="106" fill="#e0482d" />
+    <!-- Row 1: Cobalt + Warm Ivory -->
+    <rect x="362" y="339" width="136" height="46" rx="6" fill="#3568a6" />
+    <rect x="522" y="339" width="216" height="46" rx="6" fill="#ede8de" />
 
-    <!-- (0,1) Inscribed Hairline Circle + Centered Stone Square -->
-    <circle cx="324" cy="512" r="92" stroke="#2e2c29" stroke-width="4" />
-    <rect x="298" y="486" width="52" height="52" fill="#2e2c29" />
+    <!-- Row 2 (Indented 48px): Ochre + Warm Ivory -->
+    <rect x="410" y="439" width="156" height="46" rx="6" fill="#dfa428" />
+    <rect x="590" y="439" width="144" height="46" rx="6" fill="#ede8de" />
 
-    <!-- (2,1) Tangent Ochre Gold Full Circle -->
-    <circle cx="700" cy="512" r="94" fill="#dfa428" />
+    <!-- Row 3 (Indented 48px, Active Line): Cobalt + Signal-Red I-Beam Cursor -->
+    <rect x="410" y="539" width="120" height="46" rx="6" fill="#3568a6" />
+    <path d="M 548 506 H 608 A 4 4 0 0 1 612 510 V 520 A 4 4 0 0 1 608 524 H 589 V 600 H 608 A 4 4 0 0 1 612 604 V 614 A 4 4 0 0 1 608 618 H 548 A 4 4 0 0 1 544 614 V 604 A 4 4 0 0 1 548 600 H 567 V 524 H 548 A 4 4 0 0 1 544 520 V 510 A 4 4 0 0 1 548 506 Z" fill="#e0482d" />
 
-    <!-- (0,2) + (1,2) + (2,2) Vermilion Quarter-Disc, Ivory Square + Aperture, Cobalt Quarter-Disc Arch -->
-    <path d="M 418 606 L 418 794 A 188 188 0 0 1 230 606 Z" fill="#e0482d" />
-    <rect x="418" y="606" width="188" height="188" fill="#ede8de" />
-    <circle cx="512" cy="700" r="53" fill="#161514" />
-    <path d="M 606 606 L 794 606 A 188 188 0 0 1 606 794 Z" fill="#3568a6" />
+    <!-- Row 4: Warm Ivory + Bauhaus Ochre Square -->
+    <rect x="362" y="639" width="168" height="46" rx="6" fill="#ede8de" />
+    <rect x="554" y="639" width="46" height="46" fill="#dfa428" />
   </g>
+
+  <rect x="198" y="206" width="628" height="612" rx="42" stroke="#33302c" stroke-width="4" />
 </svg>
