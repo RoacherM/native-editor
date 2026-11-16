@@ -1,10 +1,10 @@
 import { Buffer } from "buffer";
-import { host } from "nsh";
+import { cleanup, effect, host, type Accessor } from "nsh";
 import type { CommandItem, TreeItem } from "nsh/base";
 import type { Dirent } from "fs/promises";
 import * as fs from "fs/promises";
-import * as path from "path";
 import * as os from "os";
+import * as path from "path";
 import process from "process";
 import type {
   FileClassification,
@@ -15,17 +15,38 @@ import type {
 import {
   classifyFile,
   createBlobUrl,
+  createLruCache,
   formatHexDump,
   generateQuickLookUrl,
   parseTableData,
   probeImageDimensions,
+  VIEWER_SPECS,
 } from "./classify";
+import { serialize, type WindowMode } from "./session";
+import {
+  normalizeDirPath,
+  parseTarget,
+  resolveTarget,
+  type FileLocation,
+  type ResolvedTarget,
+  type StatFn,
+  type TargetOptions,
+} from "./target";
+
+export {
+  normalizeDirPath,
+  parseTarget,
+  resolveTarget,
+  type FileLocation,
+  type ResolvedTarget,
+  type TargetOptions,
+};
 
 export type GitStatusCode = "M" | "A" | "D" | "U" | "R";
 
 export interface WorkspaceEntry {
-  path: string; // absolute path
-  relPath: string; // relative to workspace root
+  path: string;
+  relPath: string;
   name: string;
   isDirectory: boolean;
   gitStatus?: GitStatusCode;
@@ -37,6 +58,7 @@ export interface WorkspaceEntry {
 export interface WorkspaceSnapshot {
   root: string;
   branch: string;
+  isGitRepo: boolean;
   entries: WorkspaceEntry[];
   flatFiles: WorkspaceEntry[];
   gitStatusMap: Record<string, GitStatusCode>;
@@ -47,11 +69,41 @@ export interface WorkspaceSnapshot {
   rootNotice: string | null;
 }
 
+/** Single-point `fs.stat` result reused across file loads, prewarming, and tab checks. */
+export interface DiskStat {
+  stamp: string;
+  size: number;
+  isFile: boolean;
+  isDirectory: boolean;
+}
+
+interface StatLike {
+  readonly size: number;
+  readonly mtimeMs: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}
+
+export interface WorkspaceIoDeps {
+  stat(targetPath: string): Promise<StatLike>;
+  lstat(targetPath: string): Promise<StatLike>;
+  readFile(targetPath: string): Promise<Uint8Array>;
+  writeFile(targetPath: string, data: string | Uint8Array): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  unlink(targetPath: string): Promise<void>;
+  mkdir(targetPath: string): Promise<void>;
+  readdirDirents(dir: string): Promise<Array<Pick<Dirent, "name" | "isDirectory">>>;
+  readdirNames(dir: string): Promise<string[]>;
+  readHead(filePath: string, count: number): Promise<Uint8Array>;
+  runGit(args: string[], cwd: string): Promise<{ code?: number | null; stdout: string; stderr: string }>;
+}
+
 /** The snapshot of no workspace. */
 export function emptySnapshot(): WorkspaceSnapshot {
   return {
     root: "",
     branch: "",
+    isGitRepo: false,
     entries: [],
     flatFiles: [],
     gitStatusMap: {},
@@ -91,25 +143,20 @@ export interface LoadedFile {
   tableData: TableData | null;
   hexDump: string;
   diffPatch: string;
-  /**
-   * `mtimeMs:size` of the bytes this copy came from (null when unknown). Each
-   * copy carries its own, so a copy kept over a newer read still knows it is
-   * behind the disk. DESIGN.md「状态机清单」#3.
-   */
+  /** `mtimeMs:size` of the bytes this copy came from (null when unknown). DESIGN.md「状态机清单」#3. */
   diskStamp: string | null;
-  /** The disk has a newer version than this copy's unsaved edits: a conflict the user resolves. */
+  /** The disk has a newer version than this copy's unsaved edits. */
   diskChanged: boolean;
-  /** The file this copy came from is gone (moved or deleted outside Aed); a save never recreates it. */
+  /** The file this copy came from is gone (moved or deleted outside Aed). */
   diskMissing: boolean;
   /** The bytes started with a UTF-8 byte order mark; a save writes it back. */
   bom: boolean;
-  /** Why this copy can never be saved (its bytes are not UTF-8), or null. */
+  /** Why this copy can never be saved (its bytes are not UTF-8 or >8 MB), or null. */
   readOnly: string | null;
   /** What the last save failed with, naming the path; null after a good save. */
   saveError: string | null;
 }
 
-/** Directories and files the scanner never descends into or lists. */
 const IGNORED_NAMES = new Set([
   ".git",
   "node_modules",
@@ -128,47 +175,49 @@ const IGNORED_NAMES = new Set([
 
 const MAX_SCAN_DEPTH = 4;
 const MAX_DIR_ENTRIES = 200;
+const MAX_SCAN_CONCURRENCY = 16;
 
-/** Kinds whose bytes never decode to editable text (except SVG images). */
-const OPAQUE_KINDS = new Set(["binary", "image", "video", "audio", "quicklook"]);
-
-function isOpaqueFile(classification: FileClassification): boolean {
-  if (classification.mimeType === "image/svg+xml") return false;
-  return OPAQUE_KINDS.has(classification.kind);
+function isEditableClassification(classification: FileClassification): boolean {
+  return VIEWER_SPECS[classification.kind].editable || classification.mimeType === "image/svg+xml";
 }
 
-/**
- * Whether a file of this kind can be shown in `mode`. Opaque files (images,
- * PDF, media, binary) have their preview only: a source or diff view of them
- * would be an empty editor whose save wipes the file.
- */
+/** Whether a file of this classification can be shown in `mode`, derived from `VIEWER_SPECS`. */
 export function allowsMode(classification: FileClassification, mode: PreviewMode): boolean {
-  return !isOpaqueFile(classification) || mode === classification.defaultMode;
+  return VIEWER_SPECS[classification.kind]
+    .modes({
+      mimeType: classification.mimeType,
+      editable: isEditableClassification(classification),
+      hasDiff: true,
+    })
+    .includes(mode);
 }
 
-/** Whether this copy may ever be written back: text Aed decoded without loss. */
-export function canSaveFile(file: LoadedFile): boolean {
-  return !isOpaqueFile(file.classification) && file.readOnly === null;
+/** Whether this copy may ever be written back: editable kind decoded without loss. */
+export function canSaveFile(file: {
+  classification: FileClassification;
+  readOnly: string | null;
+}): boolean {
+  return isEditableClassification(file.classification) && file.readOnly === null;
 }
 
 /** Shown above a file whose bytes are not UTF-8; such a copy is never saved. */
 export const NOT_UTF8_NOTICE = "Not UTF-8 — opened read-only";
 
-/**
- * Files above this size are never read whole (DESIGN.md「文件大小上限」): nsh's
- * `writeFile` takes at most 8 MiB, so a larger file could not be saved anyway.
- */
-const MAX_EDITABLE_BYTES = 8 * 1024 * 1024;
-/** How much of a text file above `MAX_EDITABLE_BYTES` is shown, read-only. */
-const LARGE_TEXT_HEAD_BYTES = 256 * 1024;
-/** How much of a large binary file is read: what its hex dump shows. */
-const BINARY_HEAD_BYTES = 4096;
+/** Files above this size are never read whole (DESIGN.md「文件大小上限」): nsh's `writeFile` caps at 8 MiB. */
+export const MAX_EDITABLE_BYTES = 8 * 1024 * 1024;
+/** Head bytes read once via `python3` when previewing a file above `MAX_EDITABLE_BYTES`. */
+export const MAX_PREVIEW_HEAD_BYTES = 262_144;
+/** Leading byte window inspected for NUL bytes and formatted for binary hex dumps. */
+export const BINARY_HEAD_BYTES = 4096;
 
 /** Shown above a text file above `MAX_EDITABLE_BYTES`; such a copy is never saved. */
 export const LARGE_FILE_NOTICE = "Larger than 8 MB — showing the first 256 KB, read-only";
 
 /** Shown above a file git lists as deleted: its diff against HEAD. */
 export const DELETED_FILE_NOTICE = "Deleted — showing what was removed";
+
+/** Why a save of a copy whose file is gone fails. */
+export const FILE_MISSING_REASON = "the file was moved or deleted";
 
 const UTF8_BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
 
@@ -197,19 +246,68 @@ export function encodeUtf8(text: string, bom: boolean): Uint8Array {
   return out;
 }
 
+type ReadCompleteness = "full" | "partial";
+
 /** The editable text of a file's bytes; `readOnly` says why it must never be saved. */
 function decodeFileText(
   classification: FileClassification,
   bytes: Uint8Array,
-  partial: boolean,
+  completeness: ReadCompleteness,
 ): { text: string; bom: boolean; readOnly: string | null } {
-  if (isOpaqueFile(classification)) return { text: "", bom: false, readOnly: null };
-  // The cut may split a character: decode leniently, never save.
-  if (partial) return { text: new TextDecoder("utf-8").decode(bytes), bom: false, readOnly: LARGE_FILE_NOTICE };
+  if (!isEditableClassification(classification)) return { text: "", bom: false, readOnly: null };
+  if (completeness === "partial") {
+    return { text: new TextDecoder("utf-8").decode(bytes), bom: false, readOnly: LARGE_FILE_NOTICE };
+  }
   const decoded = decodeUtf8(bytes);
   if (decoded) return { ...decoded, readOnly: null };
-  // Shown for reading only: the lossy text must never reach the disk.
   return { text: new TextDecoder("utf-8").decode(bytes), bom: false, readOnly: NOT_UTF8_NOTICE };
+}
+
+function execCwd(cwd?: string): string {
+  return cwd && cwd.length > 0 ? cwd : os.homedir();
+}
+
+const HEAD_SCRIPT =
+  "import sys\nwith open(sys.argv[1], 'rb') as f: sys.stdout.write(f.read(int(sys.argv[2])).hex())";
+
+async function defaultReadFileHead(filePath: string, count: number): Promise<Uint8Array> {
+  const result = await process.run("python3", ["-c", HEAD_SCRIPT, filePath, String(count)], {
+    cwd: execCwd(),
+  });
+  if (result.code !== 0) throw new Error(result.stderr.trim() || `cannot read ${filePath}`);
+  return new Uint8Array(Buffer.from(result.stdout.trim(), "hex"));
+}
+
+const DEFAULT_IO: WorkspaceIoDeps = {
+  stat: (p) => fs.stat(p),
+  lstat: (p) => fs.lstat(p),
+  readFile: (p) => fs.readFile(p),
+  writeFile: (p, data) => fs.writeFile(p, data),
+  rename: (from, to) => fs.rename(from, to),
+  unlink: (p) => fs.unlink(p),
+  mkdir: (p) => fs.mkdir(p, { recursive: true }),
+  readdirDirents: (dir) => fs.readdir(dir, { withFileTypes: true }),
+  readdirNames: (dir) => fs.readdir(dir),
+  readHead: defaultReadFileHead,
+  runGit: (args, cwd) => process.run("git", args, { cwd }),
+};
+
+/** Single `fs.stat` call returning `{ stamp, size, isFile, isDirectory }`, or `null` when missing/unreadable. */
+export async function statDisk(
+  filePath: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<DiskStat | null> {
+  try {
+    const st = await deps.stat(filePath);
+    return {
+      stamp: `${st.mtimeMs}:${st.size}`,
+      size: st.size,
+      isFile: st.isFile(),
+      isDirectory: st.isDirectory(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 // DESIGN.md「术语与边界」
@@ -218,7 +316,6 @@ export function aedCacheDir(): string {
   return path.join(os.homedir(), "Library", "Caches", "dev.byronwayne.aed");
 }
 
-/** A queue entry the native writers (`aed_paths.h`) publish; `.<seq>.tmp` files are still being written. */
 const QUEUE_ENTRY = /^(\d+)\.path$/;
 let queueLock: Promise<void> = Promise.resolve();
 
@@ -226,90 +323,52 @@ function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
   const next = queueLock.then(fn, fn);
   queueLock = next.then(
     () => undefined,
-    () => undefined
+    () => undefined,
   );
   return next;
 }
 
-/** A place in a file: `line` and `column` count from 1; 0 when the reference names none. */
-export interface FileLocation {
-  path: string;
-  line: number;
-  column: number;
+const LOCAL_HASH_LINE = /#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?$/i;
+const HAS_URI_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+/** Escape literal `#` inside non-URL local file names (e.g. `C#_notes.md:10`) while keeping `#L10`. */
+function prepareExternalTarget(raw: string): string {
+  if (!raw.includes("#")) return raw;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("#") || HAS_URI_SCHEME.test(trimmed)) return raw;
+  const hashLine = LOCAL_HASH_LINE.exec(trimmed);
+  if (!hashLine) return raw.replaceAll("#", "%23");
+  const cut = raw.lastIndexOf(hashLine[0]);
+  return raw.slice(0, cut).replaceAll("#", "%23") + raw.slice(cut);
 }
 
-const HASH_LINE = /#L(\d+)(?:C(\d+)|-L?\d+)?$/i;
-const COLON_LINE = /^(.+?):(\d+)(?::(\d+))?$/;
-
-/** `file://[localhost]/p%20q#L3` → `/p q` and its fragment `#L3`. */
-function decodeFileUrl(url: string): { filePath: string; fragment: string } {
-  let rest = url.slice("file://".length);
-  if (rest.startsWith("localhost/")) rest = rest.slice("localhost".length);
-  const hash = rest.indexOf("#");
-  const fragment = hash >= 0 ? rest.slice(hash) : "";
-  if (hash >= 0) rest = rest.slice(0, hash);
-  try {
-    return { filePath: decodeURIComponent(rest), fragment };
-  } catch {
-    return { filePath: rest, fragment };
-  }
+/** Candidate file locations for an external path or `file://` URL, literal first (`src/target.ts`). */
+export function externalFileCandidates(raw: string, opts?: TargetOptions): FileLocation[] {
+  const parsed = parseTarget(prepareExternalTarget(raw), opts);
+  return parsed.kind === "candidates" ? parsed.items : [];
 }
 
-/** `p#L3C2` or `p#L3-L9` → `p` at that line (a bare `#L3` too, with an empty path). */
-function splitHashLine(ref: string): FileLocation | null {
-  const hash = HASH_LINE.exec(ref);
-  if (!hash) return null;
-  return { path: ref.slice(0, hash.index), line: Number(hash[1]), column: Number(hash[2] ?? 0) };
+/** The path an external reference names with any line suffix taken off. */
+export function normalizeExternalFilePath(raw: string, opts?: TargetOptions): string {
+  return externalFileCandidates(raw, opts).at(-1)?.path ?? "";
 }
 
-/** `p#L3C2`, `p#L3-L9`, `p:3:2` or `p:3` → `p` at that line; null without such a suffix. */
-function splitLineSuffix(ref: string): FileLocation | null {
-  const hash = splitHashLine(ref);
-  if (hash?.path) return hash;
-  const colon = COLON_LINE.exec(ref);
-  return colon ? { path: colon[1], line: Number(colon[2]), column: Number(colon[3] ?? 0) } : null;
+/** Resolve an external file/folder reference against disk (`1` `stat` per candidate via `resolveTarget`). */
+export async function resolveExternalFileReference(
+  raw: string,
+  opts?: TargetOptions,
+  statFn: StatFn = (p) => statDisk(p),
+): Promise<(FileLocation & { isDirectory: boolean }) | null> {
+  const resolved = await resolveTarget(prepareExternalTarget(raw), opts, statFn);
+  if (!resolved || resolved.kind !== "file") return null;
+  return {
+    path: resolved.path,
+    line: resolved.line,
+    column: resolved.column,
+    isDirectory: resolved.isDirectory,
+  };
 }
 
-/**
- * What an external reference (a path, a `file://` URL, either with a line
- * suffix) may name, most literal first: the path exactly as written, then
- * the path with its line suffix taken off. A file URL's `#L3` is always a
- * fragment (`#` in a name is written `%23`).
- */
-export function externalFileCandidates(raw: string): FileLocation[] {
-  const clean = raw.trim();
-  if (!clean) return [];
-  if (!clean.startsWith("file://")) {
-    const stripped = splitLineSuffix(clean);
-    // A name may begin or end with a space: the bytes as given come first.
-    const literals = [...new Set([raw, clean])].map((p) => ({ path: p, line: 0, column: 0 }));
-    return [...literals, ...(stripped ? [stripped] : [])];
-  }
-  const { filePath, fragment } = decodeFileUrl(clean);
-  const anchored = splitHashLine(fragment);
-  const literal = { path: filePath, line: anchored?.line ?? 0, column: anchored?.column ?? 0 };
-  const stripped = splitLineSuffix(filePath);
-  return [literal, ...(stripped ? [stripped] : [])];
-}
-
-/** The path an external reference names with any line suffix taken off (markdown links, image sources). */
-export function normalizeExternalFilePath(raw: string): string {
-  return externalFileCandidates(raw).at(-1)?.path ?? "";
-}
-
-/**
- * The file an external open means: the path as written when it exists (a
- * file may be named `notes:12`), else the path without its line suffix,
- * with that line. Null when neither exists.
- */
-export async function resolveExternalFileReference(raw: string): Promise<FileLocation | null> {
-  for (const candidate of externalFileCandidates(raw)) {
-    if (await fs.exists(candidate.path)) return candidate;
-  }
-  return null;
-}
-
-/** `host.params[paramKey]`, else the first of `envNames` that is set, else "". */
 function readHostOrEnvParam(paramKey: string, ...envNames: string[]): string {
   const fromHost = host?.params?.[paramKey];
   if (typeof fromHost === "string" && fromHost.length > 0) return fromHost;
@@ -322,39 +381,39 @@ export function getInitialOpenFile(): string | null {
   return raw.trim().length > 0 ? raw : null;
 }
 
-/**
- * This process's own queue directory (`AED_OPEN_QUEUE`, set by the native
- * bridge from its pid), or null when unset or not `<cache>/open-<number>`.
- */
-export function resolveFinderQueueDir(): string | null {
-  const raw = readHostOrEnvParam("openQueue", "AED_OPEN_QUEUE");
+/** This process's own queue directory (`<cache>/open-<pid>`), or null when unset or outside cache. */
+export function resolveFinderQueueDir(rawOverride?: string, cacheDirOverride?: string): string | null {
+  const raw = rawOverride ?? readHostOrEnvParam("openQueue", "AED_OPEN_QUEUE");
+  if (!raw) return null;
   const name = path.basename(raw);
-  // The native side builds it from $HOME as set (`/Users/x/` gives `//Library`).
-  const inCache = path.normalize(path.dirname(raw)) === path.normalize(aedCacheDir());
+  const inCache =
+    normalizeDirPath(path.dirname(raw)) === normalizeDirPath(cacheDirOverride ?? aedCacheDir());
   return inCache && /^open-\d+$/.test(name) ? raw : null;
 }
 
-/** Read and delete one queue entry; only a regular file counts (a symlink is removed, never followed). */
-async function takeQueueEntry(entryPath: string): Promise<string> {
+async function takeQueueEntry(entryPath: string, deps: WorkspaceIoDeps): Promise<string> {
   try {
-    const stat = await fs.lstat(entryPath);
-    return stat.isFile() ? new TextDecoder().decode(await fs.readFile(entryPath)) : "";
+    const stat = await deps.lstat(entryPath);
+    return stat.isFile() ? new TextDecoder().decode(await deps.readFile(entryPath)) : "";
   } catch {
     return "";
   } finally {
-    await fs.unlink(entryPath).catch(() => undefined);
+    await deps.unlink(entryPath).catch(() => undefined);
   }
 }
 
-/** Read and delete the references queued for this window, in the order they were queued. */
-export async function consumeFinderOpenQueue(): Promise<string[]> {
-  const dir = resolveFinderQueueDir();
+/** Read and delete the references queued for this window, in numeric sequence order. */
+export async function consumeFinderOpenQueue(
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+  queueDirOverride?: string,
+): Promise<string[]> {
+  const dir = resolveFinderQueueDir(queueDirOverride);
   if (!dir) return [];
   return withQueueLock(async () => {
     let names: string[];
     try {
-      if (!(await fs.lstat(dir)).isDirectory()) return [];
-      names = await fs.readdir(dir);
+      if (!(await deps.lstat(dir)).isDirectory()) return [];
+      names = await deps.readdirNames(dir);
     } catch {
       return [];
     }
@@ -364,34 +423,63 @@ export async function consumeFinderOpenQueue(): Promise<string[]> {
       .sort((a, b) => Number(a[1]) - Number(b[1]));
     const refs: string[] = [];
     for (const [name] of entries) {
-      const ref = await takeQueueEntry(path.join(dir, name));
+      const ref = await takeQueueEntry(path.join(dir, name), deps);
       if (ref) refs.push(ref);
     }
     return refs;
   });
 }
 
-/** Resolve initial workspace root from host.params.workspaceRoot or process.env.AED_ROOT (or legacy NATIVE_EDITOR_ROOT); returns "" on clean launch or loose file launch so $HOME, /, or parent folders are never auto-scanned. */
-export function getInitialWorkspaceRoot(): string {
-  return readHostOrEnvParam(
-    "workspaceRoot",
-    "AED_ROOT",
-    "NATIVE_EDITOR_ROOT"
-  );
+export interface SyncWindowStateOptions {
+  queueDir?: string;
+  cacheDir?: string;
+  deps?: WorkspaceIoDeps;
 }
 
-/** Check whether a path on disk is a directory. */
-export async function isDirectoryPath(targetPath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(targetPath);
-    return stat.isDirectory();
-  } catch {
-    return false;
+function activeProcessQueueDir(opts?: SyncWindowStateOptions): string | null {
+  if (opts?.queueDir !== undefined) {
+    return resolveFinderQueueDir(opts.queueDir, opts.cacheDir);
   }
+  const envQueue = process.env.AED_OPEN_QUEUE ?? "";
+  return envQueue ? resolveFinderQueueDir(envQueue, opts?.cacheDir) : null;
 }
 
-function execCwd(cwd?: string): string {
-  return cwd && cwd.length > 0 ? cwd : os.homedir();
+/** Write `<cache>/open-<pid>/state` (`home` / `loose` / `workspace\n<root>`) when `AED_OPEN_QUEUE` is active. */
+export async function syncWindowStateFile(
+  mode: WindowMode,
+  root: string,
+  opts?: SyncWindowStateOptions,
+): Promise<void> {
+  const dir = activeProcessQueueDir(opts);
+  if (!dir) return;
+  const deps = opts?.deps ?? DEFAULT_IO;
+  const content = mode === "workspace" ? `workspace\n${root}\n` : `${mode}\n`;
+  await withQueueLock(async () => {
+    try {
+      await deps.mkdir(dir);
+      if (!(await deps.lstat(dir)).isDirectory()) return;
+      const tmpPath = path.join(dir, ".state.tmp");
+      const dstPath = path.join(dir, "state");
+      await deps.unlink(tmpPath).catch(() => undefined);
+      await deps.writeFile(tmpPath, content);
+      await deps.rename(tmpPath, dstPath);
+    } catch {
+      // Best-effort hint for finder_bridge.m; external opens safely fall back to open -n.
+    }
+  });
+}
+
+/** Resolve initial workspace root from host.params.workspaceRoot or AED_ROOT; "" on clean/loose launch. */
+export function getInitialWorkspaceRoot(): string {
+  return readHostOrEnvParam("workspaceRoot", "AED_ROOT", "NATIVE_EDITOR_ROOT");
+}
+
+/** Check whether a path on disk is a directory via single-point `statDisk`. */
+export async function isDirectoryPath(
+  targetPath: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<boolean> {
+  return (await statDisk(targetPath, deps))?.isDirectory ?? false;
 }
 
 /** The path of `full` relative to `root` (both absolute). */
@@ -414,41 +502,85 @@ export function shortenHomePath(full: string, home: string): string {
 export function lookupGitStatus(
   filePath: string,
   root: string,
-  statusMap: Record<string, GitStatusCode>
+  statusMap: Record<string, GitStatusCode>,
 ): GitStatusCode | undefined {
   const rel = relativePath(root, filePath);
   return statusMap[rel] ?? statusMap[filePath];
 }
 
-/** Whether a directory entry is one of the ignored names or a hidden dot-folder. */
 function isIgnored(name: string, isDirectory: boolean): boolean {
   if (IGNORED_NAMES.has(name)) return true;
   if (isDirectory && name.startsWith(".") && name !== ".github") return true;
   return false;
 }
 
-/** A folder's listed entries, and why some are missing (a notice), if any are. */
 interface DirListing {
   entries: WorkspaceEntry[];
   notice: string | null;
 }
 
-/** Folders first, then files, each alphabetically. */
-function compareDirents(a: Dirent, b: Dirent): number {
+function compareDirents(
+  a: Pick<Dirent, "name" | "isDirectory">,
+  b: Pick<Dirent, "name" | "isDirectory">,
+): number {
   if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
   return a.name.localeCompare(b.name);
 }
 
-/**
- * Recursively list a directory in parallel across subdirectories. Ignored
- * names are dropped before the MAX_DIR_ENTRIES cut, so they never take a
- * place; a folder Aed cannot read, or did not descend into, says so.
- */
-async function scanDirectory(root: string, dir: string, depth = 0): Promise<DirListing> {
+function createLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  const release = () => {
+    active -= 1;
+    waiting.shift()?.();
+  };
+  return async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= max) {
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    }
+    active += 1;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+}
+
+async function buildScannedEntry(
+  root: string,
+  dir: string,
+  dirent: Pick<Dirent, "name" | "isDirectory">,
+  depth: number,
+  limit: <T>(fn: () => Promise<T>) => Promise<T>,
+  deps: WorkspaceIoDeps,
+): Promise<WorkspaceEntry> {
+  const full = path.join(dir, dirent.name);
+  const isDirectory = dirent.isDirectory();
+  const entry: WorkspaceEntry = {
+    path: full,
+    relPath: relativePath(root, full),
+    name: dirent.name,
+    isDirectory,
+  };
+  if (!isDirectory) return entry;
+  const listing = await scanDirectory(root, full, depth + 1, limit, deps);
+  entry.children = listing.entries;
+  if (listing.notice) entry.notice = listing.notice;
+  return entry;
+}
+
+async function scanDirectory(
+  root: string,
+  dir: string,
+  depth: number,
+  limit: <T>(fn: () => Promise<T>) => Promise<T>,
+  deps: WorkspaceIoDeps,
+): Promise<DirListing> {
   if (depth > MAX_SCAN_DEPTH) return { entries: [], notice: FOLDER_NOTICES.tooDeep };
-  let dirents: Dirent[];
+  let dirents: Array<Pick<Dirent, "name" | "isDirectory">>;
   try {
-    dirents = await fs.readdir(dir, { withFileTypes: true });
+    dirents = await limit(() => deps.readdirDirents(dir));
   } catch {
     return { entries: [], notice: FOLDER_NOTICES.unreadable };
   }
@@ -457,66 +589,60 @@ async function scanDirectory(root: string, dir: string, depth = 0): Promise<DirL
     .sort(compareDirents);
   const shown = visible.slice(0, MAX_DIR_ENTRIES);
   const entries = await Promise.all(
-    shown.map(async (dirent): Promise<WorkspaceEntry> => {
-      const full = path.join(dir, dirent.name);
-      const entry: WorkspaceEntry = {
-        path: full,
-        relPath: relativePath(root, full),
-        name: dirent.name,
-        isDirectory: dirent.isDirectory(),
-      };
-      if (!entry.isDirectory) return entry;
-      const listing = await scanDirectory(root, full, depth + 1);
-      entry.children = listing.entries;
-      if (listing.notice) entry.notice = listing.notice;
-      return entry;
-    })
+    shown.map((dirent) => buildScannedEntry(root, dir, dirent, depth, limit, deps)),
   );
   const omitted = visible.length - shown.length;
   return { entries, notice: omitted > 0 ? moreItemsNotice(omitted) : null };
 }
 
-/** Attach gitStatus to each entry and collect every file in display order. */
-function collectFiles(
-  entries: WorkspaceEntry[],
-  gitStatusMap: Record<string, GitStatusCode>
-): WorkspaceEntry[] {
-  const files: WorkspaceEntry[] = [];
-  for (const entry of entries) {
-    entry.gitStatus = gitStatusMap[entry.relPath];
-    if (entry.isDirectory) {
-      files.push(...collectFiles(entry.children ?? [], gitStatusMap));
-    } else {
-      files.push(entry);
-    }
-  }
-  return files;
+function applyGitStatusEntry(entry: WorkspaceEntry, gitStatus: GitStatusCode | undefined): WorkspaceEntry {
+  if (gitStatus !== undefined) return { ...entry, gitStatus };
+  if (entry.gitStatus === undefined) return entry;
+  const { gitStatus: _dropped, ...clean } = entry;
+  return clean;
 }
 
-/** Tree rows for `entries` of folder `dir`, ending with the folder's notice row (disabled), if any. */
+/** Purely attach gitStatus across the tree while accumulating every file into a single `out` array. */
+function collectFiles(
+  entries: readonly WorkspaceEntry[],
+  gitStatusMap: Record<string, GitStatusCode>,
+  out: WorkspaceEntry[],
+): WorkspaceEntry[] {
+  const mapped: WorkspaceEntry[] = [];
+  for (const entry of entries) {
+    const gitStatus = gitStatusMap[entry.relPath];
+    if (entry.isDirectory) {
+      const children = collectFiles(entry.children ?? [], gitStatusMap, out);
+      mapped.push({ ...applyGitStatusEntry(entry, gitStatus), children });
+    } else {
+      const next = applyGitStatusEntry(entry, gitStatus);
+      mapped.push(next);
+      out.push(next);
+    }
+  }
+  return mapped;
+}
+
 function toTreeItems(dir: string, entries: WorkspaceEntry[], notice: string | null | undefined): TreeItem[] {
   const items = entries.map(toTreeItem);
   if (notice) items.push({ id: noticeRowId(dir), label: notice, disabled: true });
   return items;
 }
 
-/** A tree row for an entry, folders carrying their children. */
 function toTreeItem(entry: WorkspaceEntry): TreeItem {
   const item: TreeItem = { id: entry.path, label: entry.name };
   if (entry.isDirectory) item.children = toTreeItems(entry.path, entry.children ?? [], entry.notice);
   return item;
 }
 
-/** The id of a folder's notice row: never a path on disk (NUL cannot be in a name). */
 function noticeRowId(dir: string): string {
   return `${dir}/\u0000notice`;
 }
 
-/** A flat tree of the files git reports as changed, deleted ones (not on disk) last. */
 function toChangedItems(
   root: string,
   flatFiles: WorkspaceEntry[],
-  gitStatusMap: Record<string, GitStatusCode>
+  gitStatusMap: Record<string, GitStatusCode>,
 ): TreeItem[] {
   const onDisk = flatFiles
     .filter((entry) => entry.gitStatus !== undefined)
@@ -528,12 +654,10 @@ function toChangedItems(
   return [...onDisk, ...deleted];
 }
 
-/** A quick-open row for a file. */
 function toCommandItem(entry: WorkspaceEntry): CommandItem {
   return { id: entry.path, label: entry.relPath, keywords: [entry.name], group: "Files" };
 }
 
-/** Map one porcelain status pair to the single code the UI shows. */
 function toGitStatus(code: string): GitStatusCode {
   if (code === "??") return "U";
   if (code[0] === "R" || code[1] === "R") return "R";
@@ -542,7 +666,6 @@ function toGitStatus(code: string): GitStatusCode {
   return "M";
 }
 
-/** Parse `git status --porcelain=v1 -z -uall` into a relative-path status map. */
 function parseGitStatus(output: string): Record<string, GitStatusCode> {
   const map: Record<string, GitStatusCode> = {};
   const fields = output.split("\u0000");
@@ -553,68 +676,112 @@ function parseGitStatus(output: string): Record<string, GitStatusCode> {
     const filePath = field.slice(3).replace(/\/+$/, "");
     if (filePath.length === 0) continue;
     map[filePath] = toGitStatus(code);
-    if (code[0] === "R" || code[0] === "C") i += 1; // skip the source-path field
+    if (code[0] === "R" || code[0] === "C") i += 1;
   }
   return map;
 }
 
-/** Run `git status --porcelain=v1 -z -uall`; an empty map outside a repository. */
-export async function readGitStatus(root: string): Promise<Record<string, GitStatusCode>> {
+async function probeGitStatus(
+  root: string,
+  deps: WorkspaceIoDeps,
+): Promise<{ isGitRepo: boolean; gitStatusMap: Record<string, GitStatusCode> }> {
   try {
-    const result = await process.run(
-      "git",
-      ["status", "--porcelain=v1", "-z", "-uall"],
-      { cwd: root },
+    const result = await deps.runGit(
+      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall"],
+      root,
     );
-    return parseGitStatus(result.stdout);
+    if (result.code !== 0) return { isGitRepo: false, gitStatusMap: {} };
+    return { isGitRepo: true, gitStatusMap: parseGitStatus(result.stdout) };
   } catch {
-    return {};
+    return { isGitRepo: false, gitStatusMap: {} };
   }
 }
 
-/** The current branch name, or "" outside a repository. */
-async function readGitBranch(root: string): Promise<string> {
+/** Run `git --no-optional-locks status --porcelain=v1 -z -uall`; empty map outside a repository. */
+export async function readGitStatus(
+  root: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<Record<string, GitStatusCode>> {
+  return (await probeGitStatus(root, deps)).gitStatusMap;
+}
+
+async function readGitBranch(root: string, deps: WorkspaceIoDeps): Promise<string> {
   try {
-    const result = await process.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root });
-    return result.stdout.trim();
+    const result = await deps.runGit(
+      ["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"],
+      root,
+    );
+    return result.code === 0 ? result.stdout.trim() : "";
   } catch {
     return "";
   }
 }
 
-/** Scan workspace directory, git branch, and git status (-z). */
-export async function scanWorkspace(root: string): Promise<WorkspaceSnapshot> {
+async function resolveUnreadableRootNotice(root: string, deps: WorkspaceIoDeps): Promise<string> {
+  return (await isDirectoryPath(root, deps))
+    ? FOLDER_NOTICES.unreadable
+    : FOLDER_NOTICES.rootMissing;
+}
+
+/** Scan workspace directory (bounded concurrency), git repo state, branch, and lock-free git status. */
+export async function scanWorkspace(
+  root: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<WorkspaceSnapshot> {
   if (!root || root.trim().length === 0) return emptySnapshot();
-  const [gitStatusMap, branch, listing] = await Promise.all([
-    readGitStatus(root),
-    readGitBranch(root),
-    scanDirectory(root, root),
+  const limit = createLimiter(MAX_SCAN_CONCURRENCY);
+  const [gitProbe, branch, listing] = await Promise.all([
+    probeGitStatus(root, deps),
+    readGitBranch(root, deps),
+    scanDirectory(root, root, 0, limit, deps),
   ]);
   const unlisted = listing.notice === FOLDER_NOTICES.unreadable;
-  const rootNotice = !unlisted
-    ? null
-    : (await isDirectoryPath(root))
-      ? FOLDER_NOTICES.unreadable
-      : FOLDER_NOTICES.rootMissing;
+  const rootNotice = unlisted ? await resolveUnreadableRootNotice(root, deps) : null;
   const base: WorkspaceSnapshot = {
     ...emptySnapshot(),
     root,
-    branch,
+    branch: gitProbe.isGitRepo ? branch : "",
+    isGitRepo: gitProbe.isGitRepo,
     entries: listing.entries,
     treeItemsAll: unlisted ? [] : toTreeItems(root, listing.entries, listing.notice),
     rootNotice,
   };
-  return withGitStatus(base, gitStatusMap);
+  return withGitStatus(base, gitProbe.gitStatusMap);
 }
 
-/** `snapshot` with a new git status: the badges, the Changed list and quick open follow it. */
+const MAX_PRELOAD_FILES = 12;
+const MAX_PRELOAD_CACHE_ENTRIES = 32;
+const MAX_PRELOAD_BYTES = 262_144;
+let preloadedRoot = "";
+const preloadedFiles = createLruCache<string, LoadedFile>(MAX_PRELOAD_CACHE_ENTRIES, (_key, file) => {
+  if (file.blobUrl?.startsWith("blob:")) URL.revokeObjectURL(file.blobUrl);
+});
+
+function invalidateChangedPreloads(
+  root: string,
+  prevMap: Record<string, GitStatusCode>,
+  nextMap: Record<string, GitStatusCode>,
+): void {
+  if (!root) return;
+  for (const rel of Object.keys(prevMap)) {
+    if (prevMap[rel] !== nextMap[rel]) preloadedFiles.delete(path.join(root, rel));
+  }
+  for (const rel of Object.keys(nextMap)) {
+    if (prevMap[rel] !== nextMap[rel]) preloadedFiles.delete(path.join(root, rel));
+  }
+}
+
+/** `snapshot` with a new git status: updates badges, Changed list, quick open, and invalidates stale preloads. */
 export function withGitStatus(
   snapshot: WorkspaceSnapshot,
-  gitStatusMap: Record<string, GitStatusCode>
+  gitStatusMap: Record<string, GitStatusCode>,
 ): WorkspaceSnapshot {
-  const flatFiles = collectFiles(snapshot.entries, gitStatusMap);
+  invalidateChangedPreloads(snapshot.root, snapshot.gitStatusMap, gitStatusMap);
+  const flatFiles: WorkspaceEntry[] = [];
+  const entries = collectFiles(snapshot.entries, gitStatusMap, flatFiles);
   return {
     ...snapshot,
+    entries,
     flatFiles,
     gitStatusMap,
     treeItemsChanged: toChangedItems(snapshot.root, flatFiles, gitStatusMap),
@@ -625,25 +792,25 @@ export function withGitStatus(
 /** Whether two git status maps say the same. */
 export function sameGitStatus(
   a: Record<string, GitStatusCode>,
-  b: Record<string, GitStatusCode>
+  b: Record<string, GitStatusCode>,
 ): boolean {
   const keys = Object.keys(a);
   return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
 }
 
-/**
- * The disk stamp of the folders the tree shows: each one's `mtimeMs` (a
- * child added, removed or renamed changes it), `-` when it cannot be read.
- */
-export async function readFolderStamps(dirs: readonly string[]): Promise<string> {
+/** The disk stamp of the folders the tree shows (`mtimeMs`, or `-` when unreadable). */
+export async function readFolderStamps(
+  dirs: readonly string[],
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<string> {
   const stamps = await Promise.all(
     dirs.map(async (dir) => {
       try {
-        return `${dir}:${(await fs.stat(dir)).mtimeMs}`;
+        return `${dir}:${(await deps.stat(dir)).mtimeMs}`;
       } catch {
         return `${dir}:-`;
       }
-    })
+    }),
   );
   return stamps.join("\n");
 }
@@ -654,7 +821,7 @@ export type Rename = readonly [string, string];
 function childrenByFolder(
   dir: string,
   entries: WorkspaceEntry[],
-  out: Map<string, WorkspaceEntry[]>
+  out: Map<string, WorkspaceEntry[]>,
 ): Map<string, WorkspaceEntry[]> {
   out.set(dir, entries);
   for (const entry of entries) {
@@ -663,15 +830,11 @@ function childrenByFolder(
   return out;
 }
 
-/**
- * The renames between two scans of `root`: in a folder both scans list, one
- * entry went and one of the same kind came. Anything else (several at once,
- * a move to another folder) is not guessed.
- */
+/** Detect 1-to-1 same-kind renames in a folder in O(K) time via `Set` membership. */
 export function detectRenames(
   root: string,
   before: WorkspaceEntry[],
-  after: WorkspaceEntry[]
+  after: WorkspaceEntry[],
 ): Rename[] {
   const old = childrenByFolder(root, before, new Map());
   const fresh = childrenByFolder(root, after, new Map());
@@ -679,8 +842,10 @@ export function detectRenames(
   for (const [dir, oldChildren] of old) {
     const newChildren = fresh.get(dir);
     if (!newChildren) continue;
-    const went = oldChildren.filter((e) => !newChildren.some((n) => n.path === e.path));
-    const came = newChildren.filter((n) => !oldChildren.some((e) => e.path === n.path));
+    const oldPaths = new Set(oldChildren.map((e) => e.path));
+    const newPaths = new Set(newChildren.map((n) => n.path));
+    const went = oldChildren.filter((e) => !newPaths.has(e.path));
+    const came = newChildren.filter((n) => !oldPaths.has(n.path));
     if (went.length === 1 && came.length === 1 && went[0].isDirectory === came[0].isDirectory) {
       renames.push([went[0].path, came[0].path]);
     }
@@ -699,27 +864,35 @@ export function migratePath(filePath: string, renames: readonly Rename[]): strin
 
 /** `file` at `filePath`: its names follow, its text and state stay. */
 export function relocateFile(file: LoadedFile, filePath: string, root: string): LoadedFile {
-  return { ...file, path: filePath, name: path.basename(filePath), relPath: relativePath(root, filePath) };
+  return {
+    ...file,
+    path: filePath,
+    name: path.basename(filePath),
+    relPath: relativePath(root, filePath),
+  };
 }
 
-/** Fetch git diff patch for a specific file (staged + unstaged vs HEAD, or unstaged). */
-export async function getFileDiffPatch(filePath: string, root: string): Promise<string> {
+/** Fetch lock-free git diff patch for a specific file (staged + unstaged vs HEAD, or unstaged). */
+export async function getFileDiffPatch(
+  filePath: string,
+  root: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<string> {
   const cwd = execCwd(root || path.dirname(filePath));
   try {
-    const headDiff = await process.run("git", ["diff", "HEAD", "--", filePath], { cwd });
-    if (headDiff.stdout.trim().length > 0) return headDiff.stdout;
+    const headDiff = await deps.runGit(["--no-optional-locks", "diff", "HEAD", "--", filePath], cwd);
+    if (headDiff.code === 0 && headDiff.stdout.trim().length > 0) return headDiff.stdout;
   } catch {
-    // HEAD may not exist yet; fall through to unstaged diff
+    // HEAD may not exist yet; fall through to unstaged diff.
   }
   try {
-    const unstaged = await process.run("git", ["diff", "--", filePath], { cwd });
-    return unstaged.stdout;
+    const unstaged = await deps.runGit(["--no-optional-locks", "diff", "--", filePath], cwd);
+    return unstaged.code === 0 ? unstaged.stdout : "";
   } catch {
     return "";
   }
 }
 
-/** The preview source URL for an image, video, or audio file, or null for other kinds. */
 function previewBlobUrl(
   filePath: string,
   classification: FileClassification,
@@ -734,52 +907,39 @@ function previewBlobUrl(
   return null;
 }
 
-const HEAD_SCRIPT =
-  "import sys\nwith open(sys.argv[1], 'rb') as f: sys.stdout.write(f.read(int(sys.argv[2])).hex())";
-
-/** The first `count` bytes of a file (fs/promises has no partial read; python3 is granted). */
-async function readFileHead(filePath: string, count: number): Promise<Uint8Array> {
-  const result = await process.run("python3", ["-c", HEAD_SCRIPT, filePath, String(count)], {
-    cwd: execCwd(),
-  });
-  if (result.code !== 0) throw new Error(result.stderr.trim() || `cannot read ${filePath}`);
-  return new Uint8Array(Buffer.from(result.stdout.trim(), "hex"));
-}
-
 /**
- * The bytes a preview needs, and the file's size. Media and Quick Look files are
- * shown from their path (no bytes). A file above `MAX_EDITABLE_BYTES` is read in
- * part (`partial`): text its first `LARGE_TEXT_HEAD_BYTES`, binary its first
- * `BINARY_HEAD_BYTES`; images are read whole (their picture needs every byte).
+ * Read preview bytes from an already-statted file (`0` extra `fs.stat`s).
+ * Files `> MAX_EDITABLE_BYTES` spawn `python3` ONCE for `MAX_PREVIEW_HEAD_BYTES` (`256 KiB`)
+ * and check the first `4 KiB` in memory for NUL bytes.
  */
-async function readFileBytesAndSize(
+async function readFileBytesFromDiskStat(
   filePath: string,
-): Promise<{ bytes: Uint8Array; size: number; partial: boolean }> {
+  disk: DiskStat,
+  deps: WorkspaceIoDeps,
+): Promise<{ bytes: Uint8Array; size: number; completeness: ReadCompleteness }> {
   const preKind = classifyFile(filePath).kind;
-  const { size } = await fs.stat(filePath);
-  if (preKind === "video" || preKind === "audio" || preKind === "quicklook") {
-    return { bytes: new Uint8Array(0), size, partial: false };
+  if (VIEWER_SPECS[preKind].io === "stat") {
+    return { bytes: new Uint8Array(0), size: disk.size, completeness: "full" };
   }
-  if (size <= MAX_EDITABLE_BYTES || preKind === "image") {
-    const bytes = await fs.readFile(filePath);
-    return { bytes, size: bytes.length, partial: false };
+  if (disk.size <= MAX_EDITABLE_BYTES || preKind === "image") {
+    const bytes = await deps.readFile(filePath);
+    return { bytes, size: bytes.length, completeness: "full" };
   }
-  const head = await readFileHead(filePath, BINARY_HEAD_BYTES);
-  if (classifyFile(filePath, head).kind === "binary") return { bytes: head, size, partial: true };
-  return { bytes: await readFileHead(filePath, LARGE_TEXT_HEAD_BYTES), size, partial: true };
+  const headCount = preKind === "binary" ? BINARY_HEAD_BYTES : MAX_PREVIEW_HEAD_BYTES;
+  const head = await deps.readHead(filePath, headCount);
+  const sample = head.subarray(0, BINARY_HEAD_BYTES);
+  if (classifyFile(filePath, sample).kind === "binary") {
+    return { bytes: sample, size: disk.size, completeness: "partial" };
+  }
+  return { bytes: head, size: disk.size, completeness: "partial" };
 }
 
-const MAX_PRELOAD_FILES = 12;
-const MAX_PRELOAD_BYTES = 262_144;
-const preloadedFiles = new Map<string, LoadedFile>();
 /** The current `mtimeMs:size` of `filePath` on disk, or null when it cannot be read. */
-export async function readDiskStamp(filePath: string): Promise<string | null> {
-  try {
-    const stat = await fs.stat(filePath);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    return null;
-  }
+export async function readDiskStamp(
+  filePath: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<string | null> {
+  return (await statDisk(filePath, deps))?.stamp ?? null;
 }
 
 /** Whether the disk now holds other bytes than `stamp` describes; false when either is unknown. */
@@ -788,83 +948,111 @@ export function isBehindDisk(stamp: string | null, current: string | null): bool
 }
 
 /** Whether `file` is behind the disk: the file changed since this copy was read or saved. */
-export async function hasChangedOnDisk(file: LoadedFile): Promise<boolean> {
-  return isBehindDisk(file.diskStamp, await readDiskStamp(file.path));
+export async function hasChangedOnDisk(
+  file: LoadedFile,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<boolean> {
+  return isBehindDisk(file.diskStamp, await readDiskStamp(file.path, deps));
 }
 
 /** Read `file` from disk again (same mode), dropping its cached copy; null when unreadable. */
 export async function reloadFromDisk(
   file: LoadedFile,
   root: string,
+  knownStat?: DiskStat,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
 ): Promise<LoadedFile | null> {
   preloadedFiles.delete(file.path);
   try {
-    return await loadFile(file.path, root, file.mode, file.gitStatus);
+    return await loadFile(file.path, root, file.mode, file.gitStatus, knownStat, deps);
   } catch {
     return null;
   }
 }
 
-/**
- * Reload `file` when it changed on disk since Aed read or saved it. Returns
- * the fresh copy (same mode), or null when it is unchanged, dirty (the
- * user's edits win; no silent overwrite), or unreadable.
- */
+/** Reload `file` when clean and changed on disk (single `statDisk` check + reuse). */
 export async function reloadIfChangedOnDisk(
   file: LoadedFile,
   root: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
 ): Promise<LoadedFile | null> {
-  if (file.dirty || !(await hasChangedOnDisk(file))) return null;
-  return reloadFromDisk(file, root);
+  if (file.dirty) return null;
+  const disk = await statDisk(file.path, deps);
+  if (!disk || !isBehindDisk(file.diskStamp, disk.stamp)) return null;
+  return reloadFromDisk(file, root, disk, deps);
 }
 
-/** Return a preloaded clean LoadedFile synchronously if available in the warm cache. */
+function canCachePreloaded(file: LoadedFile): boolean {
+  return VIEWER_SPECS[file.classification.kind].canPrewarm && file.size <= MAX_PRELOAD_BYTES;
+}
+
+function syncPreloadedRoot(root: string): void {
+  if (!root) {
+    preloadedRoot = "";
+    preloadedFiles.clear();
+    return;
+  }
+  if (preloadedRoot && preloadedRoot !== root) {
+    preloadedFiles.clear();
+  }
+  preloadedRoot = root;
+}
+
+function isCrossRootMiss(root: string): boolean {
+  return Boolean(root && preloadedRoot && root !== preloadedRoot);
+}
+
+function canOpenPreloadedInDiff(hit: LoadedFile): boolean {
+  return hit.classification.kind === "diff" || Boolean(hit.diffPatch);
+}
+
+/** Return a preloaded clean LoadedFile synchronously if available in the warm LRU cache. */
 export function getPreloadedFile(
   filePath: string,
   root: string,
   gitStatus?: GitStatusCode,
   openInDiff?: boolean,
 ): LoadedFile | null {
+  if (isCrossRootMiss(root)) return null;
   const hit = preloadedFiles.get(filePath);
-  if (!hit) return null;
-  if (openInDiff && hit.classification.kind !== "diff" && !hit.diffPatch) {
-    return null;
-  }
-  const mode = openInDiff ? "diff" : hit.classification.defaultMode;
+  if (!hit || (openInDiff && !canOpenPreloadedInDiff(hit))) return null;
   return {
     ...hit,
     relPath: relativePath(root, filePath),
-    mode,
+    mode: openInDiff ? "diff" : hit.classification.defaultMode,
     gitStatus: gitStatus ?? hit.gitStatus,
   };
 }
 
-/** Preload small workspace files in the background so clicking them in the tree renders in 0ms. */
-export async function warmWorkspaceFiles(snapshot: WorkspaceSnapshot): Promise<void> {
-  if (!snapshot.root) {
-    preloadedFiles.clear();
-    return;
+async function prewarmSingleEntry(
+  entry: WorkspaceEntry,
+  root: string,
+  deps: WorkspaceIoDeps,
+): Promise<void> {
+  if (preloadedFiles.has(entry.path)) return;
+  try {
+    const disk = await statDisk(entry.path, deps);
+    if (!disk || !disk.isFile || disk.size > MAX_PRELOAD_BYTES) return;
+    const loaded = await loadFile(entry.path, root, undefined, entry.gitStatus, disk, deps);
+    if (preloadedRoot === root && canCachePreloaded(loaded)) {
+      preloadedFiles.set(entry.path, loaded);
+    }
+  } catch {
+    // Ignore background preload errors.
   }
-  const candidates = snapshot.flatFiles
-    .filter((entry) => {
-      const k = classifyFile(entry.path).kind;
-      return k !== "video" && k !== "audio" && k !== "quicklook";
-    })
-    .slice(0, MAX_PRELOAD_FILES);
+}
 
-  await Promise.all(
-    candidates.map(async (entry) => {
-      if (preloadedFiles.has(entry.path)) return;
-      try {
-        const stat = await fs.stat(entry.path);
-        if (stat.size > MAX_PRELOAD_BYTES) return;
-        const loaded = await loadFile(entry.path, snapshot.root, undefined, entry.gitStatus);
-        preloadedFiles.set(entry.path, loaded);
-      } catch {
-        // Ignore background preload errors.
-      }
-    })
-  );
+/** Prewarm small `code` and `markdown` files (`VIEWER_SPECS[kind].canPrewarm`) in a 32-entry LRU. */
+export async function warmWorkspaceFiles(
+  snapshot: WorkspaceSnapshot,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
+): Promise<void> {
+  syncPreloadedRoot(snapshot.root);
+  if (!snapshot.root) return;
+  const candidates = snapshot.flatFiles
+    .filter((entry) => VIEWER_SPECS[classifyFile(entry.path).kind].canPrewarm)
+    .slice(0, MAX_PRELOAD_FILES);
+  await Promise.all(candidates.map((entry) => prewarmSingleEntry(entry, snapshot.root, deps)));
 }
 
 async function resolveInitialDiffPatch(
@@ -873,51 +1061,67 @@ async function resolveInitialDiffPatch(
   kind: FileClassification["kind"],
   mode: PreviewMode,
   text: string,
+  deps: WorkspaceIoDeps,
 ): Promise<string> {
   if (kind === "diff") return text;
-  if (mode === "diff") return getFileDiffPatch(filePath, root);
+  if (mode === "diff") return getFileDiffPatch(filePath, root, deps);
   return "";
 }
 
-/**
- * Read a file from disk for preview/editing (classifies, parses table/hex/diff/blob as needed) and
- * put it in the warm cache. The cache is read only through `getPreloadedFile` (App's 0ms path),
- * which `reloadIfChangedOnDisk` then revalidates against the disk stamp. The stamp is read before
- * the bytes: a write in between then shows as a change later, never as a change already seen.
- */
+async function resolveQuickLookForKind(
+  filePath: string,
+  root: string,
+  kind: FileClassification["kind"],
+): Promise<string | null> {
+  if (kind !== "quicklook") return null;
+  return generateQuickLookUrl(
+    filePath,
+    execCwd(root || path.dirname(filePath)),
+    path.join(aedCacheDir(), "ql"),
+  );
+}
+
+async function requireDiskStat(
+  filePath: string,
+  knownStat: DiskStat | undefined,
+  deps: WorkspaceIoDeps,
+): Promise<DiskStat> {
+  const disk = knownStat ?? (await statDisk(filePath, deps));
+  if (disk) return disk;
+  await deps.stat(filePath);
+  throw new Error(`cannot stat ${filePath}`);
+}
+
+function resolveInitialMode(
+  classification: FileClassification,
+  preferredMode?: PreviewMode,
+): PreviewMode {
+  return preferredMode && allowsMode(classification, preferredMode)
+    ? preferredMode
+    : classification.defaultMode;
+}
+
+function cacheLoadedIfEligible(filePath: string, root: string, loaded: LoadedFile): void {
+  if (!canCachePreloaded(loaded)) return;
+  syncPreloadedRoot(root || preloadedRoot);
+  preloadedFiles.set(filePath, loaded);
+}
+
+/** Read a file from disk for preview/editing using a single `statDisk` call. */
 export async function loadFile(
   filePath: string,
   root: string,
   preferredMode?: PreviewMode,
   gitStatus?: GitStatusCode,
+  knownStat?: DiskStat,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
 ): Promise<LoadedFile> {
-  const diskStamp = await readDiskStamp(filePath);
-  const { bytes, size, partial } = await readFileBytesAndSize(filePath);
-  const classification = classifyFile(filePath, bytes.slice(0, 4096));
-  const mode =
-    preferredMode && allowsMode(classification, preferredMode)
-      ? preferredMode
-      : classification.defaultMode;
-  const { text, bom, readOnly } = decodeFileText(classification, bytes, partial);
-  const tableData = classification.kind === "table" ? parseTableData(text, filePath) : null;
-  const hexDump = classification.kind === "binary" ? formatHexDump(bytes, 4096) : "";
-  const dimensions =
-    classification.kind === "image" ? probeImageDimensions(bytes, text) : null;
-  const quickLookUrl =
-    classification.kind === "quicklook"
-      ? await generateQuickLookUrl(
-          filePath,
-          execCwd(root || path.dirname(filePath)),
-          path.join(aedCacheDir(), "ql")
-        )
-      : null;
-  const diffPatch = await resolveInitialDiffPatch(
-    filePath,
-    root,
-    classification.kind,
-    mode,
-    text
-  );
+  const disk = await requireDiskStat(filePath, knownStat, deps);
+  const { bytes, size, completeness } = await readFileBytesFromDiskStat(filePath, disk, deps);
+  const classification = classifyFile(filePath, bytes.subarray(0, BINARY_HEAD_BYTES));
+  const mode = resolveInitialMode(classification, preferredMode);
+  const { text, bom, readOnly } = decodeFileText(classification, bytes, completeness);
+  const kind = classification.kind;
   const loaded: LoadedFile = {
     path: filePath,
     relPath: relativePath(root, filePath),
@@ -930,39 +1134,42 @@ export async function loadFile(
     savedText: text,
     dirty: false,
     blobUrl: previewBlobUrl(filePath, classification, bytes),
-    quickLookUrl,
-    dimensions,
-    tableData,
-    hexDump,
-    diffPatch,
-    diskStamp,
+    quickLookUrl: await resolveQuickLookForKind(filePath, root, kind),
+    dimensions: kind === "image" ? probeImageDimensions(bytes, text) : null,
+    tableData: kind === "table" ? parseTableData(text, filePath, completeness === "partial") : null,
+    hexDump: kind === "binary" ? formatHexDump(bytes, BINARY_HEAD_BYTES) : "",
+    diffPatch: await resolveInitialDiffPatch(filePath, root, kind, mode, text, deps),
+    diskStamp: disk.stamp,
     diskChanged: false,
     diskMissing: false,
     bom,
     readOnly,
     saveError: null,
   };
-  if (size <= MAX_PRELOAD_BYTES && preloadedFiles.size < 32) {
-    preloadedFiles.set(filePath, loaded);
-  }
+  cacheLoadedIfEligible(filePath, root, loaded);
   return loaded;
 }
 
-/** A file for a new tab: `loadFile`, or for a file git lists as deleted and gone from disk, its diff. */
+/** Load a file for a tab (`1` `statDisk` total), or its diff against HEAD when git-deleted and gone. */
 export async function loadTabFile(
   filePath: string,
   root: string,
   preferredMode?: PreviewMode,
   gitStatus?: GitStatusCode,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
 ): Promise<LoadedFile> {
-  if (gitStatus === "D" && (await readDiskStamp(filePath)) === null) {
-    return loadDeletedFile(filePath, root);
+  const disk = await statDisk(filePath, deps);
+  if (!disk && gitStatus === "D") {
+    return loadDeletedFile(filePath, root, deps);
   }
-  return loadFile(filePath, root, preferredMode, gitStatus);
+  return loadFile(filePath, root, preferredMode, gitStatus, disk ?? undefined, deps);
 }
 
-/** A file git lists as deleted, gone from disk: an empty, unsavable copy showing its diff. */
-async function loadDeletedFile(filePath: string, root: string): Promise<LoadedFile> {
+async function loadDeletedFile(
+  filePath: string,
+  root: string,
+  deps: WorkspaceIoDeps,
+): Promise<LoadedFile> {
   const classification = classifyFile(filePath);
   const mode = allowsMode(classification, "diff") ? "diff" : classification.defaultMode;
   return {
@@ -981,7 +1188,7 @@ async function loadDeletedFile(filePath: string, root: string): Promise<LoadedFi
     dimensions: null,
     tableData: null,
     hexDump: "",
-    diffPatch: mode === "diff" ? await getFileDiffPatch(filePath, root) : "",
+    diffPatch: mode === "diff" ? await getFileDiffPatch(filePath, root, deps) : "",
     diskStamp: null,
     diskChanged: false,
     diskMissing: false,
@@ -991,23 +1198,18 @@ async function loadDeletedFile(filePath: string, root: string): Promise<LoadedFi
   };
 }
 
-/**
- * Write `newText` for `file` (UTF-8, its BOM kept) and return the saved copy.
- * What was derived from the old bytes follows the new ones: table rows, an
- * SVG's picture and size; a git patch is dropped so the next diff view fetches
- * it again. Throws what the write throws.
- */
+/** Write `newText` for `file` (UTF-8, BOM kept) and recompute derived preview metadata. */
 export async function saveFileText(
   file: LoadedFile,
   newText: string,
   root: string,
+  deps: WorkspaceIoDeps = DEFAULT_IO,
 ): Promise<LoadedFile> {
-  // A copy read from disk whose file is gone is never written back there (Save As instead).
-  if (file.diskStamp !== null && (await readDiskStamp(file.path)) === null) {
+  if (file.diskStamp !== null && (await statDisk(file.path, deps)) === null) {
     throw new Error(FILE_MISSING_REASON);
   }
   const bytes = encodeUtf8(newText, file.bom);
-  await fs.writeFile(file.path, bytes);
+  await deps.writeFile(file.path, bytes);
   const kind = file.classification.kind;
   const isImage = kind === "image";
   const updated: LoadedFile = {
@@ -1021,17 +1223,15 @@ export async function saveFileText(
     dimensions: isImage ? probeImageDimensions(bytes, newText) : file.dimensions,
     diffPatch: kind === "diff" ? newText : "",
     relPath: relativePath(root, file.path),
-    diskStamp: await readDiskStamp(file.path),
+    diskStamp: await readDiskStamp(file.path, deps),
     diskChanged: false,
     diskMissing: false,
     saveError: null,
   };
-  preloadedFiles.set(file.path, updated);
+  if (canCachePreloaded(updated)) preloadedFiles.set(file.path, updated);
+  else preloadedFiles.delete(file.path);
   return updated;
 }
-
-/** Why a save of a copy whose file is gone fails. */
-export const FILE_MISSING_REASON = "the file was moved or deleted";
 
 /** Ask for a path to save `file` at (macOS save panel via osascript); null when cancelled. */
 export async function pickSavePath(file: LoadedFile): Promise<string | null> {
@@ -1056,9 +1256,121 @@ export async function pickWorkspaceFolder(cwd: string): Promise<string | null> {
   const script = 'POSIX path of (choose folder with prompt "Choose a workspace folder")';
   try {
     const result = await process.run("osascript", ["-e", script], { cwd: execCwd(cwd) });
-    const picked = result.stdout.trim().replace(/\/+$/, "");
+    const picked = normalizeDirPath(result.stdout);
     return picked.length > 0 ? picked : null;
   } catch {
     return null;
   }
+}
+
+/** Schedule `fn` on the next timer turn outside an effect's synchronous pass, cancelling on cleanup. */
+export function deferOutOfEffect(fn: () => void): void {
+  const id = setTimeout(fn, 0);
+  cleanup(() => clearTimeout(id));
+}
+
+/** Memoize an async initializer; concurrent callers share one Promise, rejections reset for retry. */
+export function onceAsync<T>(fn: () => Promise<T>): () => Promise<T> {
+  let cached: Promise<T> | null = null;
+  return () => {
+    if (!cached) {
+      cached = fn().catch((err) => {
+        cached = null;
+        throw err;
+      });
+    }
+    return cached;
+  };
+}
+
+/** Adaptive idle backoff (`2000ms -> 5000ms -> 10000ms`), resetting to `baseMs` on `"changed"`. */
+export function nextPollDelayMs(
+  currentMs: number,
+  baseMs: number,
+  maxMs: number,
+  outcome: "idle" | "changed",
+): number {
+  if (outcome === "changed") return baseMs;
+  return Math.min(Math.max(baseMs, maxMs), Math.round(currentMs * 2.5));
+}
+
+export interface ActiveIntervalOptions {
+  baseMs: number;
+  maxMs?: number;
+  lifecycle: Accessor<string>;
+  enabled?: Accessor<boolean>;
+  tick: () => Promise<boolean>;
+  onResume?: () => void;
+}
+
+interface PollTracker {
+  delayMs: number;
+  pendingChange: boolean;
+  readonly baseMs: number;
+  readonly maxMs: number;
+  readonly runTick: () => Promise<void>;
+}
+
+function startActivePollLoop(tracker: PollTracker): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const schedule = () => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void tracker.runTick().then(() => {
+        const outcome = tracker.pendingChange ? "changed" : "idle";
+        tracker.pendingChange = false;
+        tracker.delayMs = nextPollDelayMs(tracker.delayMs, tracker.baseMs, tracker.maxMs, outcome);
+        schedule();
+      });
+    }, tracker.delayMs);
+  };
+  schedule();
+  return () => {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+  };
+}
+
+/**
+ * Active-window poller: pauses when `lifecycle() !== "active"` or `enabled() === false`,
+ * runs immediately on focus resume, serializes via `serialize()`, and backs off when idle.
+ */
+export function watchActiveInterval(opts: ActiveIntervalOptions): () => Promise<void> {
+  const maxMs = opts.maxMs ?? opts.baseMs * 5;
+  const tracker: PollTracker = {
+    delayMs: opts.baseMs,
+    pendingChange: false,
+    baseMs: opts.baseMs,
+    maxMs,
+    runTick: serialize(async () => {
+      try {
+        if (await opts.tick()) tracker.pendingChange = true;
+      } catch {
+        // Swallow transient poll errors so subsequent ticks keep running.
+      }
+    }),
+  };
+  let seenInactive = false;
+
+  effect(() => {
+    const active = opts.lifecycle() === "active";
+    const enabled = opts.enabled ? opts.enabled() : true;
+    if (!active) {
+      seenInactive = true;
+      return;
+    }
+    if (!enabled) return;
+    if (seenInactive) {
+      seenInactive = false;
+      tracker.delayMs = opts.baseMs;
+      deferOutOfEffect(() => {
+        opts.onResume?.();
+        void tracker.runTick();
+      });
+    }
+    cleanup(startActivePollLoop(tracker));
+  });
+
+  return tracker.runTick;
 }
