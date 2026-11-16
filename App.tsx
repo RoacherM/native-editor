@@ -863,42 +863,45 @@ function FontSettingsDialog(props: {
   );
 }
 
-// DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a poster.
-// Three flat fields carry the composition: an ink block (bottom left) and two
-// concentric quarter discs, stone around signal red, on the bottom-right corner.
-// Text sits on the paper, top left, on one grid.
+// DESIGN.md「界面设计语言（Industrial）」: the welcome screen is a Bauhaus poster.
+// Text sits top left; bottom right, a square split 2×2 holds one form per cell:
+// a blue circle, a yellow and an ink quarter disc turning on the square's
+// centre, and a red square. Every curve's radius is a cell or half a cell.
 const POSTER_FONT = "Helvetica Neue";
+
+// The primaries stay red, yellow and blue whatever the theme's accent is;
+// only the light or dark mix changes.
+const POSTER_PRIMARIES = {
+  light: { red: "#d7381e", yellow: "#e8a90c", blue: "#1f4e8c" },
+  dark: { red: "#e8462b", yellow: "#e9ae1a", blue: "#3b6fb6" },
+} as const;
 
 interface PosterBox {
   w: number;
   h: number;
 }
 
-/** The poster's grid, from the panel size: column split, block height, title size. */
+/** The poster's grid, from the panel size: margin, column split, title size. */
 function posterGrid(box: PosterBox): {
   w: number;
   h: number;
   pad: number;
   split: number;
-  blockH: number;
-  blockTop: number;
   title: number;
 } {
   const w = Math.max(480, box.w);
   const h = Math.max(240, box.h);
   const pad = Math.round(Math.max(24, Math.min(64, Math.min(w, h) * 0.055)));
   const split = Math.round(Math.max(w * 0.48, Math.min(w - 140, 420)));
-  const blockH = Math.round(Math.max(76, Math.min(200, h * 0.25)));
-  const blockTop = h - blockH;
   const colW = Math.max(200, split - pad * 2);
-  const availTitleH = Math.max(56, blockTop - pad - 56);
+  const availTitleH = Math.max(56, h - pad * 2 - 56);
   const title = Math.round(
     Math.max(
       56,
       Math.min(104, colW / 2.4, availTitleH, h / 4.2)
     )
   );
-  return { w, h, pad, split, blockH, blockTop, title };
+  return { w, h, pad, split, title };
 }
 
 function PosterFields(props: {
@@ -911,28 +914,26 @@ function PosterFields(props: {
       draw={(cx) => {
         const raw = props.box();
         if (raw.w <= 0 || raw.h <= 0) return;
-        const ui = props.theme().ui;
-        const g = posterGrid(raw);
-        const { w, h } = g;
-        // Ink block: bottom-left geometric field.
-        cx.fillStyle = ui.foreground;
-        cx.fillRect(0, g.blockTop, g.split, h - g.blockTop);
-        // Two concentric quarter discs on the bottom-right corner. The stone
-        // one's foot stands on the split, so its arc rises out of the block's
-        // right edge; the red one sits inside it, leaving a stone ring as
-        // thick as the block is tall.
-        const quarterDisc = (r: number) => {
+        const theme = props.theme();
+        const hue = POSTER_PRIMARIES[theme.appearance];
+        const { w, h, pad, split } = posterGrid(raw);
+        // The square stands in the bottom-right corner, right of the split.
+        const cell = Math.min(w - split, h - pad) / 2;
+        const mx = w - cell;
+        const my = h - cell;
+        const disc = (x: number, y: number, r: number, from: number, to: number, fill: string) => {
+          cx.fillStyle = fill;
           cx.beginPath();
-          cx.moveTo(w, h);
-          cx.arc(w, h, r, Math.PI, Math.PI * 1.5);
+          cx.moveTo(x, y);
+          cx.arc(x, y, r, from, to);
           cx.closePath();
           cx.fill();
         };
-        const outer = w - g.split;
-        cx.fillStyle = ui.border;
-        quarterDisc(outer);
-        cx.fillStyle = ui.accent;
-        quarterDisc(outer - g.blockH);
+        disc(mx - cell / 2, my - cell / 2, cell / 2, 0, Math.PI * 2, hue.blue);
+        disc(mx, my, cell, -Math.PI / 2, 0, hue.yellow);
+        disc(mx, my, cell, Math.PI / 2, Math.PI, theme.ui.foreground);
+        cx.fillStyle = hue.red;
+        cx.fillRect(mx, my, cell, cell);
       }}
     />
   );
@@ -992,11 +993,11 @@ function WelcomePanel(props: {
   const home = os.homedir();
   const box = signal<PosterBox>({ w: 0, h: 0 });
   const grid = computed(() => posterGrid(box()));
-  // Recent rows that fit between the title and the ink block (28pt a row).
+  // Recent rows that fit between the title and the bottom margin (28pt a row).
   const recentFit = computed(() => {
     const g = grid();
     const top = g.pad + g.title + 96;
-    const rows = Math.floor((g.blockTop - 28 - top) / 28);
+    const rows = Math.floor((g.h - g.pad - top) / 28);
     return props.recentWorkspaces().slice(0, Math.max(0, Math.min(5, rows)));
   });
   const ui = () => props.theme().ui;
@@ -1018,7 +1019,7 @@ function WelcomePanel(props: {
           left: grid().pad,
           top: grid().pad,
           width: grid().split - grid().pad * 2,
-          maxHeight: Math.max(0, grid().blockTop - grid().pad - 16),
+          maxHeight: Math.max(0, grid().h - grid().pad * 2),
         }}
       >
         <Text
