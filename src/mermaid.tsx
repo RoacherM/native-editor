@@ -4,9 +4,6 @@ import * as path from "path";
 import {
   Clipboard,
   cleanup,
-  colorScheme,
-  computed,
-  effect,
   signal,
   Text,
   untracked,
@@ -17,17 +14,15 @@ import {
   type Signal,
   type WebViewRef,
 } from "nsh";
-import { Button } from "nsh/base";
-import { Icon } from "./icons";
 import {
   buildPreviewShellHtml,
-  buildPreviewThemeCss,
   handlePreviewMessage,
   parsePreviewMessage,
   type PreviewBridgeDeps,
 } from "./markdownPage";
 import { MARKDOWN_RUNTIME_JS } from "./markdownVendor.generated";
-import { EDITOR_THEMES, type EditorTheme } from "./themes";
+import type { EditorTheme } from "./themes";
+import { IconButton, SurfaceButton, ViewportPill } from "./ui";
 
 // DESIGN.md「文件预览与 Mermaid 渲染契约」
 const MERMAID_START_MARKER = "var __esbuild_esm_mermaid_nm;";
@@ -250,77 +245,6 @@ export function formatDiagramZoomScript(zoomPercent: number): string {
   return `(function(z){var c=document.getElementById("aed-content");if(!c)return;c.style.zoom=document.body.classList.contains("aed-diagram-only")?z:"";})(${JSON.stringify(value)});`;
 }
 
-// Compatibility helpers retained for existing callers until Wave 2B cleanup.
-export function requeueOrphanedJobs<T>(active: Map<number, T>, pending: T[]): void {
-  pending.unshift(...active.values());
-  active.clear();
-}
-
-export function takeJob<T extends { id: number }>(
-  id: number,
-  active: Map<number, T>,
-  pending: T[],
-): T | undefined {
-  const job = active.get(id);
-  if (job) {
-    active.delete(id);
-    return job;
-  }
-  const idx = pending.findIndex((p) => p.id === id);
-  return idx >= 0 ? pending.splice(idx, 1)[0] : undefined;
-}
-
-export function planJobTimeout<T extends { id: number; generation: number }>(
-  id: number,
-  active: Map<number, T>,
-  pending: T[],
-  currentGeneration: number,
-): { job: T | undefined; dropWorker: boolean } {
-  const job = takeJob(id, active, pending);
-  return { job, dropWorker: job !== undefined && job.generation === currentGeneration };
-}
-
-export function rememberRender<T>(
-  cache: Map<string, T>,
-  key: string,
-  value: T,
-  max: number,
-  evict: (value: T) => void,
-): void {
-  cache.delete(key);
-  cache.set(key, value);
-  for (const [oldKey, oldValue] of cache) {
-    if (cache.size <= max) break;
-    cache.delete(oldKey);
-    evict(oldValue);
-  }
-}
-
-export function followLatest<T>(sink: {
-  start: () => void;
-  done: (value: T) => void;
-  fail: (err: unknown) => void;
-}): (pending: Promise<T>) => void {
-  let latest = 0;
-  return (pending) => {
-    const mine = ++latest;
-    sink.start();
-    pending.then(
-      (v) => {
-        if (mine === latest) sink.done(v);
-      },
-      (e: unknown) => {
-        if (mine === latest) sink.fail(e);
-      },
-    );
-  };
-}
-
-/** Zero-cost compatibility stub: the 2nd offscreen `1280x900` WKWebView is retired. */
-export function MermaidRendererHost(): JSX.Element | null {
-  return null;
-}
-
 export interface TimerRef {
   id: ReturnType<typeof setTimeout> | null;
 }
@@ -446,48 +370,6 @@ export function DiagramEmptyOverlay(props: {
   );
 }
 
-function PillIconButton(props: {
-  testID: string;
-  label: string;
-  icon: "zoom-in" | "zoom-out";
-  theme: Accessor<EditorTheme>;
-  onPress: () => void;
-}): JSX.Element {
-  return (
-    <Button
-      testID={props.testID}
-      accessibilityLabel={props.label}
-      onPress={props.onPress}
-      style={{ backgroundColor: props.theme().ui.sidebar }}
-      class="h-6 w-6 items-center justify-center rounded border-none shadow-none p-0"
-    >
-      <Icon name={props.icon} size={12} tint={() => props.theme().ui.foreground} />
-    </Button>
-  );
-}
-
-export function PillLabelButton(props: {
-  testID: string;
-  text: Accessor<string>;
-  mono?: "mono";
-  theme: Accessor<EditorTheme>;
-  onPress: () => void;
-}): JSX.Element {
-  const textClass = props.mono ? "text-[11px] font-mono" : "text-[11px] font-medium";
-  return (
-    <Button
-      testID={props.testID}
-      onPress={props.onPress}
-      style={{ backgroundColor: props.theme().ui.sidebar }}
-      class="h-6 px-2 items-center justify-center rounded border-none shadow-none"
-    >
-      <Text style={{ color: props.theme().ui.foreground }} class={textClass}>
-        {props.text()}
-      </Text>
-    </Button>
-  );
-}
-
 /** Compact floating bottom-right zoom & copy pill for vector Mermaid diagrams. */
 export function DiagramViewportPill(props: {
   kindLabel: Accessor<string>;
@@ -497,194 +379,46 @@ export function DiagramViewportPill(props: {
   onZoomDelta: (delta: number) => void;
   onZoomReset: () => void;
   onCopy: () => void;
-  trailing?: JSX.Element;
 }): JSX.Element {
   return (
-    <View
-      style={{ backgroundColor: props.theme().ui.card }}
-      class="absolute bottom-3 right-4 flex-row items-center gap-1.5 px-2.5 py-1 rounded-md shadow-lg select-none"
-    >
-      <Text style={{ color: props.theme().ui.mutedForeground }} class="text-[11px] font-mono pr-1">
-        {props.kindLabel()}
-      </Text>
+    <ViewportPill meta={props.kindLabel()}>
       <If when={props.zoom?.()}>
         {(z) => (
-          <View class="flex-row items-center gap-1">
-            <PillIconButton
-              testID="mermaid-zoom-out"
-              label="Zoom out"
+          <View class="flex-row items-center gap-0.5">
+            <IconButton
               icon="zoom-out"
-              theme={props.theme}
+              iconSize={12}
+              accessibilityLabel="Zoom out"
+              disabled={z() <= 50}
+              testID="mermaid-zoom-out"
               onPress={() => props.onZoomDelta(-25)}
             />
-            <PillLabelButton
+            <SurfaceButton
+              variant="ghost"
+              size="sm"
+              mono
+              label={`${z()}%`}
               testID="mermaid-zoom-reset"
-              text={() => `${z()}%`}
-              mono="mono"
-              theme={props.theme}
               onPress={props.onZoomReset}
+              class="px-1.5"
             />
-            <PillIconButton
-              testID="mermaid-zoom-in"
-              label="Zoom in"
+            <IconButton
               icon="zoom-in"
-              theme={props.theme}
+              iconSize={12}
+              accessibilityLabel="Zoom in"
+              disabled={z() >= 250}
+              testID="mermaid-zoom-in"
               onPress={() => props.onZoomDelta(25)}
             />
           </View>
         )}
       </If>
-      <PillLabelButton
+      <SurfaceButton
+        size="sm"
+        label={props.copied() ? "Copied" : "Copy"}
         testID="mermaid-copy-code"
-        text={() => (props.copied() ? "Copied" : "Copy")}
-        theme={props.theme}
         onPress={props.onCopy}
       />
-      {props.trailing}
-    </View>
-  );
-}
-
-function resolveCodeInput(code: string | Accessor<string>): string {
-  return typeof code === "function" ? code() : code;
-}
-
-function resolveDiagramTheme(themeProp?: Accessor<EditorTheme>): EditorTheme {
-  return themeProp?.() ?? (colorScheme() === "light" ? EDITOR_THEMES[0] : EDITOR_THEMES[1]);
-}
-
-interface DiagramBlockState {
-  rawCode: Accessor<string>;
-  activeTheme: Accessor<EditorTheme>;
-  fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
-  themeCss: Accessor<string>;
-  zoom: Signal<number>;
-  errorMsg: Signal<string | null>;
-  wvRef: WebViewRef | null;
-  ready: boolean;
-  renderSeq: number;
-}
-
-function sendBlockDiagram(state: DiagramBlockState): void {
-  if (!state.wvRef || !state.ready) return;
-  state.renderSeq += 1;
-  state.errorMsg.set(null);
-  const msg = formatDiagramRenderMessage({
-    renderId: state.renderSeq,
-    code: state.rawCode(),
-    themeCss: state.themeCss(),
-    theme: state.activeTheme(),
-    fontFamily: state.fontStyle().fontFamily ?? "",
-  });
-  state.wvRef.injectJavaScript(
-    CLEAR_PRELOAD_BG_JS +
-      `window.__aed && window.__aed.renderDiagram(${JSON.stringify(msg)});` +
-      formatDiagramZoomScript(state.zoom()),
-  );
-}
-
-function applyBlockZoom(state: DiagramBlockState, next: number): void {
-  const clamped = clampDiagramZoom(next);
-  state.zoom.set(clamped);
-  state.wvRef?.injectJavaScript(formatDiagramZoomScript(clamped));
-}
-
-function createBlockBridgeDeps(state: DiagramBlockState, onCopy: () => void): PreviewBridgeDeps {
-  return {
-    basePath: () => "",
-    openUrl: () => undefined,
-    openFile: () => undefined,
-    readImageDataUrl: async () => null,
-    inject: (js) => state.wvRef?.injectJavaScript(js),
-    loadMermaidJs: loadMermaidBundleJs,
-    rememberScroll: () => undefined,
-    currentRenderId: () => state.renderSeq,
-    mermaidConfig: () => buildMermaidConfig(state.activeTheme(), state.fontStyle().fontFamily ?? ""),
-    onDiagramRendered: (res) => settleDiagramResult(state.errorMsg, state.wvRef, state.zoom(), res),
-    onCopySource: onCopy,
-  };
-}
-
-/** Vector WebView Mermaid diagram block (compat wrapper for `PreviewPane.tsx` until Wave 2B). */
-export function MermaidDiagramBlock(props: {
-  code: string | Accessor<string>;
-  fontStyle: Accessor<{ fontFamily?: string; fontSize: number }>;
-  theme?: Accessor<EditorTheme>;
-}): JSX.Element {
-  const rawCode = computed(() => resolveCodeInput(props.code));
-  const activeTheme = computed(() => resolveDiagramTheme(props.theme));
-  const kindLabel = computed(() => detectMermaidKind(rawCode()));
-  const themeCss = computed(() => buildPreviewThemeCss(activeTheme(), props.fontStyle()));
-  const showCode = signal(false);
-  const showEmpty = computed(() => !showCode() && rawCode().trim().length === 0);
-  const copyFeedback = createCopyFeedback(rawCode);
-  const state: DiagramBlockState = {
-    rawCode,
-    activeTheme,
-    fontStyle: props.fontStyle,
-    themeCss,
-    zoom: signal(100),
-    errorMsg: signal<string | null>(null),
-    wvRef: null,
-    ready: false,
-    renderSeq: 0,
-  };
-
-  effect(() => {
-    void rawCode();
-    void themeCss();
-    sendBlockDiagram(state);
-  });
-
-  return (
-    <View
-      testID="mermaid-block"
-      style={{ backgroundColor: activeTheme().ui.card }}
-      class="w-full min-h-[420px] my-2 rounded-lg overflow-hidden relative"
-    >
-      <DiagramErrorBanner error={state.errorMsg} theme={activeTheme} />
-      <If when={showCode()}>
-        <View class="p-4 pb-12">
-          <Text
-            testID="mermaid-code-view"
-            style={{ ...props.fontStyle(), color: activeTheme().ui.foreground }}
-            class="select-text text-xs font-mono"
-          >
-            {rawCode().trim()}
-          </Text>
-        </View>
-      </If>
-      <View style={{ display: showCode() ? "none" : "flex", flex: 1, minHeight: 420 }}>
-        <SandboxPreviewWebView
-          theme={activeTheme}
-          deps={createBlockBridgeDeps(state, copyFeedback.copy)}
-          onRef={(r) => {
-            state.wvRef = r;
-          }}
-          onReady={() => {
-            state.ready = true;
-            sendBlockDiagram(state);
-          }}
-        />
-      </View>
-      <DiagramEmptyOverlay visible={showEmpty} theme={activeTheme} />
-      <DiagramViewportPill
-        kindLabel={kindLabel}
-        zoom={showCode() ? undefined : state.zoom}
-        copied={copyFeedback.copied}
-        theme={activeTheme}
-        onZoomDelta={(d) => applyBlockZoom(state, state.zoom() + d)}
-        onZoomReset={() => applyBlockZoom(state, 100)}
-        onCopy={copyFeedback.copy}
-        trailing={
-          <PillLabelButton
-            testID="mermaid-toggle-code"
-            text={() => (showCode() ? "Diagram" : "Code")}
-            theme={activeTheme}
-            onPress={() => showCode.update((v) => !v)}
-          />
-        }
-      />
-    </View>
+    </ViewportPill>
   );
 }

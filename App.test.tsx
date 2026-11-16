@@ -2,20 +2,15 @@ import { afterAll, describe, expect, open, test } from "nsh/test";
 import { TerminalSession } from "aed/native";
 import {
   classifyFile,
+  createLruCache,
   formatHexDump,
-  normalizeMachOBuildVersion,
   parseTableData,
   probeImageDimensions,
 } from "./src/classify";
 import {
   buildMermaidConfig,
   detectMermaidKind,
-  followLatest,
-  planJobTimeout,
   preprocessMermaidCode,
-  rememberRender,
-  requeueOrphanedJobs,
-  takeJob,
 } from "./src/mermaid";
 import { createInputGate, linkTarget, parseGhosttyConfig, shouldFollowCwd } from "./src/TerminalPane";
 import { sortRows, withPreviewCsp } from "./src/PreviewPane";
@@ -24,7 +19,6 @@ import {
   computeSyntaxDecorations,
   DEFAULT_THEME_ID,
   EDITOR_THEMES,
-  fontDisplayName,
   getThemeById,
 } from "./src/themes";
 import {
@@ -151,15 +145,11 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
     ).toBe(tsDecos);
   });
 
-  test("shortens home paths and names fonts without Nerd Font suffixes", () => {
+  test("shortens home paths for display", () => {
     expect(shortenHomePath("/Users/me/Projects/x", "/Users/me")).toBe("~/Projects/x");
     expect(shortenHomePath("/Users/me", "/Users/me")).toBe("~");
     expect(shortenHomePath("/Users/meow/x", "/Users/me")).toBe("/Users/meow/x");
     expect(shortenHomePath("/tmp/x", "")).toBe("/tmp/x");
-    expect(fontDisplayName("JetBrainsMono Nerd Font Mono")).toBe("JetBrainsMono");
-    expect(fontDisplayName("SF Mono")).toBe("SF Mono");
-    expect(fontDisplayName("Fira Code")).toBe("Fira Code");
-    expect(fontDisplayName("")).toBe("Mono");
   });
 
   test("static nsh.json tokens match the default Industrial themes (no black/white split)", () => {
@@ -188,71 +178,28 @@ describe("classify, multimedia probes & Ghostty config verification", () => {
     expect(manifest.capabilities.process.env).toContain("AED_OPEN_FILE");
   });
 
-  test("normalizes Mach-O LC_BUILD_VERSION minos/sdk to macOS 11.0 / 14.0 to prevent LaunchServices -10825 error", () => {
-    // 32-byte Mach-O 64 header (magic=0xfeedfacf, ncmds=1) + 24-byte LC_BUILD_VERSION (cmd=0x32, minos=27.0.0, sdk=27.0.0)
-    const macho = new Uint8Array(56);
-    const view = new DataView(macho.buffer);
-    view.setUint32(0, 0xfeedfacf, true);
-    view.setUint32(16, 1, true);
-    view.setUint32(32, 0x32, true);
-    view.setUint32(36, 24, true);
-    view.setUint32(40, 1, true); // PLATFORM_MACOS
-    view.setUint32(44, 0x001b0000, true); // minos 27.0.0
-    view.setUint32(48, 0x001b0000, true); // sdk 27.0.0
-
-    const first = normalizeMachOBuildVersion(macho);
-    expect(first).toEqual({
-      minos: 0x000b0000,
-      sdk: 0x000e0000,
-      patched: true,
-    });
-    expect(view.getUint32(44, true)).toBe(0x000b0000);
-    expect(view.getUint32(48, true)).toBe(0x000e0000);
-
-    const second = normalizeMachOBuildVersion(macho);
-    expect(second).toEqual({
-      minos: 0x000b0000,
-      sdk: 0x000e0000,
-      patched: false,
-    });
-    expect(normalizeMachOBuildVersion(new Uint8Array([1, 2, 3]))).toBeNull();
+  test("normalizes Mach-O LC_BUILD_VERSION minos/sdk to macOS 11.0 / 14.0 to prevent LaunchServices -10825 error", async () => {
+    const script = decodeURIComponent(new URL("./scripts/package-macos.sh", import.meta.url).pathname);
+    const dir = `/tmp/aed-macho-${Date.now().toString(36)}`;
+    try {
+      await shExec([
+        `mkdir -p "${dir}/MacOS"`,
+        `awk "/<< 'PYEOF'/{f=1;next} /^PYEOF/{f=0} f" "${script}" > "${dir}/step.py"`,
+        `python3 -I -c "import plistlib,struct; plistlib.dump({},open('${dir}/Info.plist','wb')); b=bytearray(56); struct.pack_into('<I',b,0,0xFEEDFACF); struct.pack_into('<I',b,16,1); struct.pack_into('<IIIIII',b,32,0x32,24,1,0x1B0000,0x1B0000,0); open('${dir}/MacOS/AedCore','wb').write(b); open('${dir}/MacOS/raw','wb').write(b'\\x01\\x02\\x03')"`,
+      ]);
+      const out = await shExec([
+        `python3 -I "${dir}/step.py" "${dir}/Info.plist" "${dir}/MacOS"`,
+        `python3 -I "${dir}/step.py" "${dir}/Info.plist" "${dir}/MacOS"`,
+        `python3 -I -c "import struct; b=open('${dir}/MacOS/AedCore','rb').read(); m,s=struct.unpack_from('<II',b,44); r=open('${dir}/MacOS/raw','rb').read().hex(); print(f'MACHO_{m:#010x}_{s:#010x}_RAW_{r}')"`,
+      ]);
+      expect(out).toContain("MACHO_0x000b0000_0x000e0000_RAW_010203");
+    } finally {
+      await shExec(`rm -rf "${dir}"`);
+    }
   });
 });
 
-describe("Mermaid queue, disk stamps & terminal input gate", () => {
-  test("Mermaid jobs orphaned by an unmounted WebView go back to the front of the queue", () => {
-    const active = new Map([[1, "job-1"], [2, "job-2"]]);
-    const pending = ["job-3"];
-    requeueOrphanedJobs(active, pending);
-    expect(pending).toEqual(["job-1", "job-2", "job-3"]);
-    expect(active.size).toBe(0);
-  });
-
-  test("a timed-out Mermaid job leaves whichever queue holds it, once", () => {
-    const active = new Map([[1, { id: 1 }]]);
-    const pending = [{ id: 2 }, { id: 3 }];
-    expect(takeJob(1, active, pending)).toEqual({ id: 1 });
-    expect(active.size).toBe(0);
-    expect(takeJob(3, active, pending)).toEqual({ id: 3 });
-    expect(pending).toEqual([{ id: 2 }]);
-    expect(takeJob(3, active, pending)).toBeUndefined();
-    expect(takeJob(9, active, pending)).toBeUndefined();
-    expect(pending).toEqual([{ id: 2 }]);
-    expect(takeJob(2, active, pending)).toEqual({ id: 2 });
-    expect(pending).toEqual([]);
-  });
-
-  test("a Mermaid timeout drops only the worker its job waited on", () => {
-    // A: the current worker (ready or not) never answered: drop it.
-    const active = new Map([[1, { id: 1, generation: 3 }]]);
-    expect(planJobTimeout(1, active, [], 3)).toEqual({ job: { id: 1, generation: 3 }, dropWorker: true });
-    // B: an older job's timeout must not kill the newer worker that is still starting.
-    const pending = [{ id: 2, generation: 3 }];
-    expect(planJobTimeout(2, new Map(), pending, 4)).toEqual({ job: { id: 2, generation: 3 }, dropWorker: false });
-    // Already settled: nothing to fail, nothing to drop.
-    expect(planJobTimeout(2, new Map(), pending, 4)).toEqual({ job: undefined, dropWorker: false });
-  });
-
+describe("disk stamps & terminal input gate", () => {
   test("a copy is behind the disk only when both stamps are known and differ", () => {
     expect(isBehindDisk("1:5", "1:5")).toBe(false);
     expect(isBehindDisk("1:5", "2:5")).toBe(true);
@@ -486,7 +433,9 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(cleanApp.shows("text:Aed")).toBe(true);
     expect(cleanApp.shows("text:Open Folder")).toBe(false);
     expect(cleanApp.shows("id:welcome-open-folder")).toBe(false);
-    expect(cleanApp.shows("text:⌘O")).toBe(false);
+    expect(cleanApp.shows("id:welcome-shortcut-hints")).toBe(true);
+    expect(cleanApp.shows("text:Open folder")).toBe(true);
+    expect(cleanApp.shows("text:Terminal")).toBe(true);
     expect(cleanApp.spanStyle("text:Aed").color).toBe("#c0caf5ff");
     expect(cleanApp.shows("id:workspace-tree")).toBe(false);
     expect(cleanApp.shows("id:theme-preset-tokyo-night")).toBe(false);
@@ -512,6 +461,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     });
     await returningApp.waitFor("id:welcome-recent-fixtures");
     expect(returningApp.shows("id:welcome-panel")).toBe(true);
+    expect(returningApp.shows("id:welcome-shortcut-hints")).toBe(false);
     expect(returningApp.shows("id:empty-editor-panel")).toBe(false);
     expect(returningApp.shows("id:workspace-tree")).toBe(false);
     await returningApp.press("id:welcome-recent-fixtures");
@@ -665,13 +615,13 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("text:architecture.mmd");
     await app.waitFor("id:preview-mermaid");
     expect(app.shows("id:preview-mermaid")).toBe(true);
-    await app.waitFor("id:mermaid-block >> nth=0");
-    expect(app.shows("id:mermaid-block >> nth=0")).toBe(true);
+    expect(app.shows("id:mermaid-toggle-code")).toBe(false);
     expect(app.shows("text:MERMAID")).toBe(false);
-    await app.press("id:mermaid-copy-code >> nth=0");
-    await app.press("id:mermaid-toggle-code >> nth=0");
-    await app.waitFor("id:mermaid-code-view");
-    await app.press("id:mermaid-toggle-code >> nth=0");
+    await app.press("id:mermaid-zoom-in");
+    expect(app.shows("text:125%")).toBe(true);
+    await app.press("id:mermaid-zoom-reset");
+    expect(app.shows("text:100%")).toBe(true);
+    await app.press("id:mermaid-copy-code");
     await app.press("id:mode-source");
     await app.waitFor("id:preview-editor");
     await app.keyboard.press("mod+f");
@@ -767,10 +717,12 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     expect(normalizeExternalFilePath(`${repoClaude}#L10-L20`)).toBe(repoClaude);
     expect(normalizeExternalFilePath("/tmp/C#_notes.md:10")).toBe("/tmp/C#_notes.md");
     await app.host.send("enqueueFinderOpen", `${FIXTURE_ROOT}/README.md:1:1`);
-    await app.waitFor("id:preview-markdown", { timeout: 1500 });
-    expect(app.shows("id:preview-markdown")).toBe(true);
+    await app.waitFor("id:preview-editor", { timeout: 1500 });
     expect(app.shows("id:empty-editor-panel")).toBe(false);
     expect(app.shows("id:workspace-tree")).toBe(false);
+    await app.press("id:mode-preview");
+    await app.waitFor("id:preview-markdown", { timeout: 1500 });
+    expect(app.shows("id:preview-markdown")).toBe(true);
 
     // Loose external file launch does not hijack workspaceRoot or prevent returning to welcome
     const looseApp = await open("./App.tsx", {
@@ -1724,15 +1676,16 @@ describe("I-018 per-user temp files, external open & capabilities", () => {
     expect(normalizeExternalFilePath("file:///tmp/My%20Notes.md#L3")).toBe("/tmp/My Notes.md");
   });
 
-  test("the Mermaid render cache keeps the newest diagrams and revokes the URL of each one it drops", () => {
-    const cache = new Map<string, string>();
+  test("bounded LRU cache keeps the newest entries and revokes the URL of each evicted entry", () => {
     const revoked: string[] = [];
-    const remember = (key: string) => rememberRender(cache, key, `blob:${key}`, 2, (u) => revoked.push(u));
-    remember("a");
-    remember("b");
-    remember("a"); // used again: now the newest
-    remember("c");
-    expect([...cache.keys()]).toEqual(["a", "c"]);
+    const cache = createLruCache<string, string>(2, (_k, u) => revoked.push(u));
+    cache.set("a", "blob:a");
+    cache.set("b", "blob:b");
+    expect(cache.get("a")).toBe("blob:a"); // used again: now the newest
+    cache.set("c", "blob:c");
+    expect(cache.get("b")).toBeUndefined();
+    expect(cache.get("a")).toBe("blob:a");
+    expect(cache.get("c")).toBe("blob:c");
     expect(revoked).toEqual(["blob:b"]);
   });
 
@@ -1896,26 +1849,14 @@ describe("races and silent failures (I-017)", () => {
     }
   });
 
-  test("only the newest Mermaid render lands, and each new render shows loading first", async () => {
-    const shown: string[] = [];
-    let starts = 0;
-    const follow = followLatest<string>({
-      start: () => (starts += 1),
-      done: (v) => shown.push(v),
-      fail: (e) => shown.push(`error:${String(e)}`),
-    });
-    let finishOld: (v: string) => void = () => undefined;
-    let failOld: (e: unknown) => void = () => undefined;
-    follow(new Promise<string>((resolve) => (finishOld = resolve)));
-    follow(Promise.resolve("new"));
-    follow(new Promise<string>((_, reject) => (failOld = reject)));
-    follow(Promise.resolve("newest"));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    finishOld("old");
-    failOld("boom");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(starts).toBe(4);
-    expect(shown).toEqual(["newest"]);
+  test("only the newest preview renderId lands when older async image loads settle late", async () => {
+    const { calls, deps } = fakeDeps({ currentRenderId: () => 4 });
+    await handlePreviewMessage({ type: "images", renderId: 2, srcs: ["p.png"] }, deps);
+    await handlePreviewMessage({ type: "images", renderId: 4, srcs: ["p.png"] }, deps);
+    await handlePreviewMessage({ type: "images", renderId: 3, srcs: ["p.png"] }, deps);
+    expect(calls.readImages).toEqual(["/ws/docs/p.png"]);
+    expect(calls.injects).toHaveLength(1);
+    expect(calls.injects[0]).toContain('"renderId":4');
   });
 
   test("a deleted file in the Changed list opens its diff", async () => {
@@ -2213,5 +2154,140 @@ describe("terminal: libghostty-vt sessions & the PTY (I-019)", () => {
     expect(app.texts().some((t) => /^-?sh$/.test(t))).toBe(true);
     await app.press(`text:${firstTitle}`);
     await app.waitUntil(() => showsText(app, "USED_SHELL"), { timeout: 3000 });
+  });
+});
+
+describe("per-tab undo isolation, priority banner, mode pills & find match count", () => {
+  test("cross-tab ⌘Z undo never overwrites b.ts with a.ts's buffer", async () => {
+    await withScratch(
+      { "a.ts": "const ALPHA_ORIG = 1;", "b.ts": "const BETA_ORIG = 2;" },
+      async ({ app }) => {
+        await editTab(app, "// ALPHA_EDIT ");
+        await app.press("text:b.ts");
+        await app.waitUntil(() => showsText(app, "const BETA_ORIG = 2;"), { timeout: 3000 });
+
+        // Pressing ⌘Z in b.ts before editing b.ts must NEVER replace b.ts with a.ts's content.
+        await app.keyboard.press("mod+z");
+        await app.wait(100);
+        expect(app.texts().some((t) => t.includes("BETA_ORIG"))).toBe(true);
+        expect(app.texts().some((t) => t.includes("ALPHA_ORIG"))).toBe(false);
+        expect(app.texts().some((t) => t.includes("ALPHA_EDIT"))).toBe(false);
+
+        // Editing b.ts and pressing ⌘Z undoes only b.ts's edit while a.ts stays dirty.
+        await app.type("id:preview-editor", "X");
+        await app.keyboard.press("mod+z");
+        await app.wait(100);
+        expect(app.texts().some((t) => t.includes("BETA_ORIG"))).toBe(true);
+        expect(app.texts().some((t) => t.includes("ALPHA_ORIG"))).toBe(false);
+
+        await app.press("id:tab-select-a.ts");
+        await app.waitUntil(() => app.texts().some((t) => t.includes("ALPHA_EDIT")), {
+          timeout: 3000,
+        });
+      },
+    );
+  });
+
+  test("conflict-then-delete transitions to a single missing banner and [Diff] pill persists across Code/Markdown", async () => {
+    const gitCommit = "-c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --no-verify -m init";
+    await withScratch(
+      { "anchor.txt": "ANCHOR_READY" },
+      async ({ app, dir, write, run }) => {
+        await app.waitUntil(() => showsText(app, "M"), { timeout: 5000 });
+        await app.press("id:sidebar-filter-changed");
+
+        // Changed Markdown offers [Preview | Markdown | Diff], keeps [Diff] in Source mode, and diffs live edits.
+        await app.press("text:guide.md");
+        await app.waitFor("id:preview-diff");
+        expect(app.shows("id:mode-preview")).toBe(true);
+        expect(app.shows("id:mode-source")).toBe(true);
+        expect(app.shows("id:mode-diff")).toBe(true);
+        await app.press("id:mode-source");
+        await app.waitFor("id:preview-editor");
+        expect(app.shows("id:mode-diff")).toBe(true);
+        await editTab(app, "LIVE_MD_EDIT ");
+        await app.press("id:mode-diff");
+        await app.waitFor("id:preview-diff");
+        await app.waitUntil(() => app.texts().some((t) => t.includes("LIVE_MD_EDIT")), {
+          timeout: 3000,
+        });
+
+        // Changed code keeps [Diff] pill visible when toggling Diff <-> Code.
+        await app.press("text:note.ts");
+        await app.waitFor("id:tab-select-note.ts");
+        await app.waitFor("id:preview-diff");
+        expect(app.shows("id:mode-source")).toBe(true);
+        expect(app.shows("id:mode-diff")).toBe(true);
+        await app.press("id:mode-source");
+        await app.waitFor("id:preview-editor");
+        expect(app.shows("id:mode-diff")).toBe(true);
+
+        // Conflict -> delete on disk replaces deadlocked Reload from Disk with single file-missing-banner.
+        await app.type("id:preview-editor", "LOCAL_EDIT ");
+        await app.waitUntil(() => app.texts().some((t) => t.includes("LOCAL_EDIT")), {
+          timeout: 3000,
+        });
+        await write("note.ts", "const V = 3;");
+        await pastOneDiskCheck(app);
+        await app.waitFor("id:disk-conflict-banner");
+        await run(`rm ${dir}/note.ts`);
+        await pastOneDiskCheck(app);
+        await app.waitFor("id:file-missing-banner");
+        expect(app.shows("id:disk-conflict-banner")).toBe(false);
+
+        // ⌘S on missing file shows higher-priority save-error-banner; dismissing returns to file-missing-banner.
+        await app.keyboard.press("mod+s");
+        await app.waitFor("id:save-error-banner");
+        expect(app.shows("id:file-missing-banner")).toBe(false);
+        await app.press("id:save-error-dismiss-btn");
+        await app.waitFor("id:file-missing-banner");
+        expect(app.shows("id:save-error-banner")).toBe(false);
+      },
+      (dir) => [
+        `printf 'const V = 1;\\n' > ${dir}/note.ts`,
+        `printf '# Title\\n' > ${dir}/guide.md`,
+        `git -C ${dir} init -q`,
+        `git -C ${dir} add -A`,
+        `git -C ${dir} ${gitCommit}`,
+        `printf 'const V = 2;\\n' > ${dir}/note.ts`,
+        `printf '# Title v2\\n' > ${dir}/guide.md`,
+      ],
+    );
+  });
+
+  test("FindBar displays live match count with Next/Prev navigation and cold Quick Open offers Open Folder…", async () => {
+    const coldApp = await open("./App.tsx", {
+      platform: "macos",
+      width: 1280,
+      height: 800,
+      storage: { "aed.recentWorkspaces": "[]" },
+    });
+    await coldApp.waitFor("id:welcome-panel");
+    await coldApp.press("id:titlebar-quick-open");
+    await coldApp.waitFor("id:command-palette");
+    expect(showsText(coldApp, "Open Folder…")).toBe(true);
+    await coldApp.keyboard.press("escape");
+
+    await withScratch(
+      { "anchor.txt": "ANCHOR_READY" },
+      async ({ app }) => {
+        await app.press("text:search.txt");
+        await app.waitUntil(() => showsText(app, "needle one"), { timeout: 3000 });
+        await app.keyboard.press("mod+f");
+        await app.waitFor("id:editor-find-input");
+        expect(showsText(app, "0/0")).toBe(true);
+
+        await app.type("id:editor-find-input", "needle");
+        await app.waitUntil(() => showsText(app, "1/3"), { timeout: 3000 });
+
+        await app.press("id:find-next-btn");
+        await app.press("id:find-next-btn");
+        await app.waitUntil(() => showsText(app, "2/3"), { timeout: 3000 });
+
+        await app.press("id:find-prev-btn");
+        await app.waitUntil(() => showsText(app, "1/3"), { timeout: 3000 });
+      },
+      (dir) => [`printf 'needle one\\nneedle two\\nneedle three\\n' > ${dir}/search.txt`],
+    );
   });
 });

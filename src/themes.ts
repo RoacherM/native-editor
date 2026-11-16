@@ -54,12 +54,6 @@ export interface EditorTheme {
   syntaxClasses: SyntaxClasses;
 }
 
-/** Compat export kept for `App.test.tsx` until Wave 2B cleans up test imports. */
-export function fontDisplayName(family: string): string {
-  const name = family.replace(/\s+Nerd Font(?:\s+(?:Mono|Propo))?$/i, "").trim();
-  return name || "Mono";
-}
-
 function buildSyntaxClasses(syntax: SyntaxPalette): SyntaxClasses {
   return {
     keyword: `text-[${syntax.keyword}] font-semibold`,

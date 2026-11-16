@@ -21,7 +21,6 @@ import {
   formatThemeSyncScript,
   getPreviewShellHtml,
   hasCachedPreviewShellHtml,
-  MermaidRendererHost,
   preprocessMermaidCode,
   type ExtensionScanIo,
 } from "./mermaid";
@@ -37,8 +36,10 @@ describe("Mermaid & unified preview host pure contracts", () => {
     expect(getPreviewShellHtml()).toBe(first);
   });
 
-  test("MermaidRendererHost is a zero-WebView null stub and source contains zero CDN URLs or offscreen rasterizers", () => {
-    expect(MermaidRendererHost()).toBeNull();
+  test("offscreen rasterizer, compat shims, and CDN URLs are completely removed", () => {
+    expect("MermaidRendererHost" in mermaidMod).toBe(false);
+    expect("MermaidDiagramBlock" in mermaidMod).toBe(false);
+    expect("requeueOrphanedJobs" in mermaidMod).toBe(false);
     expect("requestMermaidRender" in mermaidMod).toBe(false);
     expect("buildWorkerHtml" in mermaidMod).toBe(false);
 
@@ -47,7 +48,6 @@ describe("Mermaid & unified preview host pure contracts", () => {
       ...Object.values(markdownPreviewMod).map(String),
     ].join("\n");
 
-    // Verify Function.prototype.toString exposes real compiled module bodies.
     expect(compiledSources).toContain("renderDiagram");
     expect(compiledSources).toContain("aed-diagram-only");
 
@@ -180,7 +180,7 @@ describe("Mermaid & unified preview host pure contracts", () => {
     expect(themeScript).toContain("window.__aed.setTheme(");
   });
 
-  test("DiagramViewportPill renders numeric zoom percentage, updates to 125%, and hides zoom controls when omitted", async () => {
+  test("DiagramViewportPill renders numeric zoom percentage, updates to 125%, and hides when switching to Code mode", async () => {
     const archPath = decodeURIComponent(
       new URL("../fixtures/architecture.mmd", import.meta.url).pathname,
     );
@@ -192,6 +192,7 @@ describe("Mermaid & unified preview host pure contracts", () => {
     });
     await app.waitFor("id:mermaid-zoom-reset");
     expect(app.shows("text:100%")).toBe(true);
+    expect(app.shows("id:mermaid-toggle-code")).toBe(false);
 
     await app.press("id:mermaid-zoom-in");
     expect(app.shows("text:125%")).toBe(true);
@@ -199,9 +200,8 @@ describe("Mermaid & unified preview host pure contracts", () => {
     await app.press("id:mermaid-zoom-reset");
     expect(app.shows("text:100%")).toBe(true);
 
-    // Toggling to code view omits `zoom` on DiagramViewportPill, hiding zoom buttons cleanly.
-    await app.press("id:mermaid-toggle-code");
-    await app.waitFor("id:mermaid-code-view");
+    await app.press("id:mode-source");
+    await app.waitFor("id:preview-editor");
     expect(app.shows("id:mermaid-zoom-in")).toBe(false);
     expect(app.shows("id:mermaid-zoom-reset")).toBe(false);
   });
@@ -318,20 +318,17 @@ describe("Mermaid & unified preview host pure contracts", () => {
     expect(statCalls).toBe(1);
     expect(readCalls).toBe(1);
 
-    // Second read with identical mtimeMs:size hits O(1) memory cache without reading bytes.
     const second = await readImageDataUrl("/ws/dot.png", cache, io);
     expect(second).toBe(first);
     expect(statCalls).toBe(2);
     expect(readCalls).toBe(1);
 
-    // Stamp update reads fresh bytes.
     currentMtime = 2000;
     currentBytes = new Uint8Array([137, 80, 78, 71, 13, 10]);
     const third = await readImageDataUrl("/ws/dot.png", cache, io);
     expect(third).toBe("data:image/png;base64,iVBORw0K");
     expect(readCalls).toBe(2);
 
-    // Non-image paths return null before stat.
     expect(await readImageDataUrl("/ws/notes.md", cache, io)).toBeNull();
     expect(statCalls).toBe(3);
   });

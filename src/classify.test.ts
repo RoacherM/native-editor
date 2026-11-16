@@ -7,7 +7,6 @@ import {
   extensionOf,
   formatHexDump,
   imageMimeForPath,
-  normalizeMachOBuildVersion,
   parseDelimitedRecords,
   parseJsonl,
   parseTableData,
@@ -300,12 +299,11 @@ describe("fast CSV/TSV & streaming JSONL/NDJSON parsers", () => {
     expect(parseJsonl(newlineTerminated, true).rows).toEqual([[1], [2]]);
   });
 
-  test("preserves hex dump, image dimension probes, and Mach-O header helper", () => {
+  test("preserves hex dump and image dimension probes", () => {
     expect(formatHexDump(new Uint8Array(0))).toBe("(empty file)");
     expect(probeImageDimensions(new Uint8Array(0), '<svg width="80" height="40"></svg>')).toEqual({
       width: 80,
       height: 40,
     });
-    expect(normalizeMachOBuildVersion(new Uint8Array([0, 1]))).toBeNull();
   });
 });

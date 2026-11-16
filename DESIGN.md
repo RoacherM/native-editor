@@ -24,7 +24,7 @@ Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文�
 
 两项都是 `{ "hosts": [] }`：App 不联网，也不显示任何远程网页。依据（`nsh 0.4.0` 文档「Sandbox and capabilities」与 `nsh-core` `access.rs`，并用整套 `nsh test --trace` 核对没有任何 `is not granted` 拒绝）：
 
-- `webview.hosts` 只管 WebView 的 `src` 与顶层跳转。`"webview": { "hosts": [] }` 仍允许 `html` 内联页面与 `about:blank`，所以 Markdown 预览与 Mermaid 离屏渲染器都不受影响（终端不用 WebView）；去掉整个 `webview` 键才会让 `html` 也被拒。页面自己的子资源（脚本、图片、XHR）不归它管，由各页面的 CSP 管。
+- `webview.hosts` 只管 WebView 的 `src` 与顶层跳转。`"webview": { "hosts": [] }` 仍允许 `html` 内联页面与 `about:blank`，所以 Markdown / Mermaid 统一沙箱预览页与 `.html` 预览都不受影响（终端不用 WebView）；去掉整个 `webview` 键才会让 `html` 也被拒。页面自己的子资源（脚本、图片、XHR）不归它管，由各页面的 CSP 管。
 - `network.hosts` 管 `fetch`、WebSocket、远程图片与视频源。`<Image>` 的 `blob:` URL 在进核心前已换成 `data:` 源（trace 里是 `data:image/png;nsh-key=…`），`<Video src={绝对路径}>` 不含 `://`，两者都按「app 自己的文件」放行（`allows_media`）。App 里没有 `fetch` / `WebSocket` / `net`。
 - 需要联网的新功能（例如远程图片预览）要在这里写明原因，再把具体主机加进 `network.hosts`，不要再写 `*`。
 
@@ -60,46 +60,46 @@ Aed（Another Editor）是基于 `nsh 0.4.0` 构建的轻量级 macOS 原生文�
 
 ```text
 +-----------------------------------------------------------------------------------+
-| ● ● ●                       [ 🔍 native-editor (⌘P) ]                  [◧] [◨]   | <- WindowTitleBar (32pt, windowDrag)
+| ● ● ●                       [ 🔍 native-editor (⌘P) ]                  [◧] [◨]   | <- WindowTitleBar (≥32pt, windowDrag)
 +--------------------+--------------------------------------------------------------+
-| fixtures           | [📄 README.md ×] [📐 arch.mmd ×] [📊 metrics.csv ×]          | <- TabBar (36pt)
-| [All] [Changed]    | src > components > 📄 README.md            [Preview] [Code]  | <- Breadcrumb & ModeBar (28pt)
-| ▾ src/             +--------------------------------------------------------------+
-|     App.tsx      M |                                                              |
+| fixtures [All|Chg] | [M↓ README.md ×] [TS web/index.ts ×]   [Preview|Markdown|Diff]| <- SidebarHeader & TabStrip (36pt)
++--------------------+--------------------------------------------------------------+
+| ▾ src/             | [ ! note.ts was moved or deleted.        [Save As…] [Close] ]| <- Priority NoticeBanner (0/36pt)
+|     App.tsx      M +--------------------------------------------------------------+
 |     classify.ts    |                 PreviewPane (按 FileKind 分发)               |
-|     mermaid.tsx    |   Editor / TextView+Mermaid / DataTable / DiffView /         |
-|     workspace.ts   |   Image (Zoom+Grid) / Video / Audio / QuickLook / Hex        |
+|     mermaid.tsx    |   Keyed Editor + FindBar (1/N) / Unified Markdown+Mermaid    |
+|     tabs.ts        |   WebView / DataTable / Live DiffView / Scrollable Image /   |
+|     ui.tsx         |   Video / Audio / QuickLook PDF / 4 KB Hex                   |
 |                    +--------------------------------------------------------------+
-|                    | [1: zsh ×] [+]                                       [zsh ▾] | <- TerminalPane (ResizablePanel)
+|                    | [1: zsh ×] [2: zsh ×]                        [+] [zsh ▾]     | <- TerminalPane (TabStrip 32pt)
 |                    | ➜ ~ echo NSH_PTY_OK_2026                                     |    native aed.terminal view, libghostty-vt per Tab
 |                    | NSH_PTY_OK_2026                                              |
-|                    | ➜ ~ █                                                        |
 +--------------------+--------------------------------------------------------------+
-| ⎇ master*          |                             README.md · 2.1 KB · Ln 1, Col 1 · markdown | <- StatusBar (24pt, read-only)
+| ⎇ main*            |                 README.md · 2.1 KB · Ln 1, Col 1 · markdown  | <- StatusBar (24pt, read-only)
 +--------------------+--------------------------------------------------------------+
 ```
 
-### 模块职责表
+### 模块职责表（4 层最小单元架构）
 
-| 文件 | 核心导出 | 职责边界 |
+| 层级 / 文件 | 核心导出 | 职责边界 |
 |---|---|---|
-| `App.tsx` | `App` (mount root) | 顶层信号状态、可拖拽分栏（水平 `Sidebar` + 垂直 `PreviewPane`/`TerminalPane`）、快捷键、Finder 队列轮询、Preferences 弹窗 |
-| `src/session.ts` | `WINDOW_TRANSITIONS`, `deriveWindowMode`, `deriveEditorSurface`, `planWorkspaceIntent`, `externalOpenKeepsTree`, `decideGuard`, `unsavedQuestion`, `nextActiveAfterClose`, `canToggleSidebar`, `serialize` | 窗口会话状态机的纯规则（无 I/O）：窗口模式、编辑区显示内容、工作区打开/关闭计划、外部文件是否保留文件树、未保存确认框（含按动作区分的问句）与关 Tab 后的激活项；`serialize` 让一个异步任务的运行不重叠（磁盘比对用它）。见「状态机清单」 |
-| `src/saving.ts` | `saveInStore`, `settleSavedCopy`, `describeFailure` | 一个 Tab 的保存规则，store 与写盘函数由 App 传入（可无 I/O 测试）：只存脏且可保存的副本、写入期间的输入不丢、关掉的 Tab 不写回、失败记在副本上不抛错。见「状态机清单」#4 |
-| `src/classify.ts` | `classifyFile`, `parseTableData`, `formatHexDump`, `probeImageDimensions`, `normalizeMachOBuildVersion`, `generateQuickLookUrl`, `createBlobUrl` | 纯文件类型判定（扩展名 + 前 4 KB `\0` 探测）、CSV/TSV/JSONL 解析、4 KB 十六进制格式化、PNG/GIF/SVG 尺寸探测、Mach-O `LC_BUILD_VERSION` 最低系统版本归一化、PDF `sips` 缩略图生成 |
-| `src/workspace.ts` | `getInitialWorkspaceRoot`, `getInitialOpenFile`, `aedCacheDir`, `resolveFinderQueueDir`, `consumeFinderOpenQueue`, `externalFileCandidates`, `resolveExternalFileReference`, `normalizeExternalFilePath`, `scanWorkspace`, `loadFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `readDiskStamp`, `isBehindDisk`, `hasChangedOnDisk`, `reloadFromDisk`, `reloadIfChangedOnDisk`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `isDirectoryPath` | 工作区并发文件树与 Git 状态扫描、小文件后台预热缓存（`≤ 256 KB`）、外部文件引用解析（先按原样找文件，找不到才剥 `:line:col` / `#L` 并带上行列；`file://[localhost]` 百分号解码）、目录与普通文件区分、文件按需加载（音视频只 `stat` 不全量读入内存）、保存回写、`osascript` 选目录 |
-| `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta`, `withPreviewCsp` | 各 `FileKind` 的视图切换（`preview` / `source` / `diff`）、外部打开带行列时移动光标（`reveal`）、`.html` 预览加 CSP 并关闭页面 JS、代码编辑器内联查找（`Cmd+F`）、表格排序、图片缩放（`25%`–`400%`）与棋盘格背景切换 |
-| `src/mermaid.tsx` | `MermaidRendererHost`, `MermaidDiagramBlock`, `detectMermaidKind`, `preprocessMermaidCode`, `requestMermaidRender`, `loadMermaidBundleJs`, `buildMermaidConfig`, `rememberRender` | 按需延迟初始化的隐藏离屏 `WebView`（1280×900）运行 Mermaid 布局、将 `<foreignObject>` 内联为原生 SVG `<text>` 并光栅化为 2x Retina PNG `blob:` URL；`buildMermaidConfig` 是两条 Mermaid 渲染路径共用的主题配置工厂 |
-| `src/markdownPage.ts` | `buildPreviewShellHtml`, `buildPreviewThemeCss`, `classifyPreviewLink`, `resolvePreviewImagePath`, `imageMimeForPath`, `parsePreviewMessage`, `handlePreviewMessage`, `isExternalOrHashUrl`, `resolveRelativeLink` | Markdown 预览的纯协议/路径/主题逻辑（无 I/O）：严格 CSP 壳页、主题化阅读排版与 TOC CSS、链接与图片路径安全分类、页面上行消息校验与路由 |
-| `src/MarkdownPreview.tsx` | `MarkdownPreview` | Markdown WebView 的 I/O 外壳：注入运行时与 `render`/`setTheme`/`setImages` 载荷、图片按 `classify` MIME 读为 `data:`（≤20 MB）、`openUrl`/已解析路径回传、进程内滚动记忆、测试调试通道 |
-| `vendor/markdown/` | `entry.mjs`, `page.mjs`, `build.mjs`, `package.json`, `bun.lock`, `THIRD_PARTY_NOTICES.txt` | 固定版本的第三方运行时源码（markdown-it 插件组 + KaTeX + hljs + github-markdown-css + DOMPurify），仅由 `scripts/build-markdown-vendor.sh` 构建为 `src/markdownVendor.generated.ts` |
-| `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | 左侧 `All` / `Changed` 文件树、Git 状态徽章（`M`/`A`/`U`/`D`/`R`）、`Cmd+P` 文件快搜与 `Cmd+Shift+P` 命令面板 |
-| `src/TerminalPane.tsx` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig`, `createInputGate`, `shouldFollowCwd`, `linkTarget` | 终端的 Tab 编排：每个 Tab 一个 `TerminalSession`，事件循环（`nextEvent`）、Shell 启动/重启/跟随目录与切换规则、⌘-点击链接的打开、焦点期间的 ⌘K/⌘F 绑定、测试通道 `aed.terminal.test`、本机 Shell 与 Ghostty 配置探测 |
-| `src/terminalTheme.ts` | `buildTerminalTheme`, `ANSI_PALETTES`, `ANSI_NAMES` | 主题到终端颜色（背景、前景、光标、选区、16 色 ANSI）的纯映射，交给原生视图的 `theme` prop |
-| `native/` | `TerminalSession`（`src/session.rs`）、`aed.terminal` 视图（`src/view.rs`）、`src/grid.rs`、`src/keys.rs`、`src/pty.rs`、`src/ffi.rs` | Rust crate：libghostty-vt 终端与 PTY 会话、AppKit 视图的绘制与输入（键盘/IME/鼠标/滚轮/剪贴板）、按键表、`forkpty`；`ffi.rs` 是 bindgen 从 libghostty-vt 头文件生成的绑定（命令见 `scripts/fetch-ghostty-vt.sh`） |
-| `vendor/ghostty-vt/` | `libghostty-vt.a`, `Headers/` | 不入库（27 MB）：`scripts/fetch-ghostty-vt.sh` 下载官方 1.0.1 xcframework，校验 zip 与静态库的 SHA-256 后拷入；`native/build.rs` 静态链接它 |
-| `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 8 套配色主题（默认 Industrial Paper / Industrial Carbon，另有 Kanagawa Dragon、Tokyo Night、Catppuccin Mocha、One Dark、Rose Pine、GitHub Light）及带 LRU 缓存的预编译正则语法高亮装饰器 |
-| `src/icons.tsx` | `Icon`, `FileBadge`, `AppLogo` | 内联矢量图标与按文件扩展名着色的类型徽章 |
+| **L0** `src/target.ts` | `parseTarget`, `resolveTarget`, `normalizeDirPath`, `extensionOf` | 外部 CLI/Finder 引用、终端链接与 Markdown 相对链接的单一路径/行列/URI 归一化与安全协议过滤（无 UI） |
+| **L0** `src/classify.ts` | `VIEWER_SPECS`, `badgeForPath`, `createLruCache`, `classifyFile`, `parseTableData`, `parseDelimitedRecords`, `parseJsonl`, `formatHexDump`, `probeImageDimensions`, `generateQuickLookUrl`, `createBlobUrl` | 11 种 `FileKind` 能力规格真源（`VIEWER_SPECS`）、通用有界 LRU 缓存（驱逐自动回调释放资源）、快速 CSV/TSV 与流式 JSONL/NDJSON 解析、4 KB Hex、PNG/GIF/SVG 尺寸探测、仅限 `.pdf` 的 `sips` 并发去重预览 |
+| **L0** `src/themes.ts` | `EDITOR_THEMES`, `getThemeById`, `syncThemeTokens`, `computeSyntaxDecorations`, `buildEditorThemeStyles` | 8 套配色主题（含 `accentForeground` 与独立 `statusBar` 色面）、通过 `aed/native` `setTokens` 实时同步 NSH 运行时设计 Token、600 行上限与按 `cacheKey` 命中的语法高亮装饰器 |
+| **L1** `src/session.ts` | `WINDOW_TRANSITIONS`, `deriveWindowMode`, `deriveEditorSurface`, `planWorkspaceIntent`, `externalOpenKeepsTree`, `decideGuard`, `unsavedQuestion`, `nextActiveAfterClose`, `canToggleSidebar`, `serialize` | 窗口会话状态机纯规则（`home` / `workspace` / `loose`）、编辑区路由、未保存拦截与串行化执行器 |
+| **L1** `src/saving.ts` | `saveInStore`, `settleSavedCopy`, `describeFailure` | 单 Tab 保存与并发输入结算纯规则（写入中继续打字不丢脏状态、已关闭 Tab 不回写、失败落 `saveError`） |
+| **L1** `src/tabs.ts` | `createTabStore`, `applyTabLocation`, `tabLoadedFile`, `toLoadedFileSnapshot` | 每 Tab 独立会话状态仓库（`TabEntry`）：三态互斥 `diskStatus: "synced" \| "conflict" \| "missing"`、`reloadSeq`、每 Tab 光标/缩放/背景极性/滚动与 `blob:` URL 确定性回收 |
+| **L1** `src/workspace.ts` | `statDisk`, `deferOutOfEffect`, `onceAsync`, `watchActiveInterval`, `syncWindowStateFile`, `isGitRepo`, `getInitialWorkspaceRoot`, `getInitialOpenFile`, `aedCacheDir`, `resolveFinderQueueDir`, `consumeFinderOpenQueue`, `resolveExternalFileReference`, `scanWorkspace`, `loadFile`, `loadTabFile`, `getPreloadedFile`, `warmWorkspaceFiles`, `reloadFromDisk`, `saveFileText`, `getFileDiffPatch`, `pickWorkspaceFolder`, `pickSavePath` | 工作区并发扫描（单趟收集文件与 Git 状态，非 Git 目录零子进程）、32 项小文件预热 LRU、生命周期感知自适应轮询（`watchActiveInterval`）、窗口模式状态文件同步（`state`）与磁盘读写 |
+| **L1** `src/commands.ts` | `BUILT_IN_COMMANDS`, `runBuiltInCommand`, `buildQuickOpenItems`, `bindAppShortcuts`, `enforceMinWindowSize`, `setupDesktopChrome` | 内置命令表、全局快捷键、空工作区 Quick Open `Open Folder…` 兜底、窗口最小尺寸（`760×520`）与含 `"Open Queued Files"` 的原生应用菜单 |
+| **L1** `src/workspaceSession.ts` | `createWorkspaceSession`, `computeTabModeItems` | 顶层工作区/Tab/轮询/Finder 队列会话控制器，向薄壳层 `App.tsx` 暴露响应式信号与动作 |
+| **L2** `src/icons.tsx` | `Icon`, `FileBadge`, `opticalStrokeWidth` | `20×20` 统一视口矢量图标（恒定 `1.35pt` 屏幕描边补偿）与基于 `badgeForPath` 的单色文件徽章 |
+| **L2** `src/ui.tsx` | `SurfaceButton`, `IconButton`, `TabStrip`, `disambiguateTabParents`, `SegmentedControl`, `ViewportPill`, `createZoom`, `NoticeBanner`, `resolveNotice`, `ModalShell`, `Keycap`, `formatShortcut` | 共享工业设计 UI 原语：同名 Tab 父目录消歧标签栏、分段胶囊、浮动缩放条、单槽位 5 级优先级横幅、模态窗壳层与原生键帽 |
+| **L3** `App.tsx` | `App` (mount root) | `<300` 行纯窗口壳层：标题栏、视口自适应边界夹紧的水平/垂直 `ResizablePanelGroup`、标签栏、编辑区、`StatusBar` 与弹层挂载 |
+| **L3** `src/PreviewPane.tsx` | `PreviewPane`, `formatMediaMeta`, `formatSearchCount`, `clampRevealPosition`, `reconstructBaseFromPatch`, `resolveDiffInputs`, `resolveImageBackdrop`, `sortRows`, `withPreviewCsp` | 按 `FileKind` 分发渲染：按 `${tab.id}\0${reloadSeq}` 隔离撤销栈的非受控 `<Editor>`、带 `1/N` 计数与上下跳转的 `FindBar`、支持未保存实时对比的 `DiffBody`、双向可滚动缩放的 `ImageBody`、`Intl.Collator` 排序的 `DataTable` 与 `.html` 严格 CSP 预览 |
+| **L3** `src/MarkdownPreview.tsx` · `src/mermaid.tsx` · `src/markdownPage.ts` · `vendor/markdown/` | `MarkdownPreview`, `SandboxPreviewWebView`, `DiagramViewportPill`, `DiagramErrorBanner`, `buildMermaidConfig`, `preprocessMermaidCode`, `loadMermaidBundleJs`, `planPreviewRender`, `readImageDataUrl`, `buildPreviewShellHtml`, `handlePreviewMessage` | 统一沙箱矢量预览宿主：单个 keep-alive `WebView` 同时承载 `.md`（含内嵌 Mermaid 块、TOC、KaTeX、本地图片 Base64 LRU）与独立 `.mmd`（`50%–250%` 矢量缩放、复制源码与错误横幅），无第 2 个离屏 `WebView` |
+| **L3** `src/WelcomePanel.tsx` · `src/PreferencesModal.tsx` | `WelcomePanel`, `EmptyEditorPanel`, `posterGrid`, `PreferencesModal`, `UnsavedChangesDialog` | 包豪斯网格开屏海报页（无历史记录时展示静默快捷键 `Keycap` 提示）、工作区空态页、偏好设置弹窗与未保存拦截对话框 |
+| **L3** `src/Sidebar.tsx` | `Sidebar`, `CommandPalette` | `36pt` 顶栏对齐的文件树（`All` / `Changed` `SegmentedControl`、$O(1)$ 展开集合、`Changed` 空状态与深层路径中间省略）与基于 `ModalShell` 的命令面板 |
+| **L3** `src/TerminalPane.tsx` · `src/terminalTheme.ts` · `native/` · `vendor/ghostty-vt/` | `TerminalPane`, `discoverTerminalEnvironment`, `parseGhosttyConfig`, `createInputGate`, `linkTarget`, `buildTerminalTheme`, `TerminalSession` | 基于 `TabStrip` 的原生多标签 TTY 终端（libghostty-vt 1.0.1 + AppKit `aed.terminal` 视图 + Rust `forkpty`）、提示符就绪后静默高频输出通知（`setNotifyOutput(false)`）、`onceAsync` 并发环境探测与 `parseTarget` 链接跳转 |
 
 ---
 
@@ -130,53 +130,47 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 | # | 状态机 | 状态 | 位置 | 现状 |
 |---|---|---|---|---|
 | 2 | 编辑区显示 | `file` / `welcome` / `workspace-empty` | `deriveEditorSurface` | 显式 |
-| 3 | 文件与磁盘一致性 | 新鲜 / 过期 / 冲突 / 已移走 | 每份副本自带：`LoadedFile.diskStamp`（读到的字节的 `mtimeMs:size`）与 `LoadedFile.diskChanged`（冲突）；App `checkTabAgainstDisk`、`createActiveTabDiskCheck` | 显式。戳跟着副本走，不存在按路径共享的表：被保留的脏副本带着自己的旧戳，下一次比对仍判为过期，冲突不会丢。`loadFile` 先读戳再读字节（中途被写只会多判一次过期，不会漏判）；保存时换成新戳。当前 Tab 每 1.5 秒（`DISK_CHECK_MS`，一次 `stat`）比对一次，**切到某个 Tab 时立即比对**；比对从不重叠（`serialize`：进行中再被调用则结束后补跑一次，那次比对抛错也照样补跑）。干净 Tab 过期则直接重读。脏 Tab 过期则把该副本标为 `diskChanged`，编辑区上方出现 `id:disk-conflict-banner`：`Reload from Disk` 丢弃编辑并重读；`Keep My Edits` 保留编辑并把磁盘当前戳记为该副本的戳，下次保存会覆盖磁盘，之后磁盘再变会再问。冲突随副本结束：保存、关 Tab、切目录、重读都换掉副本，所以横幅不会在下一次比对前「复现」。每个 Tab 各有各的冲突。源文件消失（`stat` 失败而副本有戳，`markMissingInMap`）记为 `LoadedFile.diskMissing`，不当成「没变」：编辑区上方 `id:file-missing-banner`「<name> was moved or deleted.」，`Close` 关 Tab（脏则先问），`Save As…`（`osascript` `choose file name`）把 Tab 迁到新路径并写入全文；`saveFileText` 在原路径已不存在时抛 `the file was moved or deleted`，所以 `⌘S` 只显示保存失败横幅，不会在旧路径重建文件 |
-| 4 | 单个 Tab | 加载中 → 干净 ⇄ 脏 → 关闭；保存：空闲 → 写入中 → 已保存 / 失败（`saveError`）；只读（`readOnly`）；模式 `preview` / `source` / `diff` | `LoadedFile.dirty` / `.mode` / `.saveError` / `.readOnly`，`loadedFiles`；保存规则 `src/saving.ts` `saveInStore` | 半显式。关 Tab 时从 `loadedFiles` 删除；从 `All` 再打开时退出 `diff`。**保存**只在 `dirty` 且 `canSaveFile`（非不透明类型、非只读）时写盘，`⌘S`、菜单、命令面板与确认框走同一条路。写完后按当时 store 里的副本收尾（`settleSavedCopy`）：写入期间又输入的保留最新文本并保持 `dirty`，模式保留；期间关掉的 Tab 不写回。写盘失败把「`Could not save <path>: <原因>`」记在副本上，编辑区上方出现 `id:save-error-banner`（`Dismiss` 关掉），Tab 保持 `dirty`，下次保存成功时清除；`saveInStore` 从不抛错。**打开失败**（文件不存在、读不了；文件树、`⌘P`、Markdown 链接、拖入、Finder 点击都一样）在编辑区上方显示 `id:open-error-banner`「`Could not open <文件名>: <原因>`」（`Dismiss` 关掉，下次打开成功时清除），不再静默；外部点击先读文件再清文件树，打不开时窗口保持原样。**模式**：不透明类型（`isOpaqueFile`：图片（SVG 除外）、PDF/Office、音视频、二进制）只有预览（`allowsMode`），命令面板、模式按钮、`Changed` 列表打开都切不到 `source` / `diff`。切 `diff` 拉补丁期间的输入保留，期间关掉的 Tab 不写回 |
-| 5 | Mermaid 渲染进程 | 未启动 → 读 bundle → WebView 挂载 → `ready` → 卸载；每次启动是新的一代（`workerGeneration`） | `src/mermaid.tsx` 模块变量 | 半显式。WebView 卸载时，在途任务回到队首（`requeueOrphanedJobs`）。每个渲染任务 20 秒（`RENDER_TIMEOUT_MS`）无回复即失败，图表块显示错误而不是一直空白。任务记下它等的是哪一代；超时时只有当它等的正是当前这一代，才丢弃渲染器（`planJobTimeout`）：`ready` 之后卡死的渲染器也会被换掉，而旧任务的超时不会杀掉正在启动的新渲染器。丢弃时这一代作废，晚到的旧 bundle 不会把它复活。注：bundle 缺失且断网时 CDN 脚本加载失败，`load` 仍触发、`ready` 仍到达，渲染会很快报错；超时兜底的是请求卡住与渲染无回复 |
-| 6 | 单个 Mermaid 块 | 渲染中 / 已渲染 / 出错 | `MermaidDiagramBlock` 信号，`followLatest` | 半显式。源码、主题或字体一变就回到「渲染中」（旧图撤下，显示 `id:mermaid-loading`），只有最新一次请求的结果（或错误）落地，慢的旧渲染晚到也丢弃 |
-| 7 | 冷启动 | 先读 Recent（之后才记入启动目录）；两路并行：扫描初始目录（`refresh`）；打开初始文件 → 读 Finder 队列 → 读偏好 → 读 Ghostty 后再套一次主题 | `App` `appInitialized`、`recentLoaded` | 隐式，只跑一次 |
-| 8 | Finder 队列 | 轮询中（150ms，最多 16 次）/ 已取到 / 停止；同一时刻只有一次读取 | `drainFinderOpenQueue` `inflightDrain` | 隐式，正常 |
-| 9 | 终端会话 | 未启动 → 启动中（输入排队）→ 运行（未用 / 已用）→ 退出即关 Tab；最后一个 Tab 关闭时先补一个新 Tab | `src/TerminalPane.tsx` `TermTab`（`session` / `startedIn` / `gate` / `typed`）、`TerminalModel` | 半显式。面板第一次显示时才启动 Shell（`startShown`，启动时没有隐藏的登录 Shell）；面板隐藏时新开的 Tab 不启动，等面板再显示。启动中输入先排队（`createInputGate`）：Shell 第一次输出后安静 200 毫秒（`SHELL_QUIET_MS`）或满 3 秒（`SHELL_READY_MAX_MS`）才放行；终端应答（原生视图经 `Shared::send` 发出的 DA、光标位置、焦点等）不排队、不算「用过」，「用过」只由键入（`type_in`）或排队中的输入（`TermTab.typed`）判定。没用过的 Shell 跟随打开的目录（`shouldFollowCwd`、`followFolder`）；用过的保留目录与进程。换 Shell：偏好设置改默认 Shell 时只换没用过的 Tab（`adoptShell`）；下拉框里选 Shell，当前 Tab 没用过就换掉，用过就在新 Tab 里开这个 Shell（`pickShell`），用过的会话从不被杀。Shell 退出（Ctrl+D、`exit`）就关掉它的 Tab，同 Ghostty（`shellExited`）；是最后一个 Tab 时同时收起终端面板（`onEmpty`），补上的新 Tab 等面板再打开时才启动。已被替换的旧 Shell 迟到的 `exit` 不关任何 Tab（会话仍在运行就忽略）。`closeTab` 先补新 Tab 再删旧 Tab，Tab 列表从不为空（曾先置空：渲染读 `activeTab().session` 抛错，补 Tab 那步没执行）。启动失败（`[error] …` 写在屏幕上）的 Tab 里按任意键再试一次 |
-| 10 | 浮层 | 命令面板（关 / `files` / `commands`）、偏好设置、查找栏 | `commandOpen` + `commandMode`、`fontDialogOpen`、`findOpen` / `findShown` | 隐式。查找栏属于编辑器：只在编辑器视图上显示（切到预览类 Tab 时隐藏，回来再显示）；`⌘F` 只在编辑器有焦点时打开（终端、预览里按不打开），显示时 `⌘F` 关闭；查找框里按 Esc 关闭；关闭后焦点回到编辑器 |
-| 11 | 文件树视图 | `all` / `changed`，展开项，选中项 | `filterMode`、`expandedIds`、`selectedPath`；扫描结果 `snapshot` | 隐式。切换或关闭工作区时一起重置。扫描只认最新一次，且发起时的根目录仍是当前目录（`refresh` 的 `scanGeneration` 与根目录比对）：旧目录的慢扫描结束后不会覆盖新目录的文件树、Git 徽章、`⌘P` 列表和分支。`Changed` 列表含 git 报 `D`、磁盘上已没有的文件（排在最后），点开显示它被删掉的 diff。外部改名时跟着迁移（见 #14） |
-| 12 | 窗口最小尺寸 | 正常 / 已纠正 | `lastEnforcedKey` | 隐式，正常 |
-| 13 | 偏好设置 | 默认值 → 已存值 → Ghostty 补齐 | `initUserPreferences` | 隐式，正常 |
-| 14 | 工作区与磁盘一致性 | 未变 / 目录变了（重扫）/ 只有 Git 变了 / 根目录不可用 | App `createWorkspaceDiskCheck`、`watchWorkspaceDisk`、`followRenames`；`src/workspace.ts` `readFolderStamps`、`detectRenames`、`withGitStatus`；`WorkspaceSnapshot.rootNotice` | 显式（I-014）。`nsh 0.4.0` 的 `fs/promises` 没有 `watch`，所以轮询：窗口 `active` 期间每 2 秒（`WORKSPACE_POLL_MS`）`stat` 一遍根目录和**已展开目录**的 `mtimeMs`（子项增删改名会改目录 mtime），有变化就整棵重扫（`refresh`），否则只跑一次 `git status` 并在结果变了时更新徽章与 `Changed` 列表（`withGitStatus`，不重扫）。比对不重叠（`serialize`），内部吞掉异常，下一次轮询再试。回到窗口（`lifecycle()` 再次变成 `active`）立即重扫一次。每次重扫（轮询、`⌘R`、保存后）与上一次同一根目录的扫描比对：同一父目录下恰好走了一个、来了一个同类条目即视为改名，`expandedIds`、`selectedPath`、`openTabs`、`activeFilePath` 与 `loadedFiles` 里该路径及其下的 key 一起迁移（`migratePath`），跨目录移动与多项同时变化不猜。根目录读不了时文件树换成一行说明（`id:workspace-notice`：`This folder was moved or deleted.` 或 `Cannot read this folder`），打开的 Tab 留着，各自显示 #3 的已移走横幅。重扫只认最新一次（`refresh` 的 `scanGeneration` 与根目录比对，见 #11），较早发起的重扫结束后直接丢弃 |
+| 3 | 文件与磁盘一致性 | `synced` / `conflict` / `missing`（三态互斥） | `src/tabs.ts` `TabEntry.doc.diskStatus`、`reconcileTabDisk`；`src/workspace.ts` `watchActiveInterval`、`statDisk`；`src/ui.tsx` `NoticeBanner` | 显式。每个 `TabEntry` 持有自己的 `diskStamp`（`mtimeMs:size`）与互斥三态 `diskStatus`：冲突中的 Tab 若源文件随后在磁盘上被删除，立即由 `conflict` 迁移为单一 `missing`（消除失效的 `Reload from Disk` 横幅）。`watchActiveInterval` 在窗口非活跃或无打开 Tab 时完全停表，每 `1.5s`（`DISK_CHECK_MS`）只做 1 次 `statDisk`（切到某 Tab 时立即检查，不重叠 `serialize`）。编辑区顶部只有单一 `36pt` 优先级横幅槽位（`resolveNotice`：`saveError > diskConflict > diskMissing > openError > readOnly`）：对已消失文件按 `⌘S` 显示更高优先级的 `id:save-error-banner`，点 `Dismiss` 后回落到 `id:file-missing-banner` |
+| 4 | 单个 Tab 会话 | 加载中 → 干净 ⇄ 脏 → 关闭；保存：空闲 → 写入中 → 已保存 / `saveError`；模式 `preview` / `source` / `diff` | `src/tabs.ts` `createTabStore`（`TabEntry.doc` + `TabEntry.view`）；`src/saving.ts` `saveInStore`；`src/PreviewPane.tsx` `EditorBody` | 显式。`<Editor defaultValue>` 按 `${tab.id}\0${tab.doc.reloadSeq()}` 作为键挂载：每个 Tab 拥有完全独立的原生 `Buffer` 与 `⌘Z` 撤销历史（切 Tab 按 `⌘Z` 绝不跨文件串写），日常打字只做 $O(1)$ `tab.doc.text` 信号写入而不回传整份受控字符串；仅在外部磁盘重载或冲突 `Reload from Disk` 时递增 `reloadSeq` 重建编辑器。光标行列、缩放比例、图片底衬极性与待揭示行列均按 `TabEntry.view` 独立保存；关闭或重载 Tab 时自动 `revokeObjectURL` 旧 `blob:` URL |
+| 5 | 统一沙箱预览宿主 | 未挂载 → Keep-Alive 挂载 → 按需注入 Mermaid bundle（`mermaidReady` / `mermaidUnavailable`） | `src/MarkdownPreview.tsx`、`src/mermaid.tsx` `SandboxPreviewWebView` | 半显式。`.md` 与独立 `.mmd` 共享唯一 keep-alive `WebView`（已退役旧离屏 `MermaidRendererHost` 第 2 个 `WebView`）：首次进入 `.md` 或 `.mmd` 预览时挂载，切到其它视图仅 `display:none` 隐藏而不销毁页面。需要 Mermaid 时由 `loadMermaidBundleJs()` 从本机编辑器扩展提取离线 bundle（纯内存缓存，无任何远程 CDN 回退） |
+| 6 | 预览渲染调度与序号守卫 | `skip` / `immediate`（`0ms`）/ `debounce`（`120ms`）；图表 `loading` / `ready` / `error` | `src/MarkdownPreview.tsx` `planPreviewRender`、`vendor/markdown/page.mjs` `renderId` / `diagramSeq` | 显式。非预览模式打字零调度（`skip`），切文件或从源码切回预览立即下发（`0ms`），同文件连续编辑 `120ms` 防抖；页面按递增 `renderId` 与 `diagramSeq` 丢弃晚到的过期渲染结果 |
+| 7 | 冷启动 | 先读 Recent（之后才记入启动目录）；两路并行：扫描初始目录（`refresh`）；打开初始文件 → 读 Finder 队列 → 读偏好 → 读 Ghostty 后再套一次主题 | `src/workspaceSession.ts` `bindColdStartAndQueueEffects` | 隐式，只跑一次 |
+| 8 | Finder 队列 | 未配置即跳过 / 轮询中（`150ms × 16`，共 `2.4s`）+ `"Open Queued Files"` 菜单唤醒 | `src/workspaceSession.ts` `drainFinderOpenQueue`（`serialize`）、`src/commands.ts` | 显式。无 `AED_OPEN_QUEUE` 时零定时器开销；有队列时串行跑满 16 次轮询（不因首批取到提前停表，确保多批 Finder 打开不漏文件），运行态在 `home` / `loose` 窗口经 `"Open Queued Files"` 菜单项原地复用 |
+| 9 | 终端会话 | 未启动 → 启动中（输入排队）→ 运行（未用 / 已用，提示符就绪后静默输出唤醒）→ 退出即关 Tab | `src/TerminalPane.tsx` `TermTab`、`createInputGate`、`session.setNotifyOutput` | 半显式。面板首次显示才启动 Shell；启动闸门放行后且未开启测试镜像时调用 `session.setNotifyOutput(false)`，避免 `yes` / 大编译输出在后台产生每秒数万次 Tokio⇄JS 事件唤醒（原生 `aed.terminal` 视图仍直接重绘，测试通道启用镜像时自动恢复 `true`）。未用过的 Shell 跟随目录，用过的保留目录与进程；Shell 退出关掉对应 Tab，最后一个退出自动收起面板 |
+| 10 | 浮层 | 命令面板（关 / `files` / `commands`）、偏好设置、未保存确认框、查找栏（含 `1/N` 匹配计数） | `ModalShell`（`Dialog`）、`PreviewPane` `FindBar` | 隐式。`CommandPalette`、`PreferencesModal` 与 `UnsavedChangesDialog` 统一由 keep-alive `ModalShell` 承载；查找栏只属于编辑器视图，实时绑定 `<Editor onSearchChange>` 显示等宽数字 `1/N`（无匹配 `0/0`）与上/下一处按钮，且切换编辑器实例时按引用比对清理（避免旧实例卸载清空新实例引用） |
+| 11 | 文件树视图 | `all` / `changed`，展开项（$O(1)$ `Set`），选中项 | `src/Sidebar.tsx`、`src/workspaceSession.ts` | 隐式。扫描按 `scanGen` 与根目录双重校验丢弃过期慢扫描；`Changed` 为空时按 `branch` 区分提示「`No uncommitted changes`」或「`Not a Git repository`」，深层相对路径启用 `ellipsis-middle` 保留文件名可见 |
+| 12 | 窗口最小尺寸与分栏夹紧 | `760 × 520` 窗口下限 + 视口自适应侧栏/终端上限 | `src/commands.ts` `enforceMinWindowSize`、`App.tsx` `clampPanelMax` | 显式。侧栏最大宽度随 `windowSize().width - 520` 动态收缩，终端最大高度随 `windowSize().height - 316` 动态收缩，窗口缩到最小时绝不挤扁中央编辑区 |
+| 13 | 偏好设置与运行时 Token | 默认值 → 已存值 → Ghostty 补齐 → `syncThemeTokens` | `src/workspaceSession.ts` `initUserPreferences`、`src/themes.ts` `syncThemeTokens` | 显式。切换任一主题立即调用 `setColorScheme` 与 `syncThemeTokens` 更新 NSH 全局语义色 |
+| 14 | 工作区与磁盘一致性 | 未变（`2s → 5s → 10s` 退避）/ 目录变了（重扫回 `2s`）/ 仅 Git 变了 / 根目录不可用 | `src/workspaceSession.ts` `bindWorkspaceDiskPoller`、`src/workspace.ts` `watchActiveInterval` | 显式（I-014）。窗口 `active` 且有工作区时按 `2s → 5s → 10s` 自适应退避检查根目录与已展开目录 `mtimeMs`，窗口切后台立即停表、回到前台立即重扫；目录戳未变且 `snapshot.isGitRepo` 为真时才跑 `git status`（普通非 Git 文件夹零子进程开销）。同目录单进单出自动迁移展开项、选中项与打开的 `TabEntry` |
 
 ---
 
 ## 文件预览与 Mermaid 渲染契约
 
 1. **类型判定、并发预热与大文件保护（`src/classify.ts` + `src/workspace.ts` + `src/themes.ts`）**：
-   - `scanWorkspace()` 并发执行 `readGitStatus()`、`readGitBranch()` 与跨子目录 `Promise.all` 递归扫描，并在扫描完成后异步调用 `warmWorkspaceFiles()` 预热前 12 个 `≤ 256 KB` 的非音视频/非 PDF 文件；点击文件树时通过 `tryReuseLoadedFileSync()` 同步命中内存缓存，实现 `0ms` 瞬时打开与切换。
-   - `computeSyntaxDecorations()` 采用模块级预编译正则、基于 `indexOf("\n")` 的零全量切分扫描（上限 `600` 行）与 48 项 LRU 缓存（`SYNTAX_DECORATION_CACHE`）；Tab 切换或主题切换时同步应用缓存装饰器，消除 10ms 延迟重绘与旧高亮闪烁。
-   - CSV / TSV（`parseDelimitedRecords()`）：不含引号的文本走 `split` 快路径；含引号时按整段文本解析，引号内可含分隔符、换行与 `""`。单元格去掉首尾空格后像数字才转成数字，前导零（`007`）保留为文本。排序时空单元格在前、数字其次、文本最后，混合列不论原顺序都排成同一个结果；表格按文件重建（`TableBody` 按路径重新挂载），排序与列标题不会带到下一个表格。JSONL 不是 JSON 对象的非空行不再静默丢弃：行号记在 `TableData.invalidLines`，表格上方显示 `id:table-invalid-lines`。`generateQuickLookUrl()` 按文件缓存最新版本（`mtimeMs:size`）的 PDF 预览 `blob:` URL，避免重复拉起 `sips`，PNG 读完即删（见「术语与边界」）。
+   - `scanWorkspace()` 并发执行 `isGitRepo()` 守卫下的 `readGitStatus()`、`readGitBranch()` 与跨子目录 `Promise.all` 递归扫描（单趟 `collectFiles` 收集扁平列表），并在扫描完成后异步调用 `warmWorkspaceFiles()` 预热前 12 个 `≤ 256 KB` 且满足 `VIEWER_SPECS[kind].canPrewarm` 的小文件（32 项有界 LRU）；点击文件树时通过 `getPreloadedFile()` 同步命中内存缓存，实现 `0ms` 瞬时打开与切换。
+   - `computeSyntaxDecorations()` 采用模块级预编译正则、基于 `indexOf("\n")` 的零全量切分扫描（上限 `600` 行）与 48 项有界 LRU 缓存（支持 `cacheKey` 按路径+主题立即命中，连续打字 16ms 防抖重算）。
+   - CSV / TSV / JSONL / NDJSON（`parseDelimitedRecords()` + `parseJsonl()`）：不含引号走快路径；含引号时对引号内连续明文区间按 `slice` 成段拷贝而非逐字符拼接；`parseJsonl()` 基于 `indexOf("\n")` 流式扫描（支持 `.jsonl` 与 `.ndjson`），截断大文件尾部半截行自动丢弃，非对象坏行记入 `TableData.invalidLines` 并展示 `id:table-invalid-lines`；列排序统一采用 `Intl.Collator`。`generateQuickLookUrl()` 仅对真实 `.pdf` 调用 `sips`（16 项有界 LRU + 同版本在途并发去重，驱逐自动 `revokeObjectURL`，临时 PNG 读完即删）。
    - `.html` 预览（`PreviewPane` `preview-webview`）：`javaScriptEnabled={false}`，并由 `withPreviewCsp()` 在页面最前（有 doctype 时紧跟其后）插入 CSP `<meta>`：`default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; form-action 'none'`。浏览器同时执行页面里所有 CSP，页面自己再写的 CSP 只能更严、不能放宽。所以本地 HTML 里引用的远程脚本、图片、样式表都不加载（不向外发请求），只显示文件本身。
-   - `video`（`.mp4`, `.mov`, `.m4v`, `.webm`）、`audio`（`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`）与 Quick Look 类（PDF、Office）在 `loadFile()` 中只调用 `fs.stat()` 获取字节数，按路径预览（`<Video src={filePath} />`、`sips`），绝不 `fs.readFile` 读入内存。
-   - 图片（`.png`, `.jpg`, `.gif`, `.webp`, `.avif`, `.svg`）通过 `fs.readFile` 构造 `URL.createObjectURL(new Blob([bytes], { type }))`，由 `nsh-js` 在 Rust 侧零拷贝读取 `Blob` 的 `Arc<[u8]>`。
+   - `video`（`.mp4`, `.mov`, `.m4v`, `.webm`）、`audio`（`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`）与 `.pdf`（`quicklook`）在 `loadFile()` 中只调用 `statDisk()` 获取字节数，按路径预览（`<Video src={filePath} />`、`sips`），绝不 `fs.readFile` 读入内存。
+   - 图片（`.png`, `.jpg`, `.gif`, `.webp`, `.avif`, `.svg`）通过 `fs.readFile` 构造 `URL.createObjectURL(new Blob([bytes], { type }))`，由 `ImageBody` 包裹在双向 `<Scroll>` 容器内支持 `25%–400%` 缩放平移与按当前主题明暗自适应命名的底衬切换（`resolveImageBackdrop`）。
    - 未知扩展名文件按前 4 KB 判定，含 `\0` 字节则归类为 `binary`，展示只读 4 KB Hex + ASCII 视图。
    - **文本解码与保存回写（`src/workspace.ts` `decodeUtf8` / `encodeUtf8` / `saveFileText`）**：文本按 UTF-8 严格解码（`TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`，开头的 BOM 先剥掉并记在 `LoadedFile.bom`）。解码失败（GBK、Latin-1 等）时用替换字符显示，但副本标为只读（`readOnly = "Not UTF-8 — opened read-only"`）：编辑器 `readOnly`，编辑区上方显示 `id:read-only-banner`，永远不写回。保存写入 UTF-8 字节，`bom` 为真时先写回 BOM。保存后由新字节重算派生数据：表格行、SVG 的 `blobUrl` 与尺寸；`diffPatch` 清空（`.diff`/`.patch` 文件除外，它就是正文），下次进入 Diff 时重新拉取，保存时正处于 Diff 的 Tab 立即重拉。不透明类型从不写回（见「状态机清单」#4）。
 
 ### 文件大小上限
 
-`src/workspace.ts` `readFileBytesAndSize`（I-017）：`MAX_EDITABLE_BYTES = 8 MiB`（`nsh 0.4.0` `fs.writeFile` 最多写 8 MiB，更大的文件本来也存不回去）。不超过上限的文件整读。超过上限的非图片文件不整读：先读前 4 KB（`BINARY_HEAD_BYTES`）判定，二进制只留这 4 KB 给 Hex 视图；文本读前 256 KiB（`LARGE_TEXT_HEAD_BYTES`）只读显示，`readOnly = "Larger than 8 MB — showing the first 256 KB, read-only"`（`id:read-only-banner`，永不写回）。`nsh 0.4.0` 的 `fs/promises` 没有部分读取，所以开头的字节由已授权的 `python3` 读出、以十六进制经 stdout 传回（`readFileHead`）。图片仍整读（`blob:` 需要全部字节；`fs.readFile` 超过 64 MiB 会失败，失败显示在 `id:open-error-banner`）。
+`src/workspace.ts` `readFileBytesFromDiskStat`（I-017）：`MAX_EDITABLE_BYTES = 8 MiB`（`nsh 0.4.0` `fs.writeFile` 最多写 8 MiB，更大的文件本来也存不回去）。不超过上限的文件整读。超过上限的非图片文件不整读：先读前 4 KB（`BINARY_HEAD_BYTES`）判定，二进制只留这 4 KB 给 Hex 视图；文本读前 256 KiB（`LARGE_TEXT_HEAD_BYTES`）只读显示，`readOnly = "Larger than 8 MB — showing the first 256 KB, read-only"`（`id:read-only-banner`，永不写回）。`nsh 0.4.0` 的 `fs/promises` 没有部分读取，所以开头的字节由已授权的 `python3` 读出、以十六进制经 stdout 传回（`readFileHead`）。图片仍整读（`blob:` 需要全部字节；`fs.readFile` 超过 64 MiB 会失败，失败显示在 `id:open-error-banner`）。
 
-2. **模式胶囊按钮显示规则（`App.tsx` `hasRichPreview`）**：
-   - 仅对具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）显示 `Preview` / `Code`（或 `Markdown`）切换按钮；当从左侧 `Changed` 列表以 `diff` 模式打开普通源码文件时，显示 `Diff` / `Code` 切换按钮；普通代码与二进制文件隐藏多余模式按钮。
-3. **Mermaid 离屏光栅化流水线（`src/mermaid.tsx`）**：
-   - 独立 `.mmd` / `.mermaid` 文件预览使用 `MermaidDiagramBlock`；Markdown 内的 ` ```mermaid ` 代码块由预览页在 WebView 内直接渲染为 SVG（见下条），两条路径共享 `buildMermaidConfig()` 生成的同一份 `mermaid.initialize` 配置，两条路径都用 `securityLevel: "strict"`（I-018 前独立 `.mmd` 用的是 `"loose"`：标签里的 HTML 与 `click` 回调会在渲染器 WebView 里执行）。
-   - `MermaidRendererHost` 挂载在窗口可视区外（`left: -10000, top: -10000`），**仅在 `requestMermaidRender()` 首次被调用时按需延迟初始化**（打开普通代码、无 Mermaid 的 Markdown、表格或图片时不启动 WebKit 进程、不加载 2.5 MB Mermaid bundle）；初始化时优先从本机 VS Code / Cursor / Antigravity 的 `xicilion.markdown-viewer-extension-*` 扩展提取离线 Mermaid bundle（只存在内存，见「术语与边界」），缺失时回退 CDN。每个渲染任务 20 秒无回复即以错误结束；只丢弃该任务等的那一代渲染器（见「状态机清单」#5）。`loadMermaidBundleJs()` 导出这份 bundle 提取逻辑供 Markdown 预览页复用。
-   - 渲染生成的 SVG 经 `inlineForeignObjects()` 将 HTML 标签转为原生 `<text><tspan>`（避免 `<canvas>` 污染断图），再按 2x Retina 缩放绘制到 Canvas 导出 PNG Base64，回传主线程转为 `blob:` URL 交由 `<Image />` 展示。结果缓存 `renderCache` 最多 24 张（`rememberRender`，最近用过的排最后），超出时删掉最久没用的一张并 `revokeObjectURL`。
-4. **Markdown WebView 渲染契约（`src/MarkdownPreview.tsx` + `src/markdownPage.ts` + `vendor/markdown/`）**：
-   - 渲染全部在 WebView（JSC）内完成，宿主只投递运行时与载荷并响应页面请求。`vendor/markdown/entry.mjs` 构建 markdown-it 15.0.3 管线（`html:true`、`linkify:true`、footnote / task-lists / CJK 安全去重 slug 的 anchor / GitHub alerts / highlight.js 11.12.0 common 子集 / KaTeX 0.19.1，`mermaid` 围栏保留为 `<pre class="mermaid">`），与 `page.mjs`（DOMPurify 消毒 + `window.__aed` 协议）一起经 `scripts/build-markdown-vendor.sh`（`bun install --frozen-lockfile` + `bun build --format iife`）打进 `src/markdownVendor.generated.ts`（已提交，`MARKDOWN_RUNTIME_JS` / `KATEX_CSS`（`url(fonts/*.woff2)` 全部内联为 `data:`、丢弃 woff/ttf 回退）/ `GITHUB_MARKDOWN_CSS` 自动明暗两变量版）。许可证见 `vendor/markdown/THIRD_PARTY_NOTICES.txt`。重建：`sh scripts/build-markdown-vendor.sh`。构建把 `entry.mjs + page.mjs + bun.lock` 的 sha256 前缀写成 `globalThis.AedMarkdown.buildId`（防 `dist/` 与生成文件漂移，测试断言 `MARKDOWN_RUNTIME_JS` 包含同一 buildId）。
-   - 页面壳层 `buildPreviewShellHtml()` 只含 `<meta charset>`、严格 CSP（`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: https:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`）、三个 `<style>` 块与空 `<main>`/`<nav>`，**不含任何 `<script>`**；运行时只在 `onLoad` 注入一次（`page.mjs` 顶部有 `!window.__aed` 安装守卫，重复注入不产生重复监听器），随后每次 `sendRender` 只发 `__aed.render(payload)`（绕过 HTML 解析器与 `script-src`，见踩坑记录）。
-   - 协议：宿主 `__aed.render({renderId, path, markdown, themeCss, scrollY, mermaidConfig})` / `__aed.setTheme` / `__aed.setImages` / `__aed.mermaidReady` / `__aed.mermaidUnavailable`；页面上行 `link`（非 `#` 链接）、`images`（非 `https:`/`data:` src 去重，≤200 条）、`scroll`（~200ms 节流）、`needMermaid`。`handlePreviewMessage` 在 `src/markdownPage.ts` 中纯函数化：外链仅 `http:`/`https:`/`mailto:`（大小写不敏感）走 `openUrl`，其余 scheme 一律 `none`；相对/绝对/`file://` 路径解码 `%XX`、剥 `#`/`?` 后相对 Markdown 文件目录解析并 `openFile`，`javascript:`/`data:`/`vbscript:`/`#` 锚点不动作；图片仅解析 `png jpg jpeg gif webp avif svg bmp ico` 本地路径，宿主按 `classify.ts` MIME 表读取并以 `data:` 回传（单图 20 MB 上限，失败回 `null` 加 `aed-img-missing`）。
-   - 消毒：DOMPurify 默认配置（保留 `id`/`class`、任务列表 `input[type=checkbox][disabled]`、KaTeX MathML/SVG、`<details>/<summary>`），默认即禁 `<style>` 与全部 `on*` 属性。
-   - TOC 与栏宽：TOC 仅当视口 ≥1120px 且 ≥2 个 H1–H3 时显示；显示时页面加 `body.aed-has-toc`（`padding-right: 276px` = 220 TOC + 24 右距 + 32 间隙），阅读栏在 TOC 左侧空间内居中，绝不重叠。
-   - Mermaid 尺寸：`fitMermaidSvgs()` 按 viewBox 取天然宽，`scale = clamp(colW/natW, 0.66, 1)`；`height:auto` 消除上下留白；`scale×natW > colW` 时容器 `overflow-x:auto` 横向滚动而非继续缩小。每次渲染与 `resize` 后重算。预览内 Mermaid 用正文 UI 字体（`buildMermaidConfig(theme, "")`）。
-   - Keep-alive：`markdownMounted` 信号一旦置真不再卸载——切到非 Markdown 视图时外层 `display:none` 隐藏而非卸载，页面与滚动状态保留；切换 Markdown 文件复用同一 WebView 发新 `render`；主题/字体变化只发 `setTheme` 不重解析；滚动记忆为进程内 `Map<path, y>`（无 `Storage` 键）。
-   - 调试通道：宿主事件 `aed.preview.eval` 注入任意页面 JS、页面 `__dbg:` 前缀消息经 `host.post("aedPreviewDebug")` 回传，仅真机测试使用，打包宿主不发送。
-   - `nsh 0.4.0` 无头 `nsh test` 不执行 WebView 页面 JS（见踩坑记录），所以页面行为只能用 `--target macos` 真机窗口验证。这类测试用系统真实输入，会占用用户的鼠标和键盘，只在用户同意时跑；脚本不入库。
+2. **能力驱动的模式分段控件（`src/workspaceSession.ts` `computeTabModeItems` + `src/classify.ts` `VIEWER_SPECS`）**：
+   - 模式胶囊（`SegmentedControl`：`id:mode-preview` / `id:mode-source` / `id:mode-diff`）置于 `TabStrip` 右侧固定槽位（已移除冗余 `28pt` `EditorBreadcrumbBar`）。
+   - 显示集合完全由 `VIEWER_SPECS[kind].modes({ mimeType, editable, hasDiff })` 决定（其中 `hasDiff = Boolean(gitStatus || diffPatch || dirty)`）：具备富预览能力的格式（`markdown`、`mermaid`、`table`、`html`、`image/svg+xml`）在有变更时同时提供 `[Preview | Markdown/Code | Diff]`；从 `Changed` 打开或编辑过的源码文件始终保留 `[Code | Diff]`，切到 `Code` 时 `[Diff]` 绝不消失；切到 `Diff` 且含未保存修改时，`resolveDiffInputs` 将实时缓冲区与 `HEAD` 基线（由 `reconstructBaseFromPatch` 反推或回退 `savedText`）直接对比。
+3. **统一沙箱矢量预览契约（`src/MarkdownPreview.tsx` + `src/mermaid.tsx` + `src/markdownPage.ts` + `vendor/markdown/`）**：
+   - `.md`（`id:preview-markdown`）与独立 `.mmd` / `.mermaid`（`id:preview-mermaid`）共享同一个 keep-alive 沙箱 `WebView`（`SandboxPreviewWebView`），彻底退役旧离屏光栅化 `WebView`、`<canvas>` 2x PNG 导出与任何远程 CDN 回退 URL。
+   - `vendor/markdown/entry.mjs` 构建 markdown-it 15.0.3 管线（`html:true`、`linkify:true`、footnote / task-lists / CJK 安全去重 slug 的 anchor / GitHub alerts / highlight.js 11.12.0 common 子集 / KaTeX 0.19.1，`mermaid` 围栏保留为 `<pre class="mermaid">`），与 `page.mjs`（DOMPurify 消毒 + `window.__aed` 协议，同时支持 `render` 与独立图表 `renderDiagram`）经 `scripts/build-markdown-vendor.sh` 打进 `src/markdownVendor.generated.ts`（含 `buildId` 防漂移校验）。
+   - 页面壳层 `buildPreviewShellHtml()` 延迟生成并缓存，只含严格 CSP（`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: https:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`）与样式，**0 个 `<script>`**；首帧由 `buildPreloadBgScript(bg)` 预涂主题背景色消除白闪，运行时在 `onLoad` 经 `injectJavaScript` 注入一次。
+   - 协议：宿主下发 `__aed.render(...)`（Markdown）或 `__aed.renderDiagram({renderId, path, code, themeCss, mermaidConfig})`（独立 `.mmd`，`securityLevel: "strict"`）、`__aed.setTheme`、`__aed.setImages`、`__aed.mermaidReady`、`__aed.mermaidUnavailable` 及独立图表矢量缩放 `formatDiagramZoomScript(zoom)`；页面上行 `link`、`images`、`scroll`、`needMermaid`、`diagramRendered`、`copySource`。独立 `.mmd` 叠加 `DiagramViewportPill`（图表类型标签、`50%–250%` 矢量缩放与复制源码反馈）及 `DiagramErrorBanner`。
+   - 本地图片由 `readImageDataUrl()` 按 `${path}\0${mtimeMs}:${size}` 缓存在 32 项有界 LRU 中（上限 20 MB），Markdown 编辑重渲时 $O(1)$ 命中内存而不重复读盘编码；滚动位置保存在 64 项有界 LRU `scrollMemory`。
+   - TOC 仅当视口 ≥1120px 且 ≥2 个 H1–H3 时显示（`body.aed-has-toc`）；`nsh 0.4.0` 无头 `nsh test` 不执行 WebView 页面 JS，真机 `--target macos` 仅在用户明确要求时运行。
 
 ---
 
@@ -233,15 +227,24 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 
 | 规则 | 做法 | 代码位置 |
 |---|---|---|
-| 色面分区，不画线 | 标题栏（`32pt`）、标签栏（`36pt`）、面包屑栏（`28pt`）、侧栏（`240pt`）、编辑区、终端栏（`32pt`）、状态栏（`24pt`）与 Mermaid 容器全部对齐 `4px` 网格并靠底色深浅（`background` / `sidebar` / `card`）区分；不加 `border-b` / `border-t` / 标签间竖线。浮层（下拉、命令面板、设置弹窗、底部浮动控制条）用阴影，不用描边 | `App.tsx`、`src/Sidebar.tsx`、`src/TerminalPane.tsx`、`src/PreviewPane.tsx`、`src/mermaid.tsx` |
-| 只有一个强调色 | `ui.accent`（信号红）只标「当前」：编辑器与终端活动标签顶部 `2px` 条、未保存圆点、光标、拖拽分隔条、Recent 序号、音频图标与选中勾号。文件类型徽章一律跟随 `ui.mutedForeground`，不按扩展名上彩虹色；Mermaid 渲染器直接注入当前主题 `ui` 色板，消除默认黄/紫底色 | `TabItem`、`TermTabChip`、`src/icons.tsx` `FileBadge`、`src/mermaid.tsx` |
-| 状态栏是一块只读实色 | `ui.statusBar` / `ui.statusBarForeground`（Industrial Paper 上为墨色底、纸色字）；未设置时回退 `sidebar` / `mutedForeground`。左侧仅在当前工作区确属 Git 仓库时显示分支名，右侧仅显示当前文件只读元数据（路径、大小、行列或媒体尺寸），不放刷新或主题/字体切换按钮以免在终端输入区与窗口底边误触 | `StatusBar` |
-| 欢迎页是一张包豪斯海报，画的是 Aed 编辑的东西 | 左上只放文字；分栏线右侧把一小段代码（`POSTER_CODE`，一个抽象的 `open(path)`）画成字符网格上的实心色条：每个 token 一根横条，长度与缩进按字符格计（一格宽 = `min((w − split) / 17, (h − 2·pad) / 15)`，行高一格、行距一格，末行落在下边距），超长的行直接伸出右边缘。语法高亮即三原色：关键字红、类型蓝、字符串黄、标识符墨色。第 4–6 行背后是一块石色（`ui.border`）选区，从该行缩进起向右铺满；红色光标是选区首行的左边缘——全图唯一的竖向元素。只用矩形，没有曲线和装饰线。红黄蓝三原色写死在 `POSTER_PRIMARIES`，按主题 `appearance` 只分浅/深两套，不跟随 `ui.accent`（否则蓝色强调色主题会出现两个蓝色）；背景与墨色仍取主题 `background` / `foreground`。不放「Open Folder」文字或按钮以免破坏海报感或误触系统选目录弹窗。标题 `Aed` 采用 `Helvetica Neue` 粗体、紧字距单行展示；标签采用 Sentence case（`Recent`）。窗口最小尺寸锁定为 `760×520pt`（`MIN_WINDOW_WIDTH` / `MIN_WINDOW_HEIGHT` + AppKit `NSWindow.minSize`），`posterGrid()` 对画布尺寸施加 `520×380pt` 结构下限并按列宽与顶栏净空约束字号，保证标题绝不拆词折行、文字不压到色块上 | `App.tsx` `PosterFields` / `WelcomePanel`、`scripts/finder_bridge.m` |
-| 颜色跟随主题重绘 | `Canvas` 只在 `draw` 内读到的 signal 变化时重绘，所以主题色必须在 `draw` 里读（`Icon` 的 `tint` 与 `AppLogo` 的 `ink` / `accent` 均支持传 accessor） | `src/icons.tsx` `Icon` / `AppLogo` |
-| 预览阅读排版与 TOC 强调 | Markdown 预览遵循同一套规则：阅读栏 `860px` 居中、4px 网格、无阴影/渐变；标题为 `foreground` 600 无彩色，标题下与表格用 `--border` 发丝线；行内代码 `card` 底、代码块 `sidebar` 底 + `editorFont`；引用/GFM Alerts 用 `2px` 左侧条（note→`syntax.property`、tip→`syntax.string`、important→`syntax.type`、warning→`syntax.number`、caution→`ui.accent`）；链接下划线用 `border`，悬停才升 `accent`；TOC（视口 ≥1120px 且 ≥2 个 H1–H3 才显示）唯一强调用法是当前小节 `foreground` + `2px accent` 左条 | `src/markdownPage.ts` `buildPreviewThemeCss` |
-| 只有图标的按钮有名字 | 每个只画图标的按钮都设 `accessibilityLabel`（读屏与测试的 `label:` 选择器用它）：Tab 关闭「Close <文件名>」、标题栏「Toggle sidebar」/「Toggle terminal」、侧栏「Show all files」/「Show changed files」、偏好设置「Close preferences」、图片 / PDF / Mermaid 缩放「Zoom out」/「Zoom in」、终端「New terminal tab」。新加图标按钮时同时补上并加进 `App.test.tsx` › every icon-only button has an accessible name。悬停提示（`tooltip`）尚未加，待视觉方向确定后统一做 | `App.tsx`、`src/Sidebar.tsx`、`src/PreviewPane.tsx`、`src/mermaid.tsx`、`src/TerminalPane.tsx` |
+| 色面分区，对齐顶栏 | 标题栏（`≥32pt`）、侧栏顶栏与编辑区 `TabStrip`（统一 `36pt`，`h-9`）、单槽位优先级 `NoticeBanner`（`36pt`）、侧栏（默认 `240pt`）、终端 `TabStrip`（`32pt`，`h-8`）与状态栏（`24pt`）全部对齐 `4px` 网格并靠底色深浅（`background` / `sidebar` / `card` / `statusBar`）区分；移除冗余 `28pt` 面包屑栏，同名打开文件由 `TabStrip` 自动补灰字父目录前缀（`web/index.ts`）。浮层（下拉、命令面板、设置弹窗、`ViewportPill`）用阴影承载 | `App.tsx`、`src/ui.tsx`、`src/Sidebar.tsx`、`src/TerminalPane.tsx`、`src/PreviewPane.tsx` |
+| 只有一个强调色 | `ui.accent`（信号红，配 `ui.accentForeground` 保证对比度 ≥ 4.5:1）只标「当前」：编辑器与终端活动标签顶部 `2px` 条、未保存圆点、光标、激活拖拽分隔条（悬停 `accent+b3`、拖拽 `accent`、闲置 `border`）、Recent 序号与选中主按钮。文件类型徽章一律跟随单色 `muted-foreground`，按 `badgeForPath`（`VIEWER_SPECS` + 真实扩展名 `extensionOf`）派生；Mermaid 直接注入当前主题 `ui` 色板 | `src/ui.tsx` `TabStrip`、`App.tsx` `renderSplitHandle`、`src/icons.tsx` `FileBadge`、`src/mermaid.tsx` |
+| 状态栏是一块只读实色 | 每套主题均定义专属 `ui.statusBar` / `ui.statusBarForeground`（与相邻 `sidebar` 终端底面清晰分层）。左侧仅在当前工作区确属 Git 仓库时显示分支名，右侧仅显示当前文件只读元数据（`loose` 模式显示 `shortenHomePath` 完整相对家目录路径；行列仅在 `editor` 视图显示；图片媒体尺寸仅在状态栏显示一份，不在 `ViewportPill` 重复） | `App.tsx` `StatusBar`、`src/workspaceSession.ts` `buildStatusSegments` |
+| 欢迎页是一张包豪斯海报，画的是 Aed 编辑的东西 | 左上只放文字；分栏线右侧把一小段代码（`POSTER_CODE`，一个抽象的 `open(path)`）画成字符网格上的实心色条：关键字红、类型蓝、字符串黄、标识符墨色；第 4–6 行背后是一块石色（`ui.border`）选区，红色光标是选区首行左边缘。不放「Open Folder」按钮防误触；当无 `Recent` 历史记录时展示静默快捷键提示（`⌘O Open folder · ⌘J Terminal`），且冷启动点顶栏 Quick Open 提供 `Open Folder…` 入口。窗口最小尺寸锁定 `760×520pt` | `src/WelcomePanel.tsx`、`src/commands.ts`、`scripts/finder_bridge.m` |
+| 颜色跟随主题实时同步 | `Icon` 采用统一 `20×20` 视口与 `opticalStrokeWidth(size, 1.35)` 恒定屏幕线宽，并在 `Canvas` `draw` 内读取颜色 accessor；切换任一主题时由 `syncThemeTokens(theme)` 经 `aed/native` `setTokens` 实时更新 NSH 全局语义 token | `src/icons.tsx`、`src/themes.ts` `syncThemeTokens`、`native/src/lib.rs` |
+| 预览阅读排版与 TOC 强调 | Markdown 预览遵循同一套规则：阅读栏 `860px` 居中、4px 网格、无阴影/渐变；标题为 `foreground` 600 无彩色，标题下与表格用 `--border` 发丝线；行内代码 `card` 底、代码块 `sidebar` 底 + `editorFont`；引用/GFM Alerts 用 `2px` 左侧条；TOC（视口 ≥1120px 且 ≥2 个 H1–H3 才显示）唯一强调用法是当前小节 `foreground` + `2px accent` 左条 | `src/markdownPage.ts` `buildPreviewThemeCss` |
+| 只有图标的按钮有名字 | 每个只画图标的按钮都通过 `IconButton` 强制要求 `accessibilityLabel`（含 `hitSlop={4}` 与 `focus-visible` 焦点环）：Tab 关闭「Close <文件名>」、标题栏「Toggle sidebar」/「Toggle terminal」、侧栏「Show all files」/「Show changed files」、查找栏「Previous match」/「Next match」/「Close find」、偏好设置「Close preferences」、缩放「Zoom out」/「Zoom in」、终端「New terminal tab」与分栏手柄 `handleAccessibilityLabel` | `src/ui.tsx` `IconButton`、`App.tsx`、`src/Sidebar.tsx`、`src/PreviewPane.tsx`、`src/TerminalPane.tsx` |
 
-**为什么 `nsh.json` 的 `theme.cssVars` 也是 Industrial**：`nsh 0.4.0` 的 TS 应用不能在运行时改 design tokens（`set_tokens` 只在 Rust 侧暴露，`~/.nsh/source/crates/nsh-js/src/env.rs`），`bg-primary`、`text-muted-foreground` 等类名永远取 `nsh.json` 里的静态值。以前这里是中性灰 + 白色 `primary`，所以主题切到暖色时出现「黑白两套颜色」。现在静态 tokens 与默认主题同色；需要跟随其它主题的界面元素，用 `style` 读 `theme.ui.*`，不用 token 类名。
+**运行时设计 Token 同步（`syncThemeTokens`）与 `nsh.json` 默认值**：`native/src/lib.rs` 将宿主运行时的语义 token 更新能力导出为 `aed/native` `setTokens`，`src/themes.ts` `syncThemeTokens(theme)` 在切换全部 8 套主题时实时同步 `background`、`foreground`、`card`、`popover`、`primary`、`primary-foreground`（`accentForeground`）、`secondary`、`muted`、`muted-foreground`、`accent`、`border`、`input`、`ring` 与 `sidebar` 系列 token，使 `bg-background`、`bg-sidebar`、`bg-primary`、`text-primary-foreground` 等语义类名在任意主题下保持一致高对比度；`nsh.json` 的静态 `theme.cssVars` 与默认主题 `industrial-paper` / `industrial-carbon` 保持一致以保证首帧零闪烁。
+
+### 动效清单（Motion Inventory）
+
+| 触发交互 | 动效机制与曲线 | 辅助功能降级（Reduced Motion） | 代码位置 |
+|---|---|---|---|
+| 侧栏 / 终端面板收展（`⌘B` / `⌘J` / 顶栏按钮） | `LayoutAnimation.configureNext({ duration: 180, update: { type: "spring", springDamping: 0.88 } })`（轻微欠阻尼弹簧，零回弹过冲） | `if (!reduceMotion())` 守卫开启，开启减弱动态效果时瞬时切换 | `src/workspaceSession.ts` `animatePanelToggle` |
+| 模态弹层开关（命令面板 / 偏好设置 / 未保存拦截） | `<Dialog animation="fade">` 短淡入淡出，保持挂载（keep-alive）不销毁内部状态 | 由 `nsh/base` `Dialog` 原生遵循系统减弱动态效果设置 | `src/ui.tsx` `ModalShell` |
+| 文件树文件夹展开箭头 | 单个 `<Icon name="chevron-right">` 通过 `rotate-0` ↔ `rotate-90`（`150ms`）原地旋转，不卸载重挂 `<Canvas>` | `motion-reduce:transition-none` 立即切换角度 | `src/Sidebar.tsx` |
+| 图表源码复制反馈 | `Copied` 文案维持 `1500ms` 后复位，定时器在卸载或再次点击时清理 | 纯文本状态切换，无位移闪烁 | `src/mermaid.tsx` `createCopyFeedback` |
 
 ---
 
@@ -312,7 +315,7 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 - **xterm.js WebView + `python3` `pty.fork()` 帧协议桥（I-019 到终端改原生之间）**：能用，但每个键要经过页面 JS → `postMessage` → TSX → base64 帧 → Python 进程 → PTY，输出再原路返回，打字有可感的延迟；还要维护 380 KB 的 vendored 运行时、页面协议与回放缓冲。改为 libghostty-vt + 原生视图，键在 Rust 里直接写 PTY。代价是混合模板：首次 `nsh check` 编译 crate 约 68 秒（早先「混合模板太慢」的判断按此改写，增量构建在 1 秒内），并多一个要下载校验的 27 MB 静态库。
 - **使用 `qlmanage` + 底部外部打开操作栏预览 PDF**：`qlmanage -t` 在部分系统环境下会弹窗或阻塞，且底部常驻 `Open in Preview` 操作栏喧宾夺主；已改为直接调用 macOS 内置 `sips -Z 1800 -s format png` 生成 2x Retina 预览图，并以暖白纸张底衬（`#f7f4ee`）+ 缩放控制条承载，避免透明底黑字在深色主题下不可读。
 - **在底部 24pt 状态栏放置刷新图标与主题/字体切换按钮**：在非 Git 目录下左下角会留下孤立无文字的 `↻` 图标（语义不明），而右下角的主题下拉、字体下拉与单点循环切主题按钮紧贴终端输入行与窗口缩放边缘，极易误触切走配色或弹出大菜单；现 `StatusBar` 统一改为纯只读状态展示，主题/字体配置与工作区刷新统一走 `⌘,`（Preferences）、应用菜单与 `⌘⇧P` 命令面板。
-- **在 Markdown 预览中用字符画（`mmd2txt`）替代矢量图**：终端适合字符画，但桌面 GUI 编辑器用户期望高分辨率图表；因此采用隐藏 `WebView` + SVG `<foreignObject>` 内联 + 2x Retina PNG 光栅化方案。
+- **在 Markdown 预览中用字符画（`mmd2txt`）或双 WebView 离屏 PNG 光栅化渲染 Mermaid**：字符画不满足桌面编辑器矢量缩放需求；而额外挂载第 2 个离屏 `1280×900` `WebView` 把 SVG 光栅化为 2x PNG 会多占一个 WebKit 进程、放大后模糊且长图易被 `<canvas>` 裁切。现已统一复用 `MarkdownPreview` 的单个沙箱 `WebView` 直接渲染原生矢量 SVG 并支持 `50%–250%` 无损缩放。
 - **原生 `TextView` 重新排版做 Markdown 预览**：需从零实现阅读排版、语法高亮、TOC、链接路由与图片加载，工作量与成熟库差距大；改用 WebView + markdown-it 生态。
 - **在宿主 QuickJS 上渲染 Markdown 再下发 HTML**：实测同一 60 KB 合成文档 QuickJS 中位 283 ms vs WebView JSC 52 ms（快 ~5.5×），且 608 KB 运行时的解析/求值占住应用线程；渲染改在页面侧完成，宿主只做载荷与文件/URL 服务。
 - **直接复用 xicilion markdown-viewer 的成品 bundle**：该扩展为 GPLv3，不能随 Aed 分发。Aed 只沿用旧逻辑：运行时用 `loadMermaidBundleJs()` 读取用户本机已装扩展里的 Mermaid bundle，自己不打包它。
@@ -326,10 +329,11 @@ Aed 的行为由下面 14 个状态机决定。「显式」表示状态与转移
 
 | 检查项 | 命令 | 基准指标（macOS arm64） |
 |---|---|---|
-| 类型检查 | `nsh check` | 编译 `native/` crate 加 TS 类型检查：首次约 68s，增量约 1s（`nsh 0.4.0`），0 errors |
-| 纯状态机单测 | `nsh test src/session.test.ts` | 8 项纯逻辑单测（`session.ts` + `saving.ts`），热缓存约 2.2s（JS 执行 <100ms） |
+| 静态检查与构建 | `oxlint && nsh check && nsh build` | `oxlint` 0 warnings/errors（~30ms）；编译 `native/` crate 加 TS 检查增量 <0.5s（首次约 68s），字节码构建 ~60ms |
+| 分层单测与原语契约 | `nsh test src/<module>.test.ts(x)` | `target`、`classify`、`themes`、`session`、`tabs`、`workspace`、`ui`、`mermaid`、`markdownPage`、`PreviewPane` 等纯逻辑与无头原语单测，单套件热缓存 ~2s |
+| 代码复杂度与重复度 | `ub crapper --no-coverage && ub dryer` | 全仓 TS/TSX 函数圈复杂度 `CC ≤ 9`（`App.tsx` 258 行），`dryer` 0 处重复候选 |
 | 原生桥接与脚本契约 | `sh scripts/test-native-bridge.sh` | `shellcheck` + `launcher.c` / `finder_bridge.m` 编译与隔离缓存目录实测（`file://#L` 编码、`foo:10:20` 无歧义剥离、符号链接安全、`home`/`loose` 窗口复用），约 2s |
-| 单测与桌面无头 E2E | `nsh test --trace` | `App.test.tsx` 86 项热缓存 38.4s（由 105.1s 提速 2.7×：共享 `TerminalSession` `/bin/sh` 替代 24 次额外窗口冷启动，手动 `clock` 替代真实磁盘轮询 sleep），加 `src/*.test.ts` 与 Rust `cargo test` |
+| 单测与桌面无头 E2E | `nsh test App.test.tsx` / `nsh test --trace` | `App.test.tsx` 86 项热缓存 ~37.0s（含跨 Tab `⌘Z` 撤销隔离、冲突转缺失单横幅、`[Diff]` 胶囊持久与实时对比、`FindBar` `1/N` 跳转），加 `src/*.test.*` 与 Rust `cargo test` |
 | libghostty-vt 固定版本 | `sh scripts/fetch-ghostty-vt.sh` | 1.0.1 zip 与 `libghostty-vt.a`（macos-arm64_x86_64）SHA-256 都对上才拷入；已有且哈希对时不下载 |
 | 桌面真机窗口测试 | `nsh test App.tsx --target macos` | AppKit 真机窗口逐步交互验证 |
 | 仅构建与签名校验 | `sh scripts/package-macos.sh --build-only --skip-tests` | 产出 `.nsh/out/Aed.app`、注入原生桥接、归一化 `minos=11.0` 并通过 `codesign --verify --deep --strict`，不写 `/Applications` |
