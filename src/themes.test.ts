@@ -3,9 +3,11 @@ import {
   buildEditorThemeStyles,
   buildThemeTokens,
   computeSyntaxDecorations,
+  decodeNativeSyntaxQuads,
   DEFAULT_THEME_ID,
   EDITOR_THEMES,
   getThemeById,
+  highlightSyntaxAsync,
   syncThemeTokens,
 } from "./themes";
 
@@ -57,7 +59,7 @@ describe("L0.4 unified theme tokens & WCAG contrast", () => {
     }
   });
 
-  test("all 8 themes align syntaxClasses to exact theme.syntax hex colors", () => {
+  test("all 8 themes align syntaxClasses to exact theme.syntax hex colors with regular 400 weight and distinct function/type mineral hues", () => {
     const keys = [
       "keyword",
       "string",
@@ -74,8 +76,41 @@ describe("L0.4 unified theme tokens & WCAG contrast", () => {
     for (const theme of EDITOR_THEMES) {
       for (const k of keys) {
         expect(theme.syntaxClasses[k]).toContain(`text-[${theme.syntax[k].toLowerCase()}]`);
+        expect(theme.syntaxClasses[k]).not.toContain("font-semibold");
+        expect(theme.syntaxClasses[k]).not.toContain("font-bold");
       }
+      expect(theme.syntaxClasses.comment).toContain("italic");
+      expect(theme.syntax.function).not.toBe(theme.ui.foreground);
+      expect(theme.syntax.type).not.toBe(theme.ui.foreground);
     }
+
+    const carbon = getThemeById("industrial-carbon");
+    expect(carbon.syntax).toEqual({
+      keyword: "#e66850",
+      function: "#dfbe7d",
+      type: "#8ab4c9",
+      string: "#a9be82",
+      number: "#e0a96d",
+      constant: "#d98a6c",
+      property: "#b8c4cf",
+      comment: "#706b62",
+      operator: "#948e82",
+      tag: "#e66850",
+    });
+
+    const paper = getThemeById("industrial-paper");
+    expect(paper.syntax).toEqual({
+      keyword: "#bf3219",
+      function: "#7c4f15",
+      type: "#24527a",
+      string: "#3f5e2a",
+      number: "#9e4710",
+      constant: "#9e4710",
+      property: "#38586e",
+      comment: "#857e72",
+      operator: "#6d685f",
+      tag: "#bf3219",
+    });
   });
 
   test("buildThemeTokens maps semantic NSH tokens and syncThemeTokens no-ops safely headless", async () => {
@@ -161,13 +196,12 @@ describe("L0.4 2400-line bounded syntax cache, inline style emission & zero-allo
     expect(first.length).toBeGreaterThan(4000);
     expect(first.length).toBeLessThanOrEqual(12_000);
 
-    // Lines well past the old 600-line ceiling keep exact theme syntax highlighting.
+    // Lines well past the old 600-line ceiling keep exact theme syntax highlighting at regular 400 weight.
     const lateLineDeco = first.find((d) => d.range.start.line >= 1800 && d.token === "keyword");
     expect(lateLineDeco).toBeDefined();
     expect(lateLineDeco?.class).toContain(`text-[${tokyo.syntax.keyword}]`);
     expect(lateLineDeco?.style).toEqual({
       color: tokyo.syntax.keyword,
-      fontWeight: "600",
     });
 
     const commentDeco = first.find((d) => d.range.start.line >= 1800 && d.token === "comment");
@@ -208,5 +242,80 @@ describe("L0.4 2400-line bounded syntax cache, inline style emission & zero-allo
 
     const stdDeco = decos.find((d) => d.range.start.line === 1 && d.range.start.column === 8);
     expect(stdDeco).toBeUndefined();
+  });
+
+  test("synchronous Python fallback colors @decorators, multi-line triple-quoted docstrings, cls/self, and else:/try: keywords without misclassifying colons as properties", () => {
+    const carbon = getThemeById("industrial-carbon");
+    const py = [
+      "@dataclass",
+      "class User:",
+      '    """Docstring line 1',
+      '    with in for and or not inside."""',
+      "    def greet(cls, count: int = 1):",
+      "        if count:",
+      "            try:",
+      "                return cls",
+      "            finally:",
+      "                pass",
+      "        else:",
+      '            return "ok"',
+    ].join("\n");
+
+    const decos = computeSyntaxDecorations(py, "python", carbon);
+
+    // @dataclass decorator is colored as function.
+    const decAt = decos.find((d) => d.range.start.line === 0 && d.range.start.column === 0);
+    expect(decAt?.style).toEqual({ color: carbon.syntax.function });
+
+    // Multi-line docstring lines 2 & 3 stay unified italic comment (no leaked red keywords inside).
+    const docKeywords = decos.filter(
+      (d) => (d.range.start.line === 2 || d.range.start.line === 3) && d.token === "keyword"
+    );
+    expect(docKeywords).toHaveLength(0);
+    const docLine2 = decos.find((d) => d.range.start.line === 2);
+    expect(docLine2?.token).toBe("comment");
+
+    // `try:`, `finally:`, `else:` are keywords, and `count` in `if count:` / `count: int` is never miscolored as property (`attr`).
+    const tryDeco = decos.find((d) => d.range.start.line === 6);
+    expect(tryDeco?.token).toBe("keyword");
+    const finallyDeco = decos.find((d) => d.range.start.line === 8);
+    expect(finallyDeco?.token).toBe("keyword");
+    const elseDeco = decos.find((d) => d.range.start.line === 10);
+    expect(elseDeco?.token).toBe("keyword");
+    const ifLineProps = decos.filter((d) => d.range.start.line === 5 && d.token === "attr");
+    expect(ifLineProps).toHaveLength(0);
+  });
+
+  test("decodeNativeSyntaxQuads maps all 10 TextMate roles to crisp 400-weight styles and italic comments, and highlightSyntaxAsync falls back cleanly headless", async () => {
+    const paper = getThemeById("industrial-paper");
+    // Roles 1..=10 on line 0..9
+    const quads = [
+      0, 0, 10, 1, // comment (italic)
+      1, 0, 3, 2,  // keyword
+      2, 4, 9, 3,  // string
+      3, 2, 5, 4,  // number
+      4, 0, 5, 5,  // function
+      5, 0, 4, 6,  // type
+      6, 0, 4, 7,  // constant
+      7, 0, 4, 8,  // property
+      8, 0, 2, 9,  // operator
+      9, 0, 4, 10, // tag
+    ];
+    const decoded = decodeNativeSyntaxQuads(quads, paper);
+    expect(decoded).toHaveLength(10);
+    expect(decoded[0].style).toEqual({ color: paper.syntax.comment, fontStyle: "italic" });
+    expect(decoded[1].style).toEqual({ color: paper.syntax.keyword });
+    expect(decoded[2].style).toEqual({ color: paper.syntax.string });
+    expect(decoded[3].style).toEqual({ color: paper.syntax.number });
+    expect(decoded[4].style).toEqual({ color: paper.syntax.function });
+    expect(decoded[5].style).toEqual({ color: paper.syntax.type });
+    expect(decoded[6].style).toEqual({ color: paper.syntax.constant });
+    expect(decoded[7].style).toEqual({ color: paper.syntax.property });
+    expect(decoded[8].style).toEqual({ color: paper.syntax.operator });
+    expect(decoded[9].style).toEqual({ color: paper.syntax.tag });
+
+    // Without a mounted Core surface, highlightSyntaxAsync degrades gracefully to sync decorations.
+    const fallback = await highlightSyntaxAsync("def run():\n    return True\n", "python", paper);
+    expect(fallback.length).toBeGreaterThanOrEqual(3);
   });
 });

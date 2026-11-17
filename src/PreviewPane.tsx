@@ -25,6 +25,7 @@ import {
   type DataTableStyles,
   type DiffLayout,
   type EditorCommand,
+  type EditorDecoration,
   type EditorRef,
   type EditorSearchResult,
 } from "nsh/base";
@@ -36,6 +37,7 @@ import {
   buildEditorThemeStyles,
   computeSyntaxDecorations,
   EDITOR_THEMES,
+  highlightSyntaxAsync,
   type EditorTheme,
 } from "./themes";
 import { createZoom, IconButton, SurfaceButton, ViewportPill } from "./ui";
@@ -322,13 +324,46 @@ function DiffBody(props: {
   );
 }
 
+const INERT_ANCHOR_DECO: EditorDecoration = {
+  range: { start: { line: 0, column: 0 }, end: { line: 0, column: 0 } },
+};
+
+/**
+ * Shift decoration item indices by 1 on alternating updates so `nsh-base` 0.4.0 `RowContent`
+ * (`PartialEq` over `decorations: Vec<usize>`) refreshes span styles in a single atomic frame
+ * without ever flashing `[]`.
+ */
+function stampDecorations(decos: EditorDecoration[], odd: boolean): EditorDecoration[] {
+  return odd && decos.length > 0 ? [INERT_ANCHOR_DECO, ...decos] : decos;
+}
+
 function bindEditorDecorationEffect(
   file: Accessor<LoadedFile>,
   theme: Accessor<EditorTheme>,
-  decorations: Signal<ReturnType<typeof computeSyntaxDecorations>>,
+  decorations: Signal<EditorDecoration[]>,
 ): void {
-  let lastTheme = untracked(() => theme().id);
-  let lastText = untracked(() => file().text);
+  let lastTheme = "";
+  let lastText = "";
+  let initialized = false;
+  let reqSeq = 0;
+  let odd = false;
+  let alive = true;
+  cleanup(() => {
+    alive = false;
+    reqSeq += 1;
+  });
+
+  const applyDecos = (next: EditorDecoration[]) => {
+    odd = !odd;
+    decorations.set(stampDecorations(next, odd));
+  };
+
+  const upgradeAsync = (text: string, lang: string, curTheme: EditorTheme, cacheKey: string) => {
+    const seq = (reqSeq += 1);
+    void highlightSyntaxAsync(text, lang, curTheme, cacheKey).then((next) => {
+      if (alive && seq === reqSeq) applyDecos(next);
+    });
+  };
 
   effect(() => {
     const curFile = file();
@@ -336,22 +371,26 @@ function bindEditorDecorationEffect(
     const text = curFile.text;
     const lang = curFile.classification.language;
     const cacheKey = `${curFile.path}\0${curTheme.id}`;
+    if (!initialized) {
+      initialized = true;
+      lastTheme = curTheme.id;
+      lastText = text;
+      upgradeAsync(text, lang, curTheme, cacheKey);
+      return;
+    }
     if (curTheme.id !== lastTheme) {
       lastTheme = curTheme.id;
       lastText = text;
-      // Flush `[]` for one frame first: `nsh-base` 0.4.0 `RowContent` compares decoration
-      // index vectors (`Vec<usize>`), so replacing same-range decorations in one step
-      // would keep `old == new` and leave stale theme colors on visible spans.
-      decorations.set([]);
-      const flushTimer = setTimeout(() => {
-        decorations.set(computeSyntaxDecorations(text, lang, curTheme, cacheKey));
-      }, 0);
-      return () => clearTimeout(flushTimer);
+      reqSeq += 1;
+      applyDecos(computeSyntaxDecorations(text, lang, curTheme, cacheKey));
+      upgradeAsync(text, lang, curTheme, cacheKey);
+      return;
     }
     if (text === lastText) return;
+    reqSeq += 1;
     const timer = setTimeout(() => {
       lastText = text;
-      decorations.set(computeSyntaxDecorations(text, lang, curTheme, cacheKey));
+      upgradeAsync(text, lang, curTheme, cacheKey);
     }, 16);
     return () => clearTimeout(timer);
   });
@@ -511,7 +550,7 @@ function EditorBody(props: {
       lineNumbers
       softWrap={layout().softWrap}
       scrollBeyondLastLine={layout().scrollBeyondLastLine}
-      highlighting
+      highlighting={false}
       autoClose
       autoIndent
       activeLine
@@ -853,7 +892,7 @@ function resolvePaneFontStyle(paneProps: PreviewPaneProps): {
 } {
   return {
     fontFamily: paneProps.fontFamily?.() || undefined,
-    fontSize: paneProps.fontSize?.() ?? 13,
+    fontSize: paneProps.fontSize?.() ?? 14,
   };
 }
 

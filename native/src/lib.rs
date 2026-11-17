@@ -1,6 +1,7 @@
 //! Aed's native crate: the terminal (`TerminalSession` + `aed.terminal`
-//! view) and the runtime design-token bridge (`setTokens`).
-//! DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」.
+//! view), runtime design-token bridge (`setTokens`), and off-thread TextMate
+//! syntax highlighter (`highlightCode`).
+//! DESIGN.md「内置 PTY 终端与 Ghostty 配置探测」·「文件预览与 Mermaid 渲染契约」.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +11,7 @@ use nsh_core::prelude::*;
 mod ffi;
 #[cfg(target_os = "macos")]
 mod grid;
+pub mod highlight;
 #[cfg(target_os = "macos")]
 mod keys;
 mod log;
@@ -40,9 +42,18 @@ impl ThemeTokensBridge {
         let next = merged_tokens(&tokens(), &colors);
         nsh_core::prelude::set_tokens(next);
     }
+
+    /// Highlights `text` up to `max_lines` with TextMate (`syntect` + `two-face`)
+    /// on a blocking worker thread, returning flat `[line, start_col, end_col, role]`
+    /// UTF-16 quads (`1..=10`).
+    pub async fn highlight_code(text: String, language: String, max_lines: u32) -> Vec<u32> {
+        nsh_core::prelude::blocking(move || highlight::parse(&text, &language, max_lines as usize))
+            .await
+            .unwrap_or_default()
+    }
 }
 
-/// Aed's native exports: `TerminalSession` and `setTokens`.
+/// Aed's native exports: `TerminalSession`, `setTokens`, and `highlightCode`.
 #[native_module("aed/native")]
 fn native(registry: &mut Registry) {
     registry.class::<session::TerminalSession>();

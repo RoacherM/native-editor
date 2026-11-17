@@ -205,18 +205,104 @@ describe("PreviewPane, mode pills & Quick Open pure contracts", () => {
     const mutedNum = app.spanStyle("id:preview-editor >> text:2");
     expect(mutedNum.color).toBe("#565f8999");
 
-    // Inline style on EditorDecoration paints exact theme syntax colors (updating live across theme switches).
+    // Inline style on EditorDecoration paints exact theme syntax colors at crisp 400 regular weight.
     await app.waitUntil(
       () => app.spanStyle("id:preview-editor >> text:export").color === "#bb9af7ff",
       { timeout: 1500 },
     );
     const kwSpan = app.spanStyle("id:preview-editor >> text:export");
     expect(kwSpan.color).toBe("#bb9af7ff");
-    expect(kwSpan.fontWeight).toBe(600);
+    expect(kwSpan.fontWeight).toBe(400);
 
     // FindBar opens with framed search input.
     await app.keyboard.press("mod+f");
     await app.waitFor("id:editor-find-input");
     expect(app.shows("id:editor-find-input")).toBe(true);
+  });
+
+  test("Editor uses native syntect without Allsum #c4a7ff/#6fd3d8 leakage across Python f-strings, docstrings, decorators, and Bash", async () => {
+    const { TerminalSession } = await import("aed/native");
+    const tmpDir = `/tmp/aed-syntax-e2e-${Date.now().toString(36)}`;
+    const pyPath = `${tmpDir}/model.py`;
+    const shPath = `${tmpDir}/run.sh`;
+    const pyText = [
+      "@dataclass",
+      "class User:",
+      '    """Docstring line',
+      '    with in for and not inside."""',
+      "    def greet(self, x: int = 1) -> Optional[str]:",
+      '        msg = f"hello {user.name}"',
+      "        if x:",
+      "            return msg",
+      "        else:",
+      '            return "no"',
+      "",
+    ].join("\n");
+    const shText = 'if [[ -n "$FOO" ]]; then\n  echo "ok"\nfi\n';
+
+    const sh = new TerminalSession(40, 500);
+    try {
+      const pyB64 = Buffer.from(pyText, "utf8").toString("base64");
+      const shB64 = Buffer.from(shText, "utf8").toString("base64");
+      sh.start({
+        shell: "/bin/sh",
+        cwd: "/tmp",
+        termProgram: "aed-test",
+        resourcesDir: "",
+      });
+      sh.write(
+        new TextEncoder().encode(
+          `mkdir -p ${tmpDir} && printf '%s' '${pyB64}' | base64 -D > ${pyPath} && printf '%s' '${shB64}' | base64 -D > ${shPath} && printf '__AED_''READY__\\n'\n`,
+        ),
+      );
+      while (!sh.screenText().includes("__AED_READY__")) {
+        const ev = await sh.nextEvent();
+        if (ev.kind === "exit" || ev.kind === "closed") break;
+      }
+
+      const bashApp = await open("../App.tsx", {
+        platform: "macos",
+        width: 1280,
+        height: 800,
+        storage: { "aed.theme": "industrial-carbon" },
+        host: { params: { openFile: shPath } },
+      });
+      await bashApp.waitFor("id:preview-editor");
+      await bashApp.waitUntil(
+        () => bashApp.spanStyle("id:preview-editor >> text:echo").color === "#dfbe7dff",
+        { timeout: 1200 },
+      );
+      expect(bashApp.spanStyle("id:preview-editor >> text:[[").color).toBe("#dfbe7dff");
+      expect(bashApp.spanStyle("id:preview-editor >> text:if").color).toBe("#e66850ff");
+      expect(bashApp.spanStyle("id:preview-editor >> text:if").fontWeight).toBe(400);
+
+      const pyApp = await open("../App.tsx", {
+        platform: "macos",
+        width: 1280,
+        height: 800,
+        storage: { "aed.theme": "industrial-carbon" },
+        host: { params: { openFile: pyPath } },
+      });
+      await pyApp.waitFor("id:preview-editor");
+      await pyApp.waitUntil(
+        () => pyApp.spanStyle("id:preview-editor >> text:name").color === "#b8c4cfff",
+        { timeout: 1500 },
+      );
+      expect(pyApp.spanStyle("id:preview-editor >> text:dataclass").color).toBe("#dfbe7dff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:User").color).toBe("#8ab4c9ff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:greet").color).toBe("#dfbe7dff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:greet").fontWeight).toBe(400);
+      expect(pyApp.spanStyle("id:preview-editor >> text:self").color).toBe("#d98a6cff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:self").fontWeight).toBe(400);
+      expect(pyApp.spanStyle("id:preview-editor >> text:user").color).toBe("#ede8deff");
+      expect(pyApp.spanStyle('id:preview-editor >> text:"""Docstring line').color).toBe("#706b62ff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:def").color).toBe("#e66850ff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:def").fontWeight).toBe(400);
+      expect(pyApp.spanStyle("id:preview-editor >> text:else").color).toBe("#e66850ff");
+      expect(pyApp.spanStyle("id:preview-editor >> text:Optional").color).toBe("#8ab4c9ff");
+    } finally {
+      sh.write(new TextEncoder().encode(`rm -rf ${tmpDir}\n`));
+      sh.close();
+    }
   });
 });

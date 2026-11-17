@@ -1,4 +1,4 @@
-import { setTokens } from "aed/native";
+import { highlightCode, setTokens } from "aed/native";
 import type { TextStyle } from "nsh";
 import type { EditorDecoration, EditorStyles, EditorToken } from "nsh/base";
 import { createLruCache } from "./classify";
@@ -57,14 +57,14 @@ export interface EditorTheme {
 
 function buildSyntaxClasses(syntax: SyntaxPalette): SyntaxClasses {
   return {
-    keyword: `text-[${syntax.keyword}] font-semibold`,
+    keyword: `text-[${syntax.keyword}]`,
     string: `text-[${syntax.string}]`,
     number: `text-[${syntax.number}]`,
     comment: `text-[${syntax.comment}] italic`,
     property: `text-[${syntax.property}]`,
-    type: `text-[${syntax.type}] font-semibold`,
+    type: `text-[${syntax.type}]`,
     function: `text-[${syntax.function}]`,
-    constant: `text-[${syntax.constant}] font-semibold`,
+    constant: `text-[${syntax.constant}]`,
     operator: `text-[${syntax.operator}]`,
     tag: `text-[${syntax.tag}]`,
   };
@@ -103,16 +103,16 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       statusBarForeground: "#d9d3c7",
     },
     syntax: {
-      keyword: "#c62d14",
-      string: "#4d5e2e",
-      number: "#b45309",
-      comment: "#8c8578",
-      property: "#2f4b63",
-      type: "#141414",
-      function: "#141414",
-      constant: "#c62d14",
+      keyword: "#bf3219",
+      string: "#3f5e2a",
+      number: "#9e4710",
+      comment: "#857e72",
+      property: "#38586e",
+      type: "#24527a",
+      function: "#7c4f15",
+      constant: "#9e4710",
       operator: "#6d685f",
-      tag: "#c62d14",
+      tag: "#bf3219",
     },
   }),
   defineTheme({
@@ -135,16 +135,16 @@ export const EDITOR_THEMES: readonly EditorTheme[] = [
       statusBarForeground: "#a39c90",
     },
     syntax: {
-      keyword: "#f06a4f",
-      string: "#b5c28f",
+      keyword: "#e66850",
+      string: "#a9be82",
       number: "#e0a96d",
-      comment: "#6f6a61",
-      property: "#9fb4c7",
-      type: "#ede8de",
-      function: "#ede8de",
-      constant: "#f06a4f",
-      operator: "#8f897e",
-      tag: "#f06a4f",
+      comment: "#706b62",
+      property: "#b8c4cf",
+      type: "#8ab4c9",
+      function: "#dfbe7d",
+      constant: "#d98a6c",
+      operator: "#948e82",
+      tag: "#e66850",
     },
   }),
   defineTheme({
@@ -470,7 +470,7 @@ const CODE_KEYWORDS = new Set([
 
 const CODE_CONSTANTS = new Set([
   "true", "false", "null", "undefined", "NaN", "Infinity",
-  "True", "False", "None", "self", "this", "super", "nil", "iota",
+  "True", "False", "None", "self", "cls", "this", "super", "nil", "iota",
 ]);
 
 const CODE_TYPES = new Set([
@@ -621,9 +621,7 @@ function decorateJsonLine(
     }
   );
   pushRegexMatches(out, lineIdx, maskedLine, JSON_NUMBER_REGEX, palette.number, "number");
-  pushRegexMatches(out, lineIdx, maskedLine, JSON_CONST_REGEX, palette.constant, "built", {
-    bold: true,
-  });
+  pushRegexMatches(out, lineIdx, maskedLine, JSON_CONST_REGEX, palette.constant, "built");
 }
 
 function nextNonSpaceIndex(lineText: string, from: number): number {
@@ -648,7 +646,7 @@ function decorateConfigLine(
   }
   const end = lineText.trimEnd();
   if (first === 91 && end.endsWith("]")) {
-    out.push(makeDeco(lineIdx, indent, lineText.length, palette.tag, "title", { bold: true }));
+    out.push(makeDeco(lineIdx, indent, lineText.length, palette.tag, "title"));
     return;
   }
   pushRegexMatches(out, lineIdx, lineText, CONFIG_KEY_REGEX, palette.property, "attr", {
@@ -685,13 +683,44 @@ function decorateSubtitleLine(
   palette: SyntaxPalette
 ): void {
   if (SUBTITLE_INDEX_REGEX.test(lineText)) {
-    out.push(makeDeco(lineIdx, 0, lineText.length, palette.number, "number", { bold: true }));
+    out.push(makeDeco(lineIdx, 0, lineText.length, palette.number, "number"));
     return;
   }
   if (lineText.includes("-->")) {
     out.push(makeDeco(lineIdx, 0, lineText.length, palette.property, "attr"));
   }
 }
+
+const COLON_PROP_LANGS = new Set([
+  "javascript",
+  "jsx",
+  "typescript",
+  "tsx",
+  "css",
+  "scss",
+  "sass",
+  "less",
+  "vue",
+  "svelte",
+  "rust",
+  "go",
+  "swift",
+  "graphql",
+  "hcl",
+]);
+
+const TRIPLE_QUOTE_LANGS = new Set([
+  "python",
+  "py",
+  "toml",
+  "graphql",
+  "kotlin",
+  "swift",
+  "julia",
+  "elixir",
+]);
+
+const CODE_DECORATOR_REGEX = /@[A-Za-z_][A-Za-z0-9_.]*/g;
 
 function isPropertyColon(lineText: string, endCol: number): boolean {
   const afterIdx = nextNonSpaceIndex(lineText, endCol);
@@ -702,11 +731,9 @@ function classifyCodeIdentifier(
   word: string,
   lineText: string,
   endCol: number,
+  allowColonProp: boolean,
   palette: SyntaxPalette
-): { color: string; token: EditorToken; bold?: boolean } | null {
-  if (isPropertyColon(lineText, endCol)) {
-    return { color: palette.property, token: "attr" };
-  }
+): { color: string; token: EditorToken } | null {
   if (CODE_KEYWORDS.has(word)) {
     return { color: palette.keyword, token: "keyword" };
   }
@@ -718,6 +745,9 @@ function classifyCodeIdentifier(
   }
   if (lineText.charCodeAt(endCol) === 40) {
     return { color: palette.function, token: "title" };
+  }
+  if (allowColonProp && isPropertyColon(lineText, endCol)) {
+    return { color: palette.property, token: "attr" };
   }
   return null;
 }
@@ -731,6 +761,89 @@ const HASH_COMMENT_LANGS = new Set([
   "perl",
   "r",
 ]);
+
+interface TripleQuoteState {
+  delim: '"""' | "'''" | null;
+}
+
+function emitTripleSpan(
+  out: EditorDecoration[],
+  lineIdx: number,
+  start: number,
+  end: number,
+  isPython: boolean,
+  palette: SyntaxPalette
+): void {
+  if (out.length >= MAX_DECORATIONS || start >= end) return;
+  if (isPython) {
+    out.push(makeDeco(lineIdx, start, end, palette.comment, "comment", { italic: true }));
+  } else {
+    out.push(makeDeco(lineIdx, start, end, palette.string, "string"));
+  }
+}
+
+function pickEarlierQuote(
+  doubleIdx: number,
+  singleIdx: number
+): { idx: number; delim: '"""' | "'''" } | null {
+  if (doubleIdx >= 0 && (singleIdx < 0 || doubleIdx < singleIdx)) {
+    return { idx: doubleIdx, delim: '"""' };
+  }
+  return singleIdx >= 0 ? { idx: singleIdx, delim: "'''" } : null;
+}
+
+function rewindStringPrefix(lineText: string, quoteIdx: number): number {
+  let start = quoteIdx;
+  while (start > 0 && quoteIdx - start < 2 && "rRfFbBuU".includes(lineText[start - 1])) {
+    start -= 1;
+  }
+  return start > 0 && /\w/.test(lineText[start - 1]) ? quoteIdx : start;
+}
+
+function maskSpan(text: string, start: number, end: number): string {
+  return text.slice(0, start) + " ".repeat(end - start) + text.slice(end);
+}
+
+function maskTripleQuotes(
+  out: EditorDecoration[],
+  lineIdx: number,
+  lineText: string,
+  isPython: boolean,
+  palette: SyntaxPalette,
+  state: TripleQuoteState
+): string {
+  let masked = lineText;
+  let cursor = 0;
+  if (state.delim !== null) {
+    const close = masked.indexOf(state.delim, 0);
+    if (close < 0) {
+      emitTripleSpan(out, lineIdx, 0, masked.length, isPython, palette);
+      return " ".repeat(masked.length);
+    }
+    const end = close + 3;
+    emitTripleSpan(out, lineIdx, 0, end, isPython, palette);
+    masked = maskSpan(masked, 0, end);
+    state.delim = null;
+    cursor = end;
+  }
+  if (masked.charCodeAt(nextNonSpaceIndex(masked, cursor)) === 35) return masked;
+  let hit = pickEarlierQuote(masked.indexOf('"""', cursor), masked.indexOf("'''", cursor));
+  while (hit !== null && out.length < MAX_DECORATIONS) {
+    const start = rewindStringPrefix(masked, hit.idx);
+    const close = masked.indexOf(hit.delim, hit.idx + 3);
+    if (close < 0) {
+      emitTripleSpan(out, lineIdx, start, masked.length, isPython, palette);
+      state.delim = hit.delim;
+      return maskSpan(masked, start, masked.length);
+    }
+    const end = close + 3;
+    emitTripleSpan(out, lineIdx, start, end, isPython, palette);
+    masked = maskSpan(masked, start, end);
+    cursor = end;
+    hit = pickEarlierQuote(masked.indexOf('"""', cursor), masked.indexOf("'''", cursor));
+  }
+  return masked;
+}
 
 function extractStringsAndComments(
   out: EditorDecoration[],
@@ -763,25 +876,55 @@ function extractStringsAndComments(
   );
 }
 
+function extractDecorators(
+  out: EditorDecoration[],
+  lineIdx: number,
+  maskedCode: string,
+  palette: SyntaxPalette
+): string {
+  if (!maskedCode.includes("@")) return maskedCode;
+  CODE_DECORATOR_REGEX.lastIndex = 0;
+  return maskedCode.replace(CODE_DECORATOR_REGEX, (full, offset: number) => {
+    if (out.length < MAX_DECORATIONS) {
+      out.push(makeDeco(lineIdx, offset, offset + full.length, palette.function, "title"));
+    }
+    return " ".repeat(full.length);
+  });
+}
+
 function decorateCodeLine(
   out: EditorDecoration[],
   lineIdx: number,
   lineText: string,
   language: string,
-  palette: SyntaxPalette
+  palette: SyntaxPalette,
+  tripleState?: TripleQuoteState
 ): void {
-  const maskedCode = extractStringsAndComments(out, lineIdx, lineText, language, palette);
+  const afterTriple =
+    tripleState && TRIPLE_QUOTE_LANGS.has(language)
+      ? maskTripleQuotes(
+          out,
+          lineIdx,
+          lineText,
+          language === "python" || language === "py",
+          palette,
+          tripleState
+        )
+      : lineText;
+  const afterStrings = extractStringsAndComments(out, lineIdx, afterTriple, language, palette);
+  const maskedCode = extractDecorators(out, lineIdx, afterStrings, palette);
   pushRegexMatches(out, lineIdx, maskedCode, CODE_TAG_REGEX, palette.tag, "keyword");
   pushRegexMatches(out, lineIdx, maskedCode, CODE_NUMBER_REGEX, palette.number, "number");
 
+  const allowColonProp = COLON_PROP_LANGS.has(language);
   CODE_WORD_REGEX.lastIndex = 0;
   let match = CODE_WORD_REGEX.exec(maskedCode);
   while (match !== null && out.length < MAX_DECORATIONS) {
     const word = match[0];
     const endCol = match.index + word.length;
-    const hit = classifyCodeIdentifier(word, maskedCode, endCol, palette);
+    const hit = classifyCodeIdentifier(word, maskedCode, endCol, allowColonProp, palette);
     if (hit) {
-      out.push(makeDeco(lineIdx, match.index, endCol, hit.color, hit.token, { bold: hit.bold }));
+      out.push(makeDeco(lineIdx, match.index, endCol, hit.color, hit.token));
     }
     match = CODE_WORD_REGEX.exec(maskedCode);
   }
@@ -835,9 +978,10 @@ function decorateBoundedLines(
   lang: string,
   palette: SyntaxPalette
 ): EditorDecoration[] {
+  const tripleState: TripleQuoteState = { delim: null };
   const decorateLine: LineDecorator =
     SPECIAL_LINE_DECORATORS[lang] ??
-    ((acc, idx, line, pal) => decorateCodeLine(acc, idx, line, lang, pal));
+    ((acc, idx, line, pal) => decorateCodeLine(acc, idx, line, lang, pal, tripleState));
   const out: EditorDecoration[] = [];
   let pos = 0;
   let lineIdx = 0;
@@ -899,4 +1043,117 @@ export function computeSyntaxDecorations(
     SYNTAX_DECORATION_CACHE.set(slotKey, { headSlice, decos });
   }
   return decos;
+}
+
+const MAX_NATIVE_LINES = 3000;
+const FALLBACK_ONLY_LANGS = new Set(["srt", "vtt", "mermaid"]);
+
+interface RoleSpec {
+  key: keyof SyntaxPalette;
+  token: EditorToken;
+  italic?: boolean;
+}
+
+const NATIVE_ROLE_SPECS: readonly (RoleSpec | null)[] = [
+  null,
+  { key: "comment", token: "comment", italic: true },
+  { key: "keyword", token: "keyword" },
+  { key: "string", token: "string" },
+  { key: "number", token: "number" },
+  { key: "function", token: "title" },
+  { key: "type", token: "built" },
+  { key: "constant", token: "built" },
+  { key: "property", token: "attr" },
+  { key: "operator", token: "keyword" },
+  { key: "tag", token: "keyword" },
+];
+
+type RoleTemplate = Pick<EditorDecoration, "token" | "class" | "style">;
+
+function buildRoleTemplates(palette: SyntaxPalette): (RoleTemplate | null)[] {
+  return NATIVE_ROLE_SPECS.map((spec) => {
+    if (!spec) return null;
+    const sample = makeDeco(0, 0, 1, palette[spec.key], spec.token, { italic: spec.italic });
+    return { token: sample.token, class: sample.class, style: sample.style };
+  });
+}
+
+/** Convert flat `[line, startCol, endCol, role]` UTF-16 quads from `aed/native` into `EditorDecoration`s. */
+export function decodeNativeSyntaxQuads(
+  quads: readonly number[],
+  syntaxClassesOrTheme: SyntaxPalette | EditorTheme
+): EditorDecoration[] {
+  if (quads.length < 4) return [];
+  const templates = buildRoleTemplates(resolveSyntaxPalette(syntaxClassesOrTheme));
+  const out: EditorDecoration[] = [];
+  const limit = Math.min(quads.length - (quads.length % 4), MAX_DECORATIONS * 4);
+  for (let i = 0; i < limit; i += 4) {
+    const tpl = templates[quads[i + 3]];
+    if (tpl) {
+      out.push({
+        range: {
+          start: { line: quads[i], column: quads[i + 1] },
+          end: { line: quads[i], column: quads[i + 2] },
+        },
+        token: tpl.token,
+        ...(tpl.class ? { class: tpl.class } : {}),
+        ...(tpl.style ? { style: tpl.style } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+interface CachedNativeQuads {
+  headSlice: string;
+  quads: number[];
+}
+
+const NATIVE_QUADS_CACHE = createLruCache<string, CachedNativeQuads>(
+  MAX_DECORATION_CACHE_ENTRIES
+);
+
+function buildNativeQuadKey(headSlice: string, lang: string, cacheKey?: string): string | null {
+  if (headSlice.length > MAX_CACHEABLE_HEAD_LEN) return null;
+  if (cacheKey) return `nq:${cacheKey.split("\0")[0]}\0${lang}`;
+  return `nu:${lang}\0${headSlice}`;
+}
+
+async function fetchNativeQuads(
+  headSlice: string,
+  lang: string,
+  quadKey: string | null
+): Promise<number[]> {
+  if (quadKey) {
+    const cached = NATIVE_QUADS_CACHE.get(quadKey);
+    if (cached && cached.headSlice === headSlice) return cached.quads;
+  }
+  const quads = await highlightCode(headSlice, lang, MAX_NATIVE_LINES);
+  if (quadKey) NATIVE_QUADS_CACHE.set(quadKey, { headSlice, quads });
+  return quads;
+}
+
+/**
+ * Highlights up to 3,000 lines asynchronously via `aed/native` TextMate (`syntect` + `two-face`)
+ * on a blocking worker thread, falling back to `computeSyntaxDecorations` without a mounted Core.
+ */
+export async function highlightSyntaxAsync(
+  text: string,
+  language: string,
+  syntaxClassesOrTheme: SyntaxPalette | EditorTheme,
+  cacheKey?: string
+): Promise<EditorDecoration[]> {
+  if (!text || language === "plaintext") return [];
+  const lang = language.toLowerCase();
+  if (FALLBACK_ONLY_LANGS.has(lang)) {
+    return computeSyntaxDecorations(text, lang, syntaxClassesOrTheme, cacheKey);
+  }
+  const headSlice = sliceHeadLines(text, MAX_NATIVE_LINES);
+  const quadKey = buildNativeQuadKey(headSlice, lang, cacheKey);
+  try {
+    const quads = await fetchNativeQuads(headSlice, lang, quadKey);
+    return decodeNativeSyntaxQuads(quads, syntaxClassesOrTheme);
+  } catch {
+    return computeSyntaxDecorations(text, lang, syntaxClassesOrTheme, cacheKey);
+  }
 }

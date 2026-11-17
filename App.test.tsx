@@ -612,7 +612,7 @@ describe("Aed E2E desktop UI, multimedia preview & Ghostty terminal", () => {
     await app.press("id:font-size-inc");
     expect(app.shows("text:15px")).toBe(true);
     await app.press("id:font-reset-btn");
-    expect(app.shows("text:13px")).toBe(true);
+    expect(app.shows("text:14px")).toBe(true);
     await app.press("id:font-dialog-close");
 
     // 13. Quick Open + Markdown WebView preview & standalone .mmd Mermaid block + Copy
@@ -1932,8 +1932,8 @@ describe("races and silent failures (I-017)", () => {
     await app.keyboard.press("mod+,");
     await app.waitFor("text:16px");
     await app.keyboard.press("mod+0");
-    await app.waitFor("text:13px");
-    expect(app.storage()["aed.fontSize"]).toBe("13");
+    await app.waitFor("text:14px");
+    expect(app.storage()["aed.fontSize"]).toBe("14");
     expect(app.storage()["aed.fontFamily"]).toBe("Menlo");
   });
 

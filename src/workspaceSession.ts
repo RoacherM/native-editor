@@ -92,7 +92,7 @@ import {
 } from "./workspace";
 
 const DEFAULT_FONT_FAMILY = "JetBrainsMono Nerd Font Mono";
-const DEFAULT_FONT_SIZE = 13;
+const DEFAULT_FONT_SIZE = 14;
 const DISK_CHECK_MS = 1500;
 const WORKSPACE_POLL_MS = 2000;
 const WORKSPACE_POLL_MAX_MS = 10000;
